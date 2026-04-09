@@ -1,0 +1,132 @@
+# Build on Linux
+
+## Prerequisites
+
+The following dependencies are required to build the project.
+
+| Name                                                | Version      | Usage           | Import         |
+| --------------------------------------------------- | ------------ | --------------- | -------------- |
+| [CMake](https://cmake.org/download/)                | >=3.26       | build system    | system install |
+| [XMake](https://xmake.io/)                          | >=3.0.5      | build system    | system install |
+| [Python](https://www.python.org/downloads/)         | >=3.11       | build system    | system install |
+| [Cuda](https://developer.nvidia.com/cuda-downloads) | >=12.4       | GPU programming | system install |
+| [Vcpkg](https://github.com/microsoft/vcpkg)         | >=2025.7.25  | package manager | git clone      |
+
+## Install Vcpkg
+
+If you haven't installed Vcpkg, you can clone the repository with the following command:
+
+```shell
+mkdir ~/Toolchain
+cd ~/Toolchain
+git clone https://github.com/microsoft/vcpkg.git
+cd vcpkg
+./bootstrap-vcpkg.sh
+```
+
+## Clone Libuipc
+
+Clone the repository with the following command:
+
+```shell
+git clone https://github.com/spiriMirror/libuipc.git
+```
+
+## Conda Environment
+
+We **recommend** using conda environments to build the project on Linux.
+
+```shell
+conda env create -f conda/env.yaml
+conda activate uipc_env
+```
+
+Please make sure your **Nvidia driver** is compatible with the installed Cuda version.
+
+https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html
+
+You can check your nvidia driver version with the following command.
+
+```shell
+nvidia-smi
+```
+
+You can set the `CMAKE_TOOLCHAIN_FILE` environment variable in the conda environment with the following command:
+
+```shell
+conda env config vars set CMAKE_TOOLCHAIN_FILE=~/Toolchain/vcpkg/scripts/buildsystems/vcpkg.cmake
+```
+
+It's **important** to set the environment variable in the conda environment, so that CMake can find the Vcpkg toolchain file when building the project.
+
+## Build Libuipc
+
+Build the project with the following commands.
+
+```shell
+conda activate uipc_env
+cd libuipc; mkdir build; cd build
+cmake -S .. -DUIPC_BUILD_PYBIND=1 -DCMAKE_BUILD_TYPE=<Release/RelWithDebInfo> 
+cmake --build . -j8
+```
+
+!!!NOTE
+    Use multi-thread to speed up the build process as possible, becasue the NVCC compiler will take a lot of time.
+
+## Build Libuipc with XMake
+
+If you prefer XMake over CMake, use the following commands.
+
+```shell
+cd libuipc
+xmake f -c
+xmake build -j8
+```
+
+Enable Python bindings with the following configuration.
+
+```shell
+cd libuipc
+xmake f --pybind=true --python_system=true --python_version=3.11.x -c
+xmake build -j8
+xmake pack -v
+```
+
+If you are building inside another Python virtual environment, replace `3.11.x` with the version you want XMake to resolve.
+
+The build outputs are placed under `build/`, and the staged Python package is generated in `build/.xpack/pyuipc`.
+
+## Run Project
+
+Just run the executable files in `build/<Release/RelWithDebInfo>/bin` folder.
+
+## Install Pyuipc
+
+With `UIPC_BUILD_PYBIND` option set to `ON`, the Python binding will be **built** and **installed** in the specified Python environment.
+
+If some **errors** occur during the installation, you can try to **manually** install the Python binding.
+
+```shell
+cd build/python
+pip install .
+```
+
+## Check Installation
+
+You can run the `uipc_info.py` to check if the `Pyuipc` is installed correctly.
+
+```shell
+cd libuipc/python
+python uipc_info.py
+```
+
+More samples are at [Pyuipc Samples](https://github.com/spiriMirror/libuipc-samples).
+
+## Install in Any Python Venv
+
+If you want to install the Pyuipc to any Python Venv (like [uv](https://docs.astral.sh/uv/)) after build, you can use the following command:
+
+```shell
+cmake -S .. -DUIPC_BUILD_PYBIND=1 -DUIPC_PYTHON_EXECUTABLE_PATH=<YOUR_PYTHON_EXECUTABLE_PATH> -DCMAKE_BUILD_TYPE=<Release/RelWithDebInfo>
+cmake --build .  -j8
+```

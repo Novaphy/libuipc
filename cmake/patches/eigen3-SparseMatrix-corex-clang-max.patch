@@ -1,0 +1,12 @@
+--- Eigen/src/SparseCore/SparseMatrix.h
++++ Eigen/src/SparseCore/SparseMatrix.h
+@@ -1441,7 +1441,9 @@
+       //  1) reduce multiple minor realloc when the matrix is almost filled
+       //  2) avoid to allocate too much memory when the matrix is almost empty
+-      reallocRatio = (std::min)((std::max)(reallocRatio,1.5),8.);
++      // Corex Clang CUDA: avoid ambiguous std::max with cuda_wrappers/algorithm (float vs double).
++      reallocRatio = std::min(std::max(reallocRatio, static_cast<double>(1.5)),
++                                static_cast<double>(8.));
+     }
+   }
+   m_data.resize(m_data.size()+1,reallocRatio);

@@ -1,0 +1,277 @@
+Fetching registry information from https://github.com/microsoft/vcpkg (HEAD)...
+Fetching registry information from https://github.com/spiriMirror/vcpkg (master)...
+Detecting compiler hash for triplet x64-linux...
+Compiler found: /usr/bin/c++
+The following packages will be built and installed:
+  * boost-assert:x64-linux@1.88.0 -- git+https://github.com/microsoft/vcpkg@d6e23ac8a35da1fa74839bde3a863d279a6059a3
+  * boost-cmake:x64-linux@1.88.0 -- git+https://github.com/microsoft/vcpkg@1a36be4443ec1c0be66984a1e82914a5181b37b1
+  * boost-config:x64-linux@1.88.0 -- git+https://github.com/microsoft/vcpkg@08220601e68293ce84acafc748856e45db90b6e0
+  * boost-core:x64-linux@1.88.0 -- git+https://github.com/microsoft/vcpkg@4c65d7305461035adb983409910487493fbc3c17
+  * boost-headers:x64-linux@1.88.0 -- git+https://github.com/microsoft/vcpkg@89fca00b9db236eb0cb0ea97b9db246c2db7b3e1
+  * boost-optional:x64-linux@1.88.0 -- git+https://github.com/microsoft/vcpkg@1c8c7aa2e1a750a5faf818b3bc8e0491f415b489
+  * boost-static-assert:x64-linux@1.88.0 -- git+https://github.com/microsoft/vcpkg@2cb92121f4df9c9b122c4837cb8e41ac1f4800b6
+  * boost-throw-exception:x64-linux@1.88.0 -- git+https://github.com/microsoft/vcpkg@cce052773fa40ae37c9497cf38739945720cf104
+  * boost-type-traits:x64-linux@1.88.0 -- git+https://github.com/microsoft/vcpkg@5c25a4ff2c1fd4d4eb993dfed7cba2b32fd020a6
+  * boost-uninstall:x64-linux@1.88.0 -- git+https://github.com/microsoft/vcpkg@3b2f9f82076f2d15124a4e449700848c25bcadcc
+    catch2:x64-linux@3.8.1 -- git+https://github.com/microsoft/vcpkg@663b04662ae30cc321b1b1a0c781c9f4a3d29b93
+  * console-bridge:x64-linux@1.0.2 -- git+https://github.com/microsoft/vcpkg@e5f1141775543ea0491358a281840ce2bcc100be
+    cppitertools:x64-linux@2.2 -- git+https://github.com/microsoft/vcpkg@7ed0b0e14e29b9d30f9ae606ae2a7ef6c3dce0f8
+    cpptrace:x64-linux@1.0.2 -- git+https://github.com/microsoft/vcpkg@48649f4a79fe4083e34178f73cb8a422fbb03b04
+    dylib:x64-linux@2.2.1 -- git+https://github.com/microsoft/vcpkg@5fcb0f058217dc6352d308f18015ef37b3f5f23c
+    eigen3:x64-linux@3.4.0#5 -- git+https://github.com/microsoft/vcpkg@d9b547a9e3dc5b847f5ecab763fdea9728107a16
+    fmt:x64-linux@10.2.1 -- git+https://github.com/microsoft/vcpkg@405156a2b01c91258bf66768ceb3ae75c1caba7f
+  * libdwarf:x64-linux@2.1.0 -- git+https://github.com/microsoft/vcpkg@85261e682a6aa0820be75bf415562f526630a121
+    libigl:x64-linux@2.6.0 -- git+https://github.com/microsoft/vcpkg@3b47fec68bb327d7372d5a8d2c5418482fc60fdf
+    magic-enum:x64-linux@0.9.7#1 -- git+https://github.com/microsoft/vcpkg@9ab95f56c0327e8b6c0190fae3d975439161ffaa
+    nlohmann-json:x64-linux@3.12.0 -- git+https://github.com/microsoft/vcpkg@060c829772d52e920fee94cf84755031c61e3b67
+    octree:x64-linux@2025.10.7 -- git+https://github.com/spiriMirror/vcpkg@4c09ac8d87807dd61f561d6392eb2f780a433bad
+    spdlog:x64-linux@1.12.0 -- git+https://github.com/microsoft/vcpkg@41cf31aa350a44644863d7777489501d240f248c
+  * stb:x64-linux@2024-07-29#1 -- git+https://github.com/microsoft/vcpkg@c362152d1d02973e7b1ce777960f8a6876656560
+    tbb:x64-linux@2022.1.0 -- git+https://github.com/microsoft/vcpkg@2d847cfd21c285d0c77182456b82de69d2123325
+    tinygltf:x64-linux@2.9.6 -- git+https://github.com/microsoft/vcpkg@c5edbac51522b64ff965ab1365cf5482c54d5a29
+  * tinyxml:x64-linux@2.6.2#10 -- git+https://github.com/microsoft/vcpkg@4463cb1a60eed81cb34748d54b2ad5e3b8ed3a08
+    urdfdom:x64-linux@3.1.1 -- git+https://github.com/microsoft/vcpkg@eb1c1a30329b850ac4450d3b1a72166697058bb8
+  * urdfdom-headers:x64-linux@1.1.1 -- git+https://github.com/microsoft/vcpkg@092b0a254c20195ecca315045637a1e7aed2a244
+  * vcpkg-boost:x64-linux@2025-03-29 -- git+https://github.com/microsoft/vcpkg@858b0333b773b5650c3f19ef271e3205542d7ceb
+  * vcpkg-cmake:x64-linux@2024-04-23 -- git+https://github.com/microsoft/vcpkg@e74aa1e8f93278a8e71372f1fa08c3df420eb840
+  * vcpkg-cmake-config:x64-linux@2024-05-23 -- git+https://github.com/microsoft/vcpkg@97a63e4bc1a17422ffe4eff71da53b4b561a7841
+  * zlib:x64-linux@1.3.1 -- git+https://github.com/microsoft/vcpkg@3f05e04b9aededb96786a911a16193cdb711f0c9
+  * zstd:x64-linux@1.5.7 -- git+https://github.com/microsoft/vcpkg@31b7320fab13790c6861cb3c2d50dc8f60ca3602
+Additional packages (*) will be modified to complete this operation.
+Restored 34 package(s) from /root/.cache/vcpkg/archives in 1.1 s. Use --debug to see more details.
+Installing 1/34 vcpkg-cmake-config:x64-linux@2024-05-23...
+vcpkg-cmake-config:x64-linux@2024-05-23 package ABI: f71394f4d87c7a3f2dd202ad23941137804705edc6dcf7db380e9ffb48e22c1e
+Elapsed time to handle vcpkg-cmake-config:x64-linux: 5.63 ms
+Installing 2/34 vcpkg-cmake:x64-linux@2024-04-23...
+vcpkg-cmake:x64-linux@2024-04-23 package ABI: 15939ada25ea0649c987ab0fe4a94cdf5293620e4be788b0778de9989bd5cd34
+Elapsed time to handle vcpkg-cmake:x64-linux: 5.59 ms
+Installing 3/34 catch2:x64-linux@3.8.1...
+catch2:x64-linux@3.8.1 package ABI: 37fd5d7a30c8ad1b07ebf5384ed4ff578eabb35f0cd07202d82ded05536bc7fc
+Elapsed time to handle catch2:x64-linux: 40.8 ms
+Installing 4/34 vcpkg-boost:x64-linux@2025-03-29...
+vcpkg-boost:x64-linux@2025-03-29 package ABI: 1b4a97900ac7722f0c1dcf4e26225088ca2adf3652a2184fbf9eee8e63071983
+Elapsed time to handle vcpkg-boost:x64-linux: 5.11 ms
+Installing 5/34 boost-uninstall:x64-linux@1.88.0...
+boost-uninstall:x64-linux@1.88.0 package ABI: 1dd96d6ae9ac197a890b020fc07d1333e544fff32bfae7e0ac3eff466ea6050e
+Elapsed time to handle boost-uninstall:x64-linux: 4.72 ms
+Installing 6/34 boost-cmake:x64-linux@1.88.0...
+boost-cmake:x64-linux@1.88.0 package ABI: 4074019e8f5d06675d02d2996c845917d3a05d45a382fec4f316d368e1171bf2
+Elapsed time to handle boost-cmake:x64-linux: 6.62 ms
+Installing 7/34 boost-headers:x64-linux@1.88.0...
+boost-headers:x64-linux@1.88.0 package ABI: b341fcec2023ceed559798d9f46ef4453697ff882bf494d717dda8671c4e7366
+Elapsed time to handle boost-headers:x64-linux: 6.4 ms
+Installing 8/34 boost-config:x64-linux@1.88.0...
+boost-config:x64-linux@1.88.0 package ABI: d9688790e17c9cb5a9baf9785154e3465d57dc343a264bd677b67c0855838d54
+Elapsed time to handle boost-config:x64-linux: 51.6 ms
+Installing 9/34 boost-static-assert:x64-linux@1.88.0...
+boost-static-assert:x64-linux@1.88.0 package ABI: f07b338ba83fa631598b54d411aaa9b01ae06fb84cf096ba16582305eb865218
+Elapsed time to handle boost-static-assert:x64-linux: 6.89 ms
+Installing 10/34 boost-type-traits:x64-linux@1.88.0...
+boost-type-traits:x64-linux@1.88.0 package ABI: 957c732488671ff713f2afcc291d703b0e967d76e3510e3e8d68f8b4c01ffb76
+Elapsed time to handle boost-type-traits:x64-linux: 46.6 ms
+Installing 11/34 boost-assert:x64-linux@1.88.0...
+boost-assert:x64-linux@1.88.0 package ABI: 2c690e1bd00cc7cd52ba820a1785357e05844ce5db76dbf88bfaf2d57da11563
+Elapsed time to handle boost-assert:x64-linux: 7.38 ms
+Installing 12/34 boost-throw-exception:x64-linux@1.88.0...
+boost-throw-exception:x64-linux@1.88.0 package ABI: 75ed8267fc20b8ad5b3398bb9f2ccca982aaceb0ce301b2089ddacdcbec9533b
+Elapsed time to handle boost-throw-exception:x64-linux: 7.06 ms
+Installing 13/34 boost-core:x64-linux@1.88.0...
+boost-core:x64-linux@1.88.0 package ABI: 80e39249609e25b2d4bc0150db07d42d39baf72f887e91ed7fba71952afb3a83
+Elapsed time to handle boost-core:x64-linux: 21.5 ms
+Installing 14/34 boost-optional:x64-linux@1.88.0...
+boost-optional:x64-linux@1.88.0 package ABI: b25882dbe2d6896f52cb25c5f667742aadd89118be85c477f366c7e0e5e64db8
+Elapsed time to handle boost-optional:x64-linux: 10.3 ms
+Installing 15/34 cppitertools:x64-linux@2.2...
+cppitertools:x64-linux@2.2 package ABI: 4e26c5fe5f8ffaf59fd3a6312f87835dd614764be0a2f805ccaebe85c867223e
+Elapsed time to handle cppitertools:x64-linux: 13.8 ms
+Installing 16/34 zstd:x64-linux@1.5.7...
+zstd:x64-linux@1.5.7 package ABI: 2dba35c1c809cbea5a1245b1b307c78e85da77fb4e35098ea72c86036482daf4
+Elapsed time to handle zstd:x64-linux: 9.74 ms
+Installing 17/34 zlib:x64-linux@1.3.1...
+zlib:x64-linux@1.3.1 package ABI: 8cff9593947b3b75314a5d0c454c23c90969a29c47fd6aeee96a32c6e6abea21
+Elapsed time to handle zlib:x64-linux: 8.68 ms
+Installing 18/34 libdwarf:x64-linux@2.1.0...
+libdwarf:x64-linux@2.1.0 package ABI: 184caee222817125b1bced8829e8ebf1a247561440793d09e95606ec0d827c8c
+Elapsed time to handle libdwarf:x64-linux: 12.3 ms
+Installing 19/34 cpptrace:x64-linux@1.0.2...
+cpptrace:x64-linux@1.0.2 package ABI: 9f60cec4fdc3c2e7c8d437cf29d22b07e75d715438a0d552c7e121d04e20177a
+Elapsed time to handle cpptrace:x64-linux: 11.7 ms
+Installing 20/34 dylib:x64-linux@2.2.1...
+dylib:x64-linux@2.2.1 package ABI: 8e0567dce28bd2c4cc9db580229ebdc74cad8cd9e2a29add45689bcb4b18eff3
+Elapsed time to handle dylib:x64-linux: 9.3 ms
+Installing 21/34 eigen3:x64-linux@3.4.0#5...
+eigen3:x64-linux@3.4.0#5 package ABI: 38ec21e1a34f72bfe11af3fdbb4ed8383657e3afcab576f20a667765ead2ad37
+Elapsed time to handle eigen3:x64-linux: 131 ms
+Installing 22/34 fmt:x64-linux@10.2.1...
+fmt:x64-linux@10.2.1 package ABI: c6a38257673ad82647aa358701caf79b0220a125769ca304690c14cfa9f63dcb
+Elapsed time to handle fmt:x64-linux: 13.1 ms
+Installing 23/34 stb:x64-linux@2024-07-29#1...
+stb:x64-linux@2024-07-29#1 package ABI: cab0f1f604a1412bd5884bf30b7167fb4bbc098aa2c74885ed80f7fa3f993d4b
+Elapsed time to handle stb:x64-linux: 12.4 ms
+Installing 24/34 libigl:x64-linux@2.6.0...
+libigl:x64-linux@2.6.0 package ABI: 9f6979dea2302d19c103b1cb26a374ce934045d43bae9e795017bf43aca7894a
+Elapsed time to handle libigl:x64-linux: 199 ms
+Installing 25/34 magic-enum:x64-linux@0.9.7#1...
+magic-enum:x64-linux@0.9.7#1 package ABI: 1d0657c493445461c676e9d1ca71f2c70f7383f807d65cee0d8f9be7890d6d2e
+Elapsed time to handle magic-enum:x64-linux: 11.8 ms
+Installing 26/34 nlohmann-json:x64-linux@3.12.0...
+nlohmann-json:x64-linux@3.12.0 package ABI: 6168b33571be754127fcee3f050b3750a3f09297492c0fe52f9ba046516a8876
+Elapsed time to handle nlohmann-json:x64-linux: 17.8 ms
+Installing 27/34 octree:x64-linux@2025.10.7...
+octree:x64-linux@2025.10.7 package ABI: 22185b096ade78fcf06fa4a6a6a73f8caa00c90bad79e82737f664ce29c37deb
+Elapsed time to handle octree:x64-linux: 11 ms
+Installing 28/34 spdlog:x64-linux@1.12.0...
+spdlog:x64-linux@1.12.0 package ABI: 096b13ab3c0443b1aaeafb9a5572a002a88867e1a01f27b3482d91aad0f23a66
+Elapsed time to handle spdlog:x64-linux: 24.6 ms
+Installing 29/34 tbb:x64-linux@2022.1.0...
+tbb:x64-linux@2022.1.0 package ABI: d2f242de49e6016f18337f42dd3059cd8584214b3f0d5b69c9f90431ae9c7d21
+Elapsed time to handle tbb:x64-linux: 32.9 ms
+Installing 30/34 tinygltf:x64-linux@2.9.6...
+tinygltf:x64-linux@2.9.6 package ABI: 35fe4c1dcb92655a1e7a9db8da577238c630a38ed9bffdf9bbea6c2f6558618a
+Elapsed time to handle tinygltf:x64-linux: 8.89 ms
+Installing 31/34 urdfdom-headers:x64-linux@1.1.1...
+urdfdom-headers:x64-linux@1.1.1 package ABI: 62fad1fa71cf6064d92f3aef37915c525feabd79dfa471a1024c94f63d3cba20
+Elapsed time to handle urdfdom-headers:x64-linux: 16.4 ms
+Installing 32/34 tinyxml:x64-linux@2.6.2#10...
+tinyxml:x64-linux@2.6.2#10 package ABI: df7208dccd0c8aa98eafc4dfad24167fdccc9380e1d63ee7a2a940960d0ebd1b
+Elapsed time to handle tinyxml:x64-linux: 10.9 ms
+Installing 33/34 console-bridge:x64-linux@1.0.2...
+console-bridge:x64-linux@1.0.2 package ABI: 5977dbfbf1a766b0a1a0078c9829b986af3aee09060b903a3453faf30a667f91
+Elapsed time to handle console-bridge:x64-linux: 12.4 ms
+Installing 34/34 urdfdom:x64-linux@3.1.1...
+urdfdom:x64-linux@3.1.1 package ABI: c206957c9f70ed6dcdfe5d95b84bc097075ac8b9db346190fc922f545afaf846
+Elapsed time to handle urdfdom:x64-linux: 17.7 ms
+Installed contents are licensed to you by owners. Microsoft is not responsible for, nor does it grant any licenses to, third-party packages.
+Some packages did not declare an SPDX license. Check the `copyright` file for each package for more information about their licensing.
+Packages installed in this vcpkg installation declare the following licenses:
+(BSD-3-Clause OR GPL-2.0-only)
+(MIT OR CC-PDDC)
+Apache-2.0
+BSD-2-Clause
+BSD-3-Clause
+BSL-1.0
+MIT
+MPL-2.0
+Zlib
+catch2 provides CMake targets:
+
+  # this is heuristically generated, and may not be correct
+  find_package(Catch2 CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE Catch2::Catch2 Catch2::Catch2WithMain)
+
+catch2 provides pkg-config modules:
+
+  # A modern, C++-native test framework for C++14 and above (links in default main)
+  catch2-with-main
+
+  # A modern, C++-native, test framework for C++14 and above
+  catch2
+
+cppitertools provides CMake targets:
+
+  # this is heuristically generated, and may not be correct
+  find_package(cppitertools CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE cppitertools::cppitertools)
+
+cpptrace provides CMake targets:
+
+  find_package(cpptrace CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE cpptrace::cpptrace)
+
+dylib is header-only and can be used from CMake via:
+
+  find_path(DYLIB_INCLUDE_DIRS "dylib.hpp")
+  target_include_directories(main PRIVATE ${DYLIB_INCLUDE_DIRS})
+
+dylib provides pkg-config modules:
+
+  # C++ cross-platform wrapper around dynamic loading of shared libraries
+  dylib
+
+eigen3 provides CMake targets:
+
+  # this is heuristically generated, and may not be correct
+  find_package(Eigen3 CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE Eigen3::Eigen)
+
+eigen3 provides pkg-config modules:
+
+  # A C++ template library for linear algebra: vectors, matrices, and related algorithms
+  eigen3
+
+The package fmt provides CMake targets:
+
+    find_package(fmt CONFIG REQUIRED)
+    target_link_libraries(main PRIVATE fmt::fmt)
+
+    # Or use the header-only version
+    find_package(fmt CONFIG REQUIRED)
+    target_link_libraries(main PRIVATE fmt::fmt-header-only)
+
+libigl provides CMake targets:
+
+  # this is heuristically generated, and may not be correct
+  find_package(libigl CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE igl::igl_core igl_copyleft::igl_copyleft_core)
+
+magic-enum provides CMake targets:
+
+    find_package(magic_enum CONFIG REQUIRED)
+    target_link_libraries(main PRIVATE magic_enum::magic_enum)
+
+The package nlohmann-json provides CMake targets:
+
+    find_package(nlohmann_json CONFIG REQUIRED)
+    target_link_libraries(main PRIVATE nlohmann_json::nlohmann_json)
+
+The package nlohmann-json can be configured to not provide implicit conversions via a custom triplet file:
+
+    set(nlohmann-json_IMPLICIT_CONVERSIONS OFF)
+
+For more information, see the docs here:
+    
+    https://json.nlohmann.me/api/macros/json_use_implicit_conversions/
+
+Octree provides CMake targets:
+
+    find_package(Octree CONFIG REQUIRED)
+    target_link_libraries(main PRIVATE Octree::Octree)
+
+The package spdlog provides CMake targets:
+
+    find_package(spdlog CONFIG REQUIRED)
+    target_link_libraries(main PRIVATE spdlog::spdlog)
+
+    # Or use the header-only version
+    find_package(spdlog CONFIG REQUIRED)
+    target_link_libraries(main PRIVATE spdlog::spdlog_header_only)
+
+tbb provides CMake targets:
+
+  # this is heuristically generated, and may not be correct
+  find_package(TBB CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE TBB::tbb TBB::tbbmalloc)
+
+tbb provides pkg-config modules:
+
+  # C++ library for parallel programming on multi-core processors.
+  tbb
+
+tinygltf is header-only and can be used from CMake via:
+
+  find_path(TINYGLTF_INCLUDE_DIRS "tiny_gltf.h")
+  target_include_directories(main PRIVATE ${TINYGLTF_INCLUDE_DIRS})
+
+urdfdom provides CMake targets:
+
+  # this is heuristically generated, and may not be correct
+  find_package(urdfdom CONFIG REQUIRED)
+  # note: 1 additional targets are not displayed.
+  target_link_libraries(main PRIVATE urdfdom::urdf_parser urdfdom::urdfdom_model urdfdom::urdfdom_world urdfdom::urdfdom_sensor)
+
+urdfdom provides pkg-config modules:
+
+  # Unified Robot Description Format
+  urdfdom
+
+All requested installations completed successfully in: 835 ms

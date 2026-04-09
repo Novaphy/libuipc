@@ -1,0 +1,56 @@
+{
+    "version": 6,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 26,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "ci-base",
+            "hidden": true,
+            "displayName": "base Configuration",
+            "description": "Default build using Ninja generator",
+            "generator": "Ninja",
+            "cacheVariables": {
+                "UIPC_USING_LOCAL_VCPKG": "ON",
+                "UIPC_BUILD_GUI": "OFF",
+                "UIPC_BUILD_PYBIND": "OFF",
+                "UIPC_BUILD_EXAMPLES": "ON",
+                "UIPC_BUILD_TESTS": "ON",
+                "UIPC_BUILD_BENCHMARKS": "ON",
+                "UIPC_DEV_MODE": "OFF",
+                "UIPC_WITH_CUDA_BACKEND": "ON"
+            }
+        },
+        {
+            "name": "ci-release",
+            "displayName": "Generate vcpkg.json",
+            "inherits": "ci-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "ci-build-wheel",
+            "displayName": "Config Pybind Release",
+            "description": "Release build with Python bindings enabled",
+            "inherits": "ci-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "UIPC_BUILD_PYTHON_WHEEL": "ON",
+                "UIPC_BUILD_PYBIND": "ON"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "ci-release",
+            "configurePreset": "ci-release"
+        },
+        {
+            "name": "ci-build-wheel",
+            "configurePreset": "ci-build-wheel"
+        }
+    ]
+}

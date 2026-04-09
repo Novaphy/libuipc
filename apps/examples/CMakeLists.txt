@@ -1,0 +1,4 @@
+add_subdirectory(hello_affine_body)
+add_subdirectory(hello_simplicial_complex)
+add_subdirectory(corex_demo)
+add_subdirectory(wrecking_ball)
