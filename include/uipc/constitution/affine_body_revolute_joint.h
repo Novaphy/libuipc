@@ -52,6 +52,34 @@ class UIPC_CONSTITUTION_API AffineBodyRevoluteJoint final : public InterAffineBo
                   span<IndexT>                             r_instance_id,
                   span<Float>                              strength_ratio);
 
+    /**
+     * @brief Build a 1-D SimplicialComplex of N edges (2*N vertices) from
+     * parallel hinge endpoint arrays and apply the revolute joint attributes.
+     */
+    geometry::SimplicialComplex create_geometry(
+        span<const Vector3>                      position0s,
+        span<const Vector3>                      position1s,
+        span<S<geometry::SimplicialComplexSlot>> l_geo_slots,
+        span<IndexT>                             l_instance_ids,
+        span<S<geometry::SimplicialComplexSlot>> r_geo_slots,
+        span<IndexT>                             r_instance_ids,
+        span<Float>                              strength_ratios);
+
+    /**
+     * @brief Build a SimplicialComplex from per-side hinge endpoint positions
+     * (left and right may differ) and apply the revolute joint attributes.
+     */
+    geometry::SimplicialComplex create_geometry(
+        span<const Vector3>                      l_position0,
+        span<const Vector3>                      l_position1,
+        span<const Vector3>                      r_position0,
+        span<const Vector3>                      r_position1,
+        span<S<geometry::SimplicialComplexSlot>> l_geo_slots,
+        span<IndexT>                             l_instance_ids,
+        span<S<geometry::SimplicialComplexSlot>> r_geo_slots,
+        span<IndexT>                             r_instance_ids,
+        span<Float>                              strength_ratios);
+
 
   private:
     virtual U64 get_uid() const noexcept override;
