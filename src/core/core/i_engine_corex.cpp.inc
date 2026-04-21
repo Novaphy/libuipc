@@ -1,6 +1,3 @@
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-#  include "i_engine_corex.cpp.inc"
-#else
 #include <uipc/core/i_engine.h>
 #include <dylib.hpp>
 
@@ -56,8 +53,6 @@ const FeatureCollection& IEngine::features() const
     return get_features();
 }
 
-
-
 Json IEngine::do_to_json() const
 {
     return Json{};
@@ -80,7 +75,5 @@ void IEngine::insert_sanity_checkers(ISanityCheckerCollection& collection)
 
 void IEngine::do_insert_sanity_checkers(ISanityCheckerCollection& collection)
 {
-    // default no-op: backends override to insert their own sanity checkers
 }
 }  // namespace uipc::core
-#endif

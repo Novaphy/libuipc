@@ -35,6 +35,8 @@ class UIPC_CORE_API Engine final : public std::enable_shared_from_this<Engine>
 
     static Json default_config();
 
+    void insert_sanity_checkers(ISanityCheckerCollection& collection);
+
   private:
     friend class internal::World;
     // only be called by internal::world

@@ -1,6 +1,5 @@
 #include <uipc/diff_sim/sparse_coo_view.h>
 #include <uipc/common/zip.h>
-#include <Eigen/Sparse>
 #include <iostream>
 namespace uipc::diff_sim
 {
@@ -46,7 +45,7 @@ Matrix<Float, Eigen::Dynamic, Eigen::Dynamic> SparseCOOView::to_dense() const
     return dense;
 }
 
-Eigen::SparseMatrix<Float, Eigen::ColMajor, IndexT> SparseCOOView::to_sparse() const
+Eigen::SparseMatrix<Float> SparseCOOView::to_sparse() const
 {
     std::vector<Eigen::Triplet<Float>> triplets;
     triplets.reserve(m_row_indices.size());
@@ -54,7 +53,7 @@ Eigen::SparseMatrix<Float, Eigen::ColMajor, IndexT> SparseCOOView::to_sparse() c
     {
         triplets.emplace_back(i, j, v);
     }
-    Eigen::SparseMatrix<Float, Eigen::ColMajor, IndexT> sparse(m_shape(0), m_shape(1));
+    Eigen::SparseMatrix<Float> sparse(m_shape(0), m_shape(1));
     sparse.setFromTriplets(triplets.begin(), triplets.end());
     return sparse;
 }

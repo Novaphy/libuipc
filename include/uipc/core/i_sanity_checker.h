@@ -16,9 +16,19 @@ namespace uipc::backend
 class SanityCheckMessageVisitor;
 }
 
+namespace uipc::geometry
+{
+class SimplicialComplex;
+class GeometrySlot;
+class AttributeCollection;
+}  // namespace uipc::geometry
+
 namespace uipc::core
 {
 class Scene;
+class Object;
+class ContactTabular;
+class SubsceneTabular;
 
 enum class SanityCheckResult : int
 {
@@ -80,11 +90,44 @@ class UIPC_CORE_API SanityCheckerCollectionCreateInfo
     std::string_view workspace;
 };
 
+class ISanityCheckContext;
+
 class UIPC_CORE_API ISanityCheckerCollection
 {
   public:
     virtual ~ISanityCheckerCollection()          = default;
     virtual void build(core::internal::Scene& s) = 0;
+    /**
+     * @brief Insert a backend-supplied checker. If a checker with the same
+     *        id is already present, the new one replaces it (used by the
+     *        cuda backend to override default CPU checkers).
+     */
+    virtual void insert(S<ISanityChecker> checker) = 0;
     virtual SanityCheckResult check(SanityCheckMessageCollection& msg) const = 0;
+    virtual ISanityCheckContext& context() = 0;
+};
+
+/**
+ * @brief Interface that exposes per-check execution context to backend
+ *        sanity checkers.
+ *
+ * Implemented by uipc::sanity_check::Context. Each backend sanity checker
+ * receives a reference to this interface in its constructor (see
+ * REGISTER_BACKEND_SANITY_CHECKER macro) and uses it to discover scene
+ * geometry, object metadata and configuration without depending on the
+ * concrete sanity_check module.
+ */
+class UIPC_CORE_API ISanityCheckContext
+{
+  public:
+    virtual ~ISanityCheckContext()                                                = default;
+    virtual const geometry::SimplicialComplex& scene_simplicial_surface() const noexcept = 0;
+    virtual const ContactTabular&              contact_tabular() const noexcept   = 0;
+    virtual const SubsceneTabular&             subscene_tabular() const noexcept  = 0;
+    virtual std::string_view                   workspace() const                  = 0;
+    virtual S<const Object>                    find_object(IndexT id) const       = 0;
+    virtual span<S<geometry::GeometrySlot>>    geometries() const                 = 0;
+    virtual S<geometry::GeometrySlot>          find_geometry(IndexT id) const     = 0;
+    virtual const geometry::AttributeCollection& config() const                   = 0;
 };
 }  // namespace uipc::core

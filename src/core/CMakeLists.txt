@@ -5,7 +5,10 @@ find_package(fmt CONFIG REQUIRED)
 find_package(cppitertools CONFIG REQUIRED)
 find_package(magic_enum CONFIG REQUIRED)
 find_path(DYLIB_INCLUDE_DIRS "dylib.hpp")
-find_package(dylib CONFIG REQUIRED)
+# dylib v3 (corex env) ships a CONFIG package; dylib v2 (upstream NVIDIA env)
+# is header-only with no CONFIG. Try the package quietly so both work; the
+# linkage below uses if(TARGET ...) so absence of dylib::dylib is fine.
+find_package(dylib CONFIG QUIET)
 find_path(TINYGLTF_INCLUDE_DIRS "tiny_gltf.h")
 find_package(cpptrace CONFIG REQUIRED)
 
@@ -17,6 +20,9 @@ target_compile_features(uipc_core PUBLIC cxx_std_20)
 # set the compile definitions
 # ------------------------------------------------------------------------------
 target_compile_definitions(uipc_core PRIVATE UIPC_CORE_EXPORT_DLL=1) # export dll
+if(UIPC_USE_FLOAT)
+    target_compile_definitions(uipc_core PUBLIC UIPC_FLOAT_SCALAR=1)
+endif()
 # if debug build or release build with debug info, enable uipc runtime check
 target_compile_definitions(uipc_core PUBLIC 
     $<$<CONFIG:Debug>:UIPC_RUNTIME_CHECK=1>
@@ -54,6 +60,22 @@ target_link_libraries(uipc_core PUBLIC
 
 if(TARGET dylib::dylib)
     target_link_libraries(uipc_core PUBLIC dylib::dylib)
+endif()
+
+if(UIPC_MUDA_USE_COREX)
+    # Corex env: vcpkg dylib v3 is not header-only; link the compiled library
+    # if available. NVIDIA env relies on dylib::dylib target (above) or pure
+    # header-only dylib v2.
+    if(EXISTS "${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/libdylib.a")
+        target_link_libraries(uipc_core PUBLIC "${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/libdylib.a")
+    elseif(EXISTS "/root/vcpkg/offline_installed_fresh/x64-linux/lib/libdylib.a")
+        target_link_libraries(uipc_core PUBLIC "/root/vcpkg/offline_installed_fresh/x64-linux/lib/libdylib.a")
+    endif()
+    # Tell switcher overlays in core/{i_engine,internal/engine,internal/world,
+    # sanity_checker,world}.cpp to pull in their _corex.cpp.inc sidecars
+    # (dylib v3 API). NVIDIA env (UIPC_MUDA_USE_COREX=OFF) leaves the macro
+    # undefined so /root/src verbatim (dylib v2 API) is compiled.
+    target_compile_definitions(uipc_core PUBLIC UIPC_COREX_CUDA10_COMPAT=1)
 endif()
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")

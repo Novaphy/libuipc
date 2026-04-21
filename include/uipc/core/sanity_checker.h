@@ -4,6 +4,7 @@
 namespace uipc::core::internal
 {
 class Scene;
+class Engine;
 }
 
 namespace uipc::core
@@ -13,7 +14,7 @@ class Scene;
 class UIPC_CORE_API SanityChecker final
 {
   public:
-    SanityChecker(internal::Scene& scene, std::string_view workspace);
+    SanityChecker(internal::Scene& scene, internal::Engine& engine);
     ~SanityChecker();
 
     SanityCheckResult check();
@@ -30,7 +31,7 @@ class UIPC_CORE_API SanityChecker final
     core::SanityCheckMessageCollection m_warns;
     core::SanityCheckMessageCollection m_infos;
 
-    internal::Scene& m_scene;
-    std::string      m_workspace;
+    internal::Scene&  m_scene;
+    internal::Engine& m_engine;
 };
 }  // namespace uipc::core

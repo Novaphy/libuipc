@@ -1,8 +1,15 @@
 #pragma once
 #include <Eigen/Core>
+#include <cstdint>
 namespace uipc
 {
-using Float  = double;
+#if defined(UIPC_FLOAT_SCALAR)
+using Float = float;
+static_assert(sizeof(Float) == 4, "UIPC_FLOAT_SCALAR requires float");
+#else
+using Float = double;
+static_assert(sizeof(Float) == 8, "default Float is double");
+#endif
 using IndexT = int32_t;
 using SizeT  = std::size_t;
 using I32    = int32_t;

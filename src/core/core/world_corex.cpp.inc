@@ -1,6 +1,3 @@
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-#  include "world_corex.cpp.inc"
-#else
 #include <uipc/core/world.h>
 #include <uipc/core/engine.h>
 #include <uipc/backend/visitors/world_visitor.h>
@@ -82,4 +79,3 @@ const SanityChecker& World::sanity_checker() const
     return m_internal->sanity_checker();
 }
 }  // namespace uipc::core
-#endif

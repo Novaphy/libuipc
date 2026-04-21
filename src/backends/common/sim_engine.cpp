@@ -1,5 +1,6 @@
 #include <backends/common/sim_engine.h>
 #include <backends/common/sim_system_auto_register.h>
+#include <backends/common/sanity_checker_auto_register.h>
 #include <backends/common/module.h>
 #include <filesystem>
 #include <fstream>
@@ -14,6 +15,7 @@ namespace uipc::backend
 SimEngine::SimEngine(EngineCreateInfo* info)
     : m_workspace(info->workspace)
 {
+    logger::info("[backend] SimEngine base ctor enter, workspace={}", m_workspace);
 }
 
 Json SimEngine::do_to_json() const
@@ -382,5 +384,19 @@ bool SimEngine::do_recover(SizeT dst_frame)
     }
 
     return all_success;
+}
+
+void SimEngine::do_insert_sanity_checkers(core::ISanityCheckerCollection& collection)
+{
+    auto& creators = SanityCheckerAutoRegister::creators().entries;
+    logger::info("Backend [{}] insert_sanity_checkers: {} registered checker(s)",
+                 BackendPathTool::backend_name(),
+                 creators.size());
+    if(creators.empty())
+        return;
+
+    auto& ctx = collection.context();
+    for(auto& creator : creators)
+        collection.insert(creator(ctx));
 }
 }  // namespace uipc::backend
