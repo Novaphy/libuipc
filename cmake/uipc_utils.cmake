@@ -57,6 +57,7 @@ function(uipc_show_options)
 
     message(STATUS "    * UIPC_WITH_VDB_SUPPORT: ${UIPC_WITH_VDB_SUPPORT}")
     message(STATUS "    * UIPC_PYTHON_EXECUTABLE_PATH: ${UIPC_PYTHON_EXECUTABLE_PATH}")
+    message(STATUS "    * UIPC_USE_FLOAT: ${UIPC_USE_FLOAT}")
 
     message(STATUS "Backend Options:")
     message(STATUS "    * UIPC_WITH_CUDA_BACKEND: ${UIPC_WITH_CUDA_BACKEND}")

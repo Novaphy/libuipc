@@ -3,4 +3,10 @@
 	url = https://github.com/MuGdxy/SymEigen.git
 [submodule "external/muda"]
 	path = external/muda
-	url = https://github.com/MuGdxy/muda.git
+	url = file:///root/libuipc/external/muda
+[submodule "external/GKlib"]
+	path = external/GKlib
+	url = file:///root/libuipc/external/GKlib
+[submodule "external/METIS"]
+	path = external/METIS
+	url = file:///root/libuipc/external/METIS
