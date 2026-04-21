@@ -70,12 +70,18 @@ jobs:
 
       - name: Setup vcpkg
         id: vcpkg
+        # NOTE: revision must match VCPKG_BASE_LINE in scripts/gen_vcpkg_json.py
+        # (vcpkg tag 2025.7.25). Using `master` causes vcpkg to ignore the
+        # baseline declared in vcpkg-configuration.json and pull whatever is
+        # latest, which on Windows breaks because the master tip ships
+        # dylib v3+ whose dylibConfig.cmake unconditionally requires PkgConfig
+        # (not present on the windows-2022 runner image).
         uses: johnwason/vcpkg-action@v6
         with:
           manifest-dir: "${{ github.workspace }}/build"
           triplet: ${{ matrix.os == 'windows-2022' && 'x64-windows-release' || 'x64-linux' }}
-          cache-key: ${{ matrix.os }}
-          revision: master
+          cache-key: ${{ matrix.os }}-2025-07-25
+          revision: dd3097e305afa53f7b4312371f62058d2e665320
           token: ${{ github.token }}
           github-binarycache: true
           fetch-depth: "0"
