@@ -1,0 +1,121 @@
+library,symbol,binary,matrix_class,typical_result_corex_cudart10x,notes
+cuBLAS,cublasCreate,corex_cublas_inventory,A,PASS,handle create success
+cuBLAS,cublasSetStream,corex_cublas_inventory,A,PASS,
+cuBLAS,cublasSetPointerMode,corex_cublas_inventory,A,PASS,
+cuBLAS,cublasDotEx,corex_cublas_inventory,A,PASS,n=64 vs CPU; stride incx=2 incy=3 where API allows; NOT_SUPPORTED logs WARN then no numeric assert
+cuBLAS,cublasSdot,corex_cublas_inventory,A,PASS,n=64 vs CPU; stride incx=2 incy=3
+cuBLAS,cublasSnrm2,corex_cublas_inventory,A,PASS,n=64 vs CPU; incx=2
+cuBLAS,cublasDestroy,corex_cublas_inventory,A,PASS,
+cuBLAS,cublasDdot,corex_cublas_inventory,B,WARN_NOT_SUPPORTED,Corex libcublas often NOT_SUPPORTED; no FAIL if unsupported
+cuBLAS,cublasDnrm2,corex_cublas_inventory,B,WARN_NOT_SUPPORTED,same as Ddot
+cuBLAS,cublasNrm2Ex,corex_cublas_inventory,D,SKIPPED_VERSION,only compiled when CUDART_VERSION>=11000; else stderr WARN skip
+cuSPARSE,cusparseCreate,corex_cusparse_inventory,A,PASS,
+cuSPARSE,cusparseSetStream,corex_cusparse_inventory,A,PASS,
+cuSPARSE,cusparseSetPointerMode,corex_cusparse_inventory,A,PASS,
+cuSPARSE,cusparseCreateCsr,corex_cusparse_inventory,A,PASS,
+cuSPARSE,cusparseCreateDnVec,corex_cusparse_inventory,A,PASS,multiple CASE blocks CSR/COO
+cuSPARSE,cusparseSpMV,corex_cusparse_inventory,"A+C",WARN_COMPAT,"32x32 diag CSR/COO this round; generic cusparseSpMV often all-zero vs CPU on Corex10.2 while legacy cusparseScsrmv matches CPU per element (compat WARN); API returns SUCCESS"
+cuSPARSE,cusparseDestroyDnVec,corex_cusparse_inventory,A,PASS,
+cuSPARSE,cusparseDestroySpMat,corex_cusparse_inventory,A,PASS,
+cuSPARSE,cusparseCreateCoo,corex_cusparse_inventory,A,PASS,
+cuSPARSE,cusparseCreateMatDescr,corex_cusparse_inventory,A,PASS,multiple invocations BSR/bsr2csr
+cuSPARSE,cusparseSetMatType,corex_cusparse_inventory,A,PASS,
+cuSPARSE,cusparseSetMatIndexBase,corex_cusparse_inventory,A,PASS,
+cuSPARSE,cusparseSetMatDiagType,corex_cusparse_inventory,A,PASS,
+cuSPARSE,cusparseSbsrmv,corex_cusparse_inventory,A,WARN_COMPAT,"PASS on reference stack; else compat WARN vs hx"
+cuSPARSE,cusparseDbsrmv,corex_cusparse_inventory,A,WARN_COMPAT,"PASS on reference stack; else compat WARN vs hx"
+cuSPARSE,cusparseSbsr2csr,corex_cusparse_inventory,A,WARN_COMPAT,"PASS when CSR expands to I2; else compat WARN"
+cuSPARSE,cusparseDbsr2csr,corex_cusparse_inventory,A,WARN_COMPAT,same
+cuSPARSE,cusparseCreateSpVec,corex_cusparse_inventory,A,PASS,
+cuSPARSE,cusparseDestroySpVec,corex_cusparse_inventory,A,PASS,
+cuSPARSE,cusparseDestroy,corex_cusparse_inventory,A,PASS,
+cuSPARSE,cusparseScsrmv,corex_cusparse_inventory,(ref),PASS,legacy CSR SpMV ref for generic SpMV; n=32 per-element vs CPU; not a separate CASE line
+cuSOLVER,cusolverDnCreate,corex_cusolver_inventory,A,PASS,
+cuSOLVER,cusolverDnSetStream,corex_cusolver_inventory,A,PASS,
+cuSOLVER,cusolverDnXpotrf_bufferSize,corex_cusolver_inventory,D,NOT_RUN_ON_10X,compiled only if CUDART>=11; on 10.x legacy Dpotrf branch runs instead
+cuSOLVER,cusolverDnXpotrf,corex_cusolver_inventory,D,NOT_RUN_ON_10X,same
+cuSOLVER,cusolverDnXpotrs,corex_cusolver_inventory,D,NOT_RUN_ON_10X,same
+cuSOLVER,cusolverDnDpotrf_bufferSize,corex_cusolver_inventory,B,WARN_NOT_SUPPORTED,ixsolver may warn not supported
+cuSOLVER,cusolverDnDpotrf,corex_cusolver_inventory,B,WARN_NOT_SUPPORTED,
+cuSOLVER,cusolverDnDpotrs,corex_cusolver_inventory,B,WARN_NOT_SUPPORTED,
+cuSOLVER,cusolverDnDgetrf_bufferSize,corex_cusolver_inventory,A,PASS,8x8 well-conditioned A this round
+cuSOLVER,cusolverDnDgetrf,corex_cusolver_inventory,A,PASS,8x8 Dgetrf; same A as bufferSize case
+cuSOLVER,cusolverDnDgetrs,corex_cusolver_inventory,B,WARN_NOT_SUPPORTED,"Corex ixsolver: often NOT_SUPPORTED; 8x8 CPU ref (cpu_dense_solve_rowmajor) skipped when no SUCCESS"
+cuSOLVER,cusolverDnCreateParams,corex_cusolver_inventory,D,SKIPPED_VERSION,CUDART>=11 only
+cuSOLVER,cusolverDnSetAdvOptions,corex_cusolver_inventory,D,SKIPPED_VERSION,same
+cuSOLVER,cusolverDnXgetrf_bufferSize,corex_cusolver_inventory,D,SKIPPED_VERSION,same
+cuSOLVER,cusolverDnXgetrf,corex_cusolver_inventory,D,SKIPPED_VERSION,same
+cuSOLVER,cusolverDnXgetrs,corex_cusolver_inventory,D,SKIPPED_VERSION,same
+cuSOLVER,cusolverDnDestroyParams,corex_cusolver_inventory,D,SKIPPED_VERSION,same
+cuSOLVER,cusolverDnDestroy,corex_cusolver_inventory,A,PASS,
+cuSOLVER,cusolverSpCreate,corex_cusolver_inventory,B,WARN_NOT_SUPPORTED,
+cuSOLVER,cusolverSpSetStream,corex_cusolver_inventory,B,NOT_RUN_IF_SP_FAIL,only if Sp create succeeds
+cuSOLVER,cusolverSpScsrlsvqr,corex_cusolver_inventory,B,NOT_RUN_IF_SP_FAIL,
+cuSOLVER,cusolverSpDcsrlsvqr,corex_cusolver_inventory,B,NOT_RUN_IF_SP_FAIL,
+cuSOLVER,cusolverSpDestroy,corex_cusolver_inventory,B,NOT_RUN_IF_SP_FAIL,
+Runtime,cudaGetDeviceCount,corex_runtime_extended,A,PASS,
+Runtime,cudaGetDeviceProperties,corex_runtime_extended,A,PASS,
+Runtime,cudaGetDevice,corex_runtime_extended,A,PASS,
+Runtime,cudaSetDevice,corex_runtime_extended,A,PASS,
+Runtime,cudaGetLastError,corex_runtime_extended,A,PASS,
+Runtime,cudaGetErrorName,corex_runtime_extended,A,PASS,
+Runtime,cudaGetErrorString,corex_runtime_extended,A,PASS,
+Runtime,cudaStreamCreateWithFlags,corex_runtime_extended,A,PASS,
+Runtime,cudaMallocAsync,corex_runtime_extended,D,SKIPPED_VERSION,only if CUDART>=11020 else WARN skip
+Runtime,cudaFreeAsync,corex_runtime_extended,D,SKIPPED_VERSION,same
+Runtime,cudaMalloc,corex_runtime_extended,A,PASS,multiple CASE blocks
+Runtime,cudaMemcpyAsync,corex_runtime_extended,A,PASS,512 floats 1D path this round
+Runtime,cudaMemsetAsync,corex_runtime_extended,A,PASS,clears first 128 floats then readback vs expected
+Runtime,cudaStreamSynchronize,corex_runtime_extended,A,PASS,
+Runtime,cudaMallocPitch,corex_runtime_extended,A,PASS,16x16 float plane
+Runtime,cudaMemcpy2DAsync,corex_runtime_extended,A,PASS,
+Runtime,cudaMemset2DAsync,corex_runtime_extended,A,PASS,zeros first 8 rows; spot-check row 15 vs host
+Runtime,cudaMalloc3D,corex_runtime_extended,A,PASS,extent 8*sizeof(float) x4x4
+Runtime,cudaMemcpy3DAsync,corex_runtime_extended,A,PASS,pitched host h1 layout 8x8
+Runtime,cudaMemset3DAsync,corex_runtime_extended,A,PASS,subvolume corner zero then sample
+Runtime,cudaMemcpy,corex_runtime_extended,A,PASS,
+Runtime,cudaMemset,corex_runtime_extended,A,PASS,
+Runtime,cudaEventCreateWithFlags,corex_runtime_extended,A,PASS,two CASE blocks
+Runtime,cudaEventRecord,corex_runtime_extended,A,PASS,
+Runtime,cudaEventRecordWithFlags,corex_runtime_extended,D,SKIPPED_VERSION,CUDART>=11000 else stand-in Record + WARN
+Runtime,cudaStreamWaitEvent,corex_runtime_extended,A,PASS,
+Runtime,cudaEventQuery,corex_runtime_extended,A,PASS,
+Runtime,cudaEventSynchronize,corex_runtime_extended,A,PASS,
+Runtime,cudaEventElapsedTime,corex_runtime_extended,A,PASS,
+Runtime,cudaEventDestroy,corex_runtime_extended,A,PASS,two CASE blocks
+Runtime,cudaStreamAddCallback,corex_runtime_extended,A,PASS,
+Runtime,cudaLaunchHostFunc,corex_runtime_extended,A,PASS,
+Runtime,cudaOccupancyMaxPotentialBlockSize,corex_runtime_extended,A,PASS,
+Runtime,cudaProfilerStart,corex_runtime_extended,A,PASS,may WARN if driver rejects
+Runtime,cudaProfilerStop,corex_runtime_extended,A,PASS,
+Runtime,cudaDeviceSynchronize,corex_runtime_extended,A,PASS,
+Runtime,cudaStreamDestroy,corex_runtime_extended,A,PASS,
+Graph,cudaStreamCreateWithFlags,corex_cuda_graph,A,PASS,two streams
+Graph,cudaMalloc,corex_cuda_graph,A,PASS,two buffers 256 floats each this round
+Graph,cudaGraphCreate,corex_cuda_graph,A,PASS,parent and child graph
+Graph,cudaGraphAddMemcpyNode,corex_cuda_graph,A,PASS,1D extent 256*sizeof(float)
+Graph,cudaGraphAddKernelNode,corex_cuda_graph,A,PASS,k_fill grid (N+255)/256 x 256 threads N=256
+Graph,cudaGraphAddMemsetNode,corex_cuda_graph,A,PASS,width 256 elements
+Graph,cudaGraphAddEventRecordNode,corex_cuda_graph,A,PASS,
+Graph,cudaGraphAddEventWaitNode,corex_cuda_graph,A,PASS,
+Graph,cudaGraphAddHostNode,corex_cuda_graph,A,PASS,may WARN if API fails
+Graph,cudaGraphAddDependencies,corex_cuda_graph,A,PASS,
+Graph,cudaGraphAddChildGraphNode,corex_cuda_graph,A,PASS,
+Graph,cudaGraphDestroy,corex_cuda_graph,A,PASS,child graph + main + capture
+Graph,cudaGraphInstantiate,corex_cuda_graph,A,PASS,explicit + capture graphs
+Graph,cudaGraphUpload,corex_cuda_graph,D,SKIPPED_VERSION,CUDART>=11010 else WARN
+Graph,cudaGraphLaunch,corex_cuda_graph,A,PASS,
+Graph,cudaStreamSynchronize,corex_cuda_graph,A,PASS,
+Graph,cudaGraphExecKernelNodeSetParams,corex_cuda_graph,A,PASS,may WARN on failure
+Graph,cudaGraphExecMemcpyNodeSetParams,corex_cuda_graph,A,PASS,may WARN
+Graph,cudaGraphExecMemcpyNodeSetParams1D,corex_cuda_graph,D,SKIPPED_VERSION,CUDART>=11000 else WARN
+Graph,cudaGraphExecMemsetNodeSetParams,corex_cuda_graph,A,PASS,may WARN
+Graph,cudaGraphExecEventRecordNodeSetEvent,corex_cuda_graph,A,PASS,
+Graph,cudaGraphExecEventWaitNodeSetEvent,corex_cuda_graph,A,PASS,
+Graph,cudaGraphExecChildGraphNodeSetParams,corex_cuda_graph,A,PASS,may WARN
+Graph,cudaGraphExecDestroy,corex_cuda_graph,A,PASS,
+Graph,cudaStreamBeginCapture,corex_cuda_graph,A,PASS,
+Graph,cudaMemcpyAsync,corex_cuda_graph,A,PASS,capture path; 256 floats H2D
+Graph,cudaStreamEndCapture,corex_cuda_graph,A,PASS,
+Graph,cudaFree,corex_cuda_graph,A,PASS,
+Graph,cudaStreamDestroy,corex_cuda_graph,A,PASS,
