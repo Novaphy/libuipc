@@ -123,22 +123,16 @@ if(NOT UIPC_MUDA_USE_COREX)
 endif()
 
 if(UIPC_MUDA_USE_COREX)
-    list(FILTER SOURCES EXCLUDE REGEX "/finite_element/finite_element_external_force_(manager|reporter)\\.(cu|h)$")
-    list(FILTER SOURCES EXCLUDE REGEX "/finite_element/finite_element_external_vertex_force\\.cu$")
-    list(FILTER SOURCES EXCLUDE REGEX "/finite_element/constraints/finite_element_external_vertex_force_constraint\\.(cu|h)$")
     list(FILTER SOURCES EXCLUDE REGEX "/backends/cuda/sanity_check/")
 endif()
 
-# These FEM external-force module files were added on top of upstream during the
-# Corex port but reference fields (vertex_external_forces / vertex_external_force_accs)
-# that do NOT exist in upstream FiniteElementMethod::Impl. They are not used by
-# corex_demo and break the NVIDIA build, so drop them on the NVIDIA path too to
-# stay byte-equivalent to /root/src.
-if(NOT UIPC_MUDA_USE_COREX)
-    list(FILTER SOURCES EXCLUDE REGEX "/finite_element/finite_element_external_force_(manager|reporter)\\.(cu|h)$")
-    list(FILTER SOURCES EXCLUDE REGEX "/finite_element/finite_element_external_vertex_force\\.cu$")
-    list(FILTER SOURCES EXCLUDE REGEX "/finite_element/constraints/finite_element_external_vertex_force_constraint\\.(cu|h)$")
-endif()
+# Note: the previously-needed exclusion rules for
+# finite_element/finite_element_external_force_{manager,reporter}.{cu,h},
+# finite_element/finite_element_external_vertex_force.cu, and
+# finite_element/constraints/finite_element_external_vertex_force_constraint.{cu,h}
+# have been removed: those files were dead code (referenced nonexistent fields
+# on FiniteElementMethod::Impl, used nowhere) and the source files themselves
+# have been deleted from the tree.
 
 target_sources(cuda PRIVATE ${SOURCES})
 uipc_target_set_relative_source_file(cuda)
