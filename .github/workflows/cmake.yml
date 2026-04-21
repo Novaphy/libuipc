@@ -58,6 +58,19 @@ jobs:
         if: matrix.os == 'windows-2022'
         uses: ilammy/msvc-dev-cmd@v1
 
+      - name: Install pkg-config (Windows)
+        # The vcpkg dylib package (both v2.2.1 and v3.x) installs a
+        # dylibConfig.cmake whose first action is `find_package(PkgConfig
+        # REQUIRED)`. The windows-2022 runner image does not ship pkg-config
+        # by default, so install pkgconfiglite via chocolatey to unblock
+        # `find_package(dylib)` in src/core/CMakeLists.txt.
+        if: matrix.os == 'windows-2022'
+        shell: pwsh
+        run: |
+          choco install pkgconfiglite -y --no-progress
+          # Make pkg-config visible to subsequent steps
+          echo "C:\ProgramData\chocolatey\bin" >> $env:GITHUB_PATH
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
