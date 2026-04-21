@@ -43,7 +43,8 @@ bool tri_edge_intersect(const Vector3& T0,
         if(point_in_triangle(E0, T0, T1, T2) || point_in_triangle(E1, T0, T1, T2))
             return true;
 
-        Float u, v;
+        // libigl segment_segment_intersect only exposes double& outputs
+        double u, v;
         // Check if edge and any triangle edge overlap (as segments)
         if(igl::segment_segment_intersect(E0, E1 - E0, T0, T1 - T0, u, v)
            || igl::segment_segment_intersect(E0, E1 - E0, T1, T2 - T1, u, v)

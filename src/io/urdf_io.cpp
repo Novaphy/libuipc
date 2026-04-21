@@ -45,10 +45,12 @@ static Matrix4x4 basis_urdf_to_uipc()
 static Matrix4x4 to_affine(const urdf::Pose& pose)
 {
     Transform T = Transform::Identity();
-    T.translate(Vector3{pose.position.x, pose.position.y, pose.position.z});
-    const Eigen::Quaterniond q{
+    T.translate(Vector3{static_cast<Float>(pose.position.x),
+                        static_cast<Float>(pose.position.y),
+                        static_cast<Float>(pose.position.z)});
+    const Eigen::Quaterniond qd{
         pose.rotation.w, pose.rotation.x, pose.rotation.y, pose.rotation.z};
-    T.rotate(q);
+    T.rotate(qd.cast<Float>().normalized());
     return T.matrix();
 }
 
@@ -99,9 +101,9 @@ class UrdfController::Impl
     {
         Transform t = Transform::Identity();
         t.translate(trans);
-        t.rotate(Eigen::AngleAxisd{rot[0], Vector3::UnitX()});
-        t.rotate(Eigen::AngleAxisd{rot[1], Vector3::UnitY()});
-        t.rotate(Eigen::AngleAxisd{rot[2], Vector3::UnitZ()});
+        t.rotate(Eigen::AngleAxis<Float>{rot[0], Vector3::UnitX()});
+        t.rotate(Eigen::AngleAxis<Float>{rot[1], Vector3::UnitY()});
+        t.rotate(Eigen::AngleAxis<Float>{rot[2], Vector3::UnitZ()});
         root_link_transform = t.matrix();
     }
 
@@ -144,7 +146,7 @@ class UrdfController::Impl
             Float   angle      = r_joint.angle;
             Vector3 axis       = r_joint.local_axis;
 
-            Eigen::AngleAxisd aa{angle, axis};
+            Eigen::AngleAxis<Float> aa{angle, axis};
             Transform         t = Transform::Identity();
             t.matrix()          = joint_info.local_trans;
             t.rotate(aa);
@@ -427,7 +429,9 @@ class UrdfIO::Impl
 
         Transform t = Transform::Identity();
         t           = to_affine(link->collision->origin);
-        t.scale(Vector3{scale.x, scale.y, scale.z});
+        t.scale(Vector3{static_cast<Float>(scale.x),
+                        static_cast<Float>(scale.y),
+                        static_cast<Float>(scale.z)});
 
         Matrix4x4 F = t.matrix();
 
@@ -471,7 +475,9 @@ class UrdfIO::Impl
                 auto& R = revolute_joint_infos[joint->name];
                 logger::info("Revolute Joint: {}", joint->name);
 
-                R.local_axis = Vector3{joint->axis.x, joint->axis.y, joint->axis.z};
+                R.local_axis = Vector3{static_cast<Float>(joint->axis.x),
+                                       static_cast<Float>(joint->axis.y),
+                                       static_cast<Float>(joint->axis.z)};
                 R.angle = 0.0;
 
                 if(joint->limits == nullptr)
@@ -481,14 +487,16 @@ class UrdfIO::Impl
                 }
                 else
                 {
-                    R.limits = Vector2{joint->limits->lower, joint->limits->upper};
+                    R.limits = Vector2{static_cast<Float>(joint->limits->lower),
+                                       static_cast<Float>(joint->limits->upper)};
                 }
 
                 if(joint->mimic != nullptr)
                 {
                     R.mimic_joint_name = joint->mimic->joint_name;
                     R.mimic_multiplier_offset =
-                        Vector2{joint->mimic->multiplier, joint->mimic->offset};
+                        Vector2{static_cast<Float>(joint->mimic->multiplier),
+                                static_cast<Float>(joint->mimic->offset)};
                 }
             }
             else if(joint->type == urdf::Joint::FIXED)
