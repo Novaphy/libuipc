@@ -1,3 +1,6 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+#include "linear_fused_pcg_corex.cu"
+#else
 #include <linear_system/linear_fused_pcg.h>
 #include <sim_engine.h>
 #include <linear_system/global_linear_system.h>
@@ -320,3 +323,4 @@ SizeT LinearFusedPCG::fused_pcg(muda::DenseVectorView<Float>  x,
     return k;
 }
 }  // namespace uipc::backend::cuda
+#endif

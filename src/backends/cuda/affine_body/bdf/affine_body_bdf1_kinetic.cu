@@ -2,6 +2,7 @@
 #include <time_integrator/bdf1_flag.h>
 #include <muda/ext/eigen/evd.h>
 #include <muda/check/check_cuda_errors.h>
+#include <cstdlib>
 
 namespace uipc::backend::cuda
 {

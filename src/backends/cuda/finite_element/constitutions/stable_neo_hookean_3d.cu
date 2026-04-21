@@ -134,31 +134,6 @@ class StableNeoHookean3D final : public FEM3DConstitution
         const Float     dt           = info.dt();
         const int       grad_only_i  = info.gradient_only() ? 1 : 0;
 
-        const auto gl = info.gradients().device_layout_mut();
-        const auto hl = info.hessians().device_layout_mut();
-
-        const int  gl_tsc  = gl.total_segment_count;
-        const int  gl_dio  = gl.doublet_index_offset;
-        const int  gl_dc   = gl.doublet_count;
-        const int  gl_tdc  = gl.total_doublet_count;
-        const int  gl_so   = gl.subvector_offset;
-        const int  gl_se   = gl.subvector_extent;
-        int* const gl_si   = gl.segment_indices;
-        Vector3* const gl_sv = gl.segment_values;
-
-        const int        hl_tr  = hl.total_rows;
-        const int        hl_tc  = hl.total_cols;
-        const int        hl_tio = hl.triplet_index_offset;
-        const int        hl_tic = hl.triplet_count;
-        const int        hl_ttc = hl.total_triplet_count;
-        const int        hl_sox = hl.submatrix_offset.x;
-        const int        hl_soy = hl.submatrix_offset.y;
-        const int        hl_sex = hl.submatrix_extent.x;
-        const int        hl_sey = hl.submatrix_extent.y;
-        int* const       hl_ri = hl.row_indices;
-        int* const       hl_ci = hl.col_indices;
-        Matrix3x3* const hl_va = hl.values;
-
         ParallelFor()
             .file_line(__FILE__, __LINE__)
             .apply(n,
@@ -170,47 +145,9 @@ class StableNeoHookean3D final : public FEM3DConstitution
                     pvol,
                     dt,
                     grad_only_i,
-                    gl_tsc,
-                    gl_dio,
-                    gl_dc,
-                    gl_tdc,
-                    gl_so,
-                    gl_se,
-                    gl_si,
-                    gl_sv,
-                    hl_tr,
-                    hl_tc,
-                    hl_tio,
-                    hl_tic,
-                    hl_ttc,
-                    hl_sox,
-                    hl_soy,
-                    hl_sex,
-                    hl_sey,
-                    hl_ri,
-                    hl_ci,
-                    hl_va] __device__(int I)
+                    G3s   = info.gradients().viewer().name("gradients"),
+                    H3x3s = info.hessians().viewer().name("hessians")] __device__(int I) mutable
                    {
-                       DoubletVectorViewer<Float, 3> G3s{gl_tsc,
-                                                       gl_dio,
-                                                       gl_dc,
-                                                       gl_tdc,
-                                                       gl_so,
-                                                       gl_se,
-                                                       gl_si,
-                                                       gl_sv};
-
-                       TripletMatrixViewer<Float, 3, 3> H3x3s{hl_tr,
-                                                             hl_tc,
-                                                             hl_tio,
-                                                             hl_tic,
-                                                             hl_ttc,
-                                                             int2{hl_sox, hl_soy},
-                                                             int2{hl_sex, hl_sey},
-                                                             hl_ri,
-                                                             hl_ci,
-                                                             hl_va};
-
                        const Vector4i&  tet    = pidx[I];
                        const Matrix3x3& Dm_inv = pDm[I];
                        Float            mu     = pmus[I];

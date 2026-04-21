@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <Eigen/Core>
+#include <uipc/common/type_define.h>
 
 namespace uipc::backend::cuda::corex_matconv
 {
@@ -22,7 +23,7 @@ void launch_write_unique_indices(int N, const int* unique_indices, int* dst_indi
 void launch_scatter_col_counts(int N, const int* unique_indices,
                                const int* counts, int* col_counts_per_row);
 
-using BlockT3 = Eigen::Matrix<double, 3, 3>;
+using BlockT3 = Eigen::Matrix<Float, 3, 3>;
 
 void launch_copy_sorted_blocks_3x3(int N, const BlockT3* src_blocks,
                                     const int* sort_index, BlockT3* dst_blocks);
@@ -37,7 +38,7 @@ void launch_segmental_reduce_3x3(int N, const int* segment_ids,
                                   const BlockT3* in_blocks, BlockT3* out_blocks,
                                   int out_count);
 
-using VecT3 = Eigen::Matrix<double, 3, 1>;
+using VecT3 = Eigen::Matrix<Float, 3, 1>;
 
 void launch_segmental_reduce_3x1(int N, const int* segment_ids,
                                   const VecT3* in_vecs, VecT3* out_vecs,

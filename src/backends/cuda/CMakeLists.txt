@@ -54,6 +54,14 @@ set_target_properties(cuda PROPERTIES
 if(UIPC_MUDA_USE_COREX)
     target_link_libraries(cuda PUBLIC dl)
     target_compile_definitions(cuda PUBLIC UIPC_COREX_CUDA10_COMPAT=1)
+    # Corex 4.4+ exposes cudaMallocAsync/cudaFreeAsync even though CUDART_VERSION
+    # still reports 10020. When enabled, propagate UIPC_COREX_ASYNC_MEMORY=1 so
+    # the muda headers and the cuda backend swap the sync compat path for the
+    # native async APIs (see external/muda/src/muda/launch/details/memory.inl
+    # and external/muda/src/muda/buffer/details/device_var.inl).
+    if(UIPC_COREX_USE_ASYNC_MEMORY)
+        target_compile_definitions(cuda PUBLIC UIPC_COREX_ASYNC_MEMORY=1)
+    endif()
     # Clang/Corex may not define __CUDA_ARCH__ during device compilation; force
     # MUDA_GENERIC to __host__ __device__ so device kernels can call shared helpers.
     target_compile_definitions(cuda PRIVATE MUDA_FORCE_HD_GENERIC=1)
@@ -93,6 +101,44 @@ endif()
 
 # all files in this directory
 file(GLOB_RECURSE SOURCES "*.cu" "*.h" "*.hpp" "*.cpp" "*.inl")
+
+# ------------------------------------------------------------------------------
+# Source filter for two-environment build
+#   - Always: drop *_corex.{cu,h,cpp,hpp,inl} overlay files from the direct
+#     compile list — those are include-only sidecars used by the switcher headers
+#     /sources to pull in corex-specific implementations under
+#     #if UIPC_COREX_CUDA10_COMPAT.
+#   - NVIDIA path (UIPC_MUDA_USE_COREX=OFF):
+#       drop corex-only sources (corex_matrix_converter_kernels, backends/cuda/details/)
+#       so this build is byte-equivalent to building /root/src verbatim.
+#   - Corex path (UIPC_MUDA_USE_COREX=ON):
+#       drop sources that depend on NVCC-only features the Corex toolchain cannot compile
+#       (FEM external force module + backends/cuda/sanity_check kernels).
+# ------------------------------------------------------------------------------
+list(FILTER SOURCES EXCLUDE REGEX "_corex\\.(cu|h|hpp|cpp|inl)$")
+
+if(NOT UIPC_MUDA_USE_COREX)
+    list(FILTER SOURCES EXCLUDE REGEX "/algorithm/corex_matrix_converter_kernels\\.(cu|h)$")
+    list(FILTER SOURCES EXCLUDE REGEX "/backends/cuda/details/")
+endif()
+
+if(UIPC_MUDA_USE_COREX)
+    list(FILTER SOURCES EXCLUDE REGEX "/finite_element/finite_element_external_force_(manager|reporter)\\.(cu|h)$")
+    list(FILTER SOURCES EXCLUDE REGEX "/finite_element/finite_element_external_vertex_force\\.cu$")
+    list(FILTER SOURCES EXCLUDE REGEX "/finite_element/constraints/finite_element_external_vertex_force_constraint\\.(cu|h)$")
+    list(FILTER SOURCES EXCLUDE REGEX "/backends/cuda/sanity_check/")
+endif()
+
+# These FEM external-force module files were added on top of upstream during the
+# Corex port but reference fields (vertex_external_forces / vertex_external_force_accs)
+# that do NOT exist in upstream FiniteElementMethod::Impl. They are not used by
+# corex_demo and break the NVIDIA build, so drop them on the NVIDIA path too to
+# stay byte-equivalent to /root/src.
+if(NOT UIPC_MUDA_USE_COREX)
+    list(FILTER SOURCES EXCLUDE REGEX "/finite_element/finite_element_external_force_(manager|reporter)\\.(cu|h)$")
+    list(FILTER SOURCES EXCLUDE REGEX "/finite_element/finite_element_external_vertex_force\\.cu$")
+    list(FILTER SOURCES EXCLUDE REGEX "/finite_element/constraints/finite_element_external_vertex_force_constraint\\.(cu|h)$")
+endif()
 
 target_sources(cuda PRIVATE ${SOURCES})
 uipc_target_set_relative_source_file(cuda)

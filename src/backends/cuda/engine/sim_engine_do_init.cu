@@ -22,6 +22,14 @@
 
 namespace uipc::backend::cuda
 {
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+static void corex_init_trace(const char* msg)
+{
+    std::fprintf(stderr, "[corex_demo] init_scene: %s\n", msg);
+    std::fflush(stderr);
+}
+#endif
+
 void SimEngine::build()
 {
     logger::info("[cuda] SimEngine::build: build_systems() ...");
@@ -64,6 +72,9 @@ void SimEngine::build()
 
 void SimEngine::init_scene()
 {
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    corex_init_trace("entry");
+#endif
     auto& info     = world().scene().config();
     m_dump_surface = info.find<IndexT>("extras/debug/dump_surface");
 
@@ -85,6 +96,9 @@ void SimEngine::init_scene()
 
     auto alipc = find<ALIPCPipelineFlag>();
     auto ipc   = find<IPCPipelineFlag>();
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    corex_init_trace("pipeline flag check begin");
+#endif
     if(alipc)
     {
         logger::info("Pipeline: Augmented Lagrangian IPC");
@@ -98,42 +112,155 @@ void SimEngine::init_scene()
     {
         throw SimEngineException("No valid pipeline flag found in the scene!");
     }
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    corex_init_trace("pipeline flag check done");
+#endif
 
 
     // 1. Before Common Scene Initialization
     {
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        corex_init_trace("before-common begin");
+#endif
         if(m_affine_body_dynamics)
+        {
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+            corex_init_trace("AffineBodyDynamics::init begin");
+#endif
             m_affine_body_dynamics->init();
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+            corex_init_trace("AffineBodyDynamics::init done");
+#endif
+        }
         if(m_inter_affine_body_constitution_manager)
+        {
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+            corex_init_trace("InterAffineBodyConstitutionManager::init begin");
+#endif
             m_inter_affine_body_constitution_manager->init();
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+            corex_init_trace("InterAffineBodyConstitutionManager::init done");
+#endif
+        }
         if(m_finite_element_method)
+        {
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+            corex_init_trace("FiniteElementMethod::init begin");
+#endif
             m_finite_element_method->init();
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+            corex_init_trace("FiniteElementMethod::init done");
+#endif
+        }
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        corex_init_trace("GlobalBodyManager::init begin");
+#endif
         m_global_body_manager->init();
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        corex_init_trace("GlobalBodyManager::init done");
+        corex_init_trace("before-common done");
+#endif
     }
 
     // 2. Common Scene Initialization Phase
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    corex_init_trace("event_init_scene begin");
+#endif
     event_init_scene();
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    corex_init_trace("event_init_scene done");
+#endif
 
     // 3. After Common Scene Initialization
     // 3.1 Forwards
     {
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        corex_init_trace("forward init begin");
+        corex_init_trace("GlobalVertexManager::init begin");
+#endif
         m_global_vertex_manager->init();
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        corex_init_trace("GlobalVertexManager::init done");
+        corex_init_trace("GlobalSimplicialSurfaceManager::init begin");
+#endif
         m_global_simplicial_surface_manager->init();
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        corex_init_trace("GlobalSimplicialSurfaceManager::init done");
+#endif
         if(m_global_dytopo_effect_manager)
+        {
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+            corex_init_trace("GlobalDyTopoEffectManager::init begin");
+#endif
             m_global_dytopo_effect_manager->init();
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+            corex_init_trace("GlobalDyTopoEffectManager::init done");
+#endif
+        }
         if(m_global_contact_manager)
+        {
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+            corex_init_trace("GlobalContactManager::init begin");
+#endif
             m_global_contact_manager->init();
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+            corex_init_trace("GlobalContactManager::init done");
+#endif
+        }
         if(m_global_animator)
+        {
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+            corex_init_trace("GlobalAnimator::init begin");
+#endif
             m_global_animator->init();
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+            corex_init_trace("GlobalAnimator::init done");
+#endif
+        }
         if(m_global_external_force_manager)
+        {
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+            corex_init_trace("GlobalExternalForceManager::init begin");
+#endif
             m_global_external_force_manager->init();
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+            corex_init_trace("GlobalExternalForceManager::init done");
+#endif
+        }
         if(m_global_active_set_manager)
+        {
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+            corex_init_trace("GlobalActiveSetManager::init begin");
+#endif
             m_global_active_set_manager->init();
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+            corex_init_trace("GlobalActiveSetManager::init done");
+#endif
+        }
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        corex_init_trace("LineSearcher::init begin");
+#endif
         m_line_searcher->init();
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        corex_init_trace("LineSearcher::init done");
+        corex_init_trace("GlobalLinearSystem::init begin");
+#endif
         m_global_linear_system->init();
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        corex_init_trace("GlobalLinearSystem::init done");
+        corex_init_trace("TimeIntegratorManager::init begin");
+#endif
         m_time_integrator_manager->init();
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        corex_init_trace("TimeIntegratorManager::init done");
+        corex_init_trace("NewtonToleranceManager::init begin");
+#endif
         m_newton_tolerance_manager->init();
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        corex_init_trace("NewtonToleranceManager::init done");
+        corex_init_trace("forward init done");
+#endif
     }
 
     // 3.2 Backwards (if needed)

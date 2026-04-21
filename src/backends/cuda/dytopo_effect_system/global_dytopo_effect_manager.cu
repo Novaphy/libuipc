@@ -79,13 +79,9 @@ void GlobalDyTopoEffectManager::Impl::init(WorldVisitor& world)
 
 void GlobalDyTopoEffectManager::Impl::compute_dytopo_effect(ComputeDyTopoEffectInfo& info)
 {
-    fmt::println(stderr, "[dytopo_dbg] _assemble ..."); std::fflush(stderr);
     _assemble(info);
-    fmt::println(stderr, "[dytopo_dbg] _convert_matrix ..."); std::fflush(stderr);
     _convert_matrix();
-    fmt::println(stderr, "[dytopo_dbg] _distribute ..."); std::fflush(stderr);
     _distribute(info);
-    fmt::println(stderr, "[dytopo_dbg] done"); std::fflush(stderr);
 }
 
 void GlobalDyTopoEffectManager::Impl::_assemble(ComputeDyTopoEffectInfo& info)
@@ -160,34 +156,14 @@ void GlobalDyTopoEffectManager::Impl::_assemble(ComputeDyTopoEffectInfo& info)
         info.m_hessians = collected_dytopo_effect_hessian.view().subview(h_offset, h_count);
 
         reporter->assemble(info);
-        fmt::println(stderr, "[dytopo_dbg] assemble done for reporter #{}, syncing...", i);
-        std::fflush(stderr);
-        cudaError_t sync_e = cudaDeviceSynchronize();
-        fmt::println(stderr, "[dytopo_dbg] post-assemble sync: {}", cudaGetErrorString(sync_e));
-        std::fflush(stderr);
     }
 }
 
 void GlobalDyTopoEffectManager::Impl::_convert_matrix()
 {
     Timer timer{"Convert Dytopo Matrix"};
-
-    fmt::println(stderr, "[dytopo_dbg] _convert_matrix: hessian (triplets={}, rows={}, cols={}) ...",
-                 collected_dytopo_effect_hessian.triplet_count(),
-                 collected_dytopo_effect_hessian.rows(),
-                 collected_dytopo_effect_hessian.cols());
-    std::fflush(stderr);
-    fmt::println(stderr, "[dytopo_dbg] _convert_matrix: calling matrix_converter.convert() ...");
-    std::fflush(stderr);
     matrix_converter.convert(collected_dytopo_effect_hessian, sorted_dytopo_effect_hessian);
-    fmt::println(stderr, "[dytopo_dbg] _convert_matrix: hessian convert returned");
-    std::fflush(stderr);
-    fmt::println(stderr, "[dytopo_dbg] _convert_matrix: hessian done, gradient (doublets={}) ...",
-                 collected_dytopo_effect_gradient.doublet_count());
-    std::fflush(stderr);
     matrix_converter.convert(collected_dytopo_effect_gradient, sorted_dytopo_effect_gradient);
-    fmt::println(stderr, "[dytopo_dbg] _convert_matrix: all done");
-    std::fflush(stderr);
 }
 
 void GlobalDyTopoEffectManager::Impl::_distribute(ComputeDyTopoEffectInfo& info)
@@ -444,9 +420,19 @@ void GlobalDyTopoEffectManager::add_receiver(DyTopoEffectReceiver* receiver)
 // ============================================================================
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #include <algorithm/corex_matrix_converter_kernels.h>
+#include <cstdlib>
 
 namespace uipc::backend::cuda::corex_matconv
 {
+using uipc::Float;
+
+namespace
+{
+inline bool corex_matconv_trace()
+{
+    return std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+}
+}  // namespace
 
 static __global__ void kernel_hash_ij(int N, const int* row_indices, const int* col_indices,
                                       uint64_t* ij_hash, int* sort_index)
@@ -525,24 +511,33 @@ void launch_hash_ij(int N, const int* row_indices, const int* col_indices,
                     uint64_t* ij_hash, int* sort_index)
 {
     cudaError_t pre = cudaDeviceSynchronize();
-    fmt::println(stderr, "[corex_matconv] pre-sync={}", cudaGetErrorString(pre));
-    cudaError_t pre2 = cudaGetLastError();
-    fmt::println(stderr, "[corex_matconv] pre-err={}", cudaGetErrorString(pre2));
-    std::fflush(stderr);
+    if(corex_matconv_trace())
+    {
+        fmt::println(stderr, "[corex_matconv] pre-sync={}", cudaGetErrorString(pre));
+        cudaError_t pre2 = cudaGetLastError();
+        fmt::println(stderr, "[corex_matconv] pre-err={}", cudaGetErrorString(pre2));
+        std::fflush(stderr);
 
-    fmt::println(stderr, "[corex_matconv] launching kernel_hash_ij N={} grid={} block={}", N, grid_for(N), kBlock);
-    std::fflush(stderr);
+        fmt::println(stderr, "[corex_matconv] launching kernel_hash_ij N={} grid={} block={}", N, grid_for(N), kBlock);
+        std::fflush(stderr);
+    }
 
     kernel_hash_ij<<<grid_for(N), kBlock>>>(N, row_indices, col_indices, ij_hash, sort_index);
 
-    fmt::println(stderr, "[corex_matconv] kernel launched, checking error...");
-    std::fflush(stderr);
-    cudaError_t e = cudaGetLastError();
-    fmt::println(stderr, "[corex_matconv] launch={}", cudaGetErrorString(e));
-    std::fflush(stderr);
+    if(corex_matconv_trace())
+    {
+        fmt::println(stderr, "[corex_matconv] kernel launched, checking error...");
+        std::fflush(stderr);
+        cudaError_t e = cudaGetLastError();
+        fmt::println(stderr, "[corex_matconv] launch={}", cudaGetErrorString(e));
+        std::fflush(stderr);
+    }
     cudaDeviceSynchronize();
-    fmt::println(stderr, "[corex_matconv] sync done");
-    std::fflush(stderr);
+    if(corex_matconv_trace())
+    {
+        fmt::println(stderr, "[corex_matconv] sync done");
+        std::fflush(stderr);
+    }
 }
 
 void launch_decode_hash(int N, const uint64_t* ij_hash, int* ij_pairs_xy)
@@ -613,73 +608,119 @@ __device__ __forceinline__ void corex_atomic_add_double(double* address, double 
 
 static __global__ void kernel_segmental_reduce_3x3(int N, const int* segment_ids,
                                                     const BlockT3* in_blocks,
-                                                    BlockT3* out_blocks)
+                                                    BlockT3* out_blocks,
+                                                    int out_count)
 {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if(i >= N) return;
-    int seg = segment_ids[i];
-    const BlockT3& val = in_blocks[i];
-    double* dst = out_blocks[seg].data();
-    const double* src = val.data();
+    int seg = blockIdx.x * blockDim.x + threadIdx.x;
+    if(seg >= out_count) return;
+
+    Float accum[9] = {};
+    for(int i = 0; i < N; ++i)
+    {
+        if(segment_ids[i] != seg)
+            continue;
+
+        const Float* src = reinterpret_cast<const Float*>(in_blocks + i);
+        for(int j = 0; j < 9; ++j)
+            accum[j] += src[j];
+    }
+
+    Float* dst = reinterpret_cast<Float*>(out_blocks + seg);
     for(int j = 0; j < 9; ++j)
-        corex_atomic_add_double(&dst[j], src[j]);
+        dst[j] = accum[j];
 }
 
 void launch_segmental_reduce_3x3(int N, const int* segment_ids,
                                   const BlockT3* in_blocks, BlockT3* out_blocks,
                                   int out_count)
 {
-    fmt::println(stderr, "[corex_seg3x3] enter N={} out_count={}", N, out_count);
-    std::fflush(stderr);
+    if(corex_matconv_trace())
+    {
+        fmt::println(stderr, "[corex_seg3x3] enter N={} out_count={}", N, out_count);
+        std::fflush(stderr);
+    }
     cudaMemset(out_blocks, 0, out_count * sizeof(BlockT3));
     cudaDeviceSynchronize();
-    fmt::println(stderr, "[corex_seg3x3] memset+sync done");
-    std::fflush(stderr);
-    if(N > 0)
+    if(corex_matconv_trace())
     {
-        kernel_segmental_reduce_3x3<<<grid_for(N), kBlock>>>(N, segment_ids, in_blocks, out_blocks);
+        fmt::println(stderr, "[corex_seg3x3] memset+sync done");
+        std::fflush(stderr);
+    }
+    if(out_count > 0)
+    {
+        kernel_segmental_reduce_3x3<<<grid_for(out_count), kBlock>>>(
+            N, segment_ids, in_blocks, out_blocks, out_count);
         cudaError_t e = cudaGetLastError();
-        fmt::println(stderr, "[corex_seg3x3] kernel launch err={}", cudaGetErrorString(e));
-        std::fflush(stderr);
+        if(corex_matconv_trace())
+        {
+            fmt::println(stderr, "[corex_seg3x3] kernel launch err={}", cudaGetErrorString(e));
+            std::fflush(stderr);
+        }
         cudaDeviceSynchronize();
-        fmt::println(stderr, "[corex_seg3x3] kernel sync done");
-        std::fflush(stderr);
+        if(corex_matconv_trace())
+        {
+            fmt::println(stderr, "[corex_seg3x3] kernel sync done");
+            std::fflush(stderr);
+        }
     }
 }
 
 static __global__ void kernel_segmental_reduce_3x1(int N, const int* segment_ids,
                                                     const VecT3* in_vecs,
-                                                    VecT3* out_vecs)
+                                                    VecT3* out_vecs,
+                                                    int out_count)
 {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if(i >= N) return;
-    int seg = segment_ids[i];
-    const VecT3& val = in_vecs[i];
-    double* dst = out_vecs[seg].data();
-    const double* src = val.data();
+    int seg = blockIdx.x * blockDim.x + threadIdx.x;
+    if(seg >= out_count) return;
+
+    Float accum[3] = {};
+    for(int i = 0; i < N; ++i)
+    {
+        if(segment_ids[i] != seg)
+            continue;
+
+        const Float* src = reinterpret_cast<const Float*>(in_vecs + i);
+        for(int j = 0; j < 3; ++j)
+            accum[j] += src[j];
+    }
+
+    Float* dst = reinterpret_cast<Float*>(out_vecs + seg);
     for(int j = 0; j < 3; ++j)
-        corex_atomic_add_double(&dst[j], src[j]);
+        dst[j] = accum[j];
 }
 
 void launch_segmental_reduce_3x1(int N, const int* segment_ids,
                                   const VecT3* in_vecs, VecT3* out_vecs,
                                   int out_count)
 {
-    fmt::println(stderr, "[corex_seg3x1] enter N={} out_count={}", N, out_count);
-    std::fflush(stderr);
+    if(corex_matconv_trace())
+    {
+        fmt::println(stderr, "[corex_seg3x1] enter N={} out_count={}", N, out_count);
+        std::fflush(stderr);
+    }
     cudaMemset(out_vecs, 0, out_count * sizeof(VecT3));
     cudaDeviceSynchronize();
-    fmt::println(stderr, "[corex_seg3x1] memset+sync done");
-    std::fflush(stderr);
-    if(N > 0)
+    if(corex_matconv_trace())
     {
-        kernel_segmental_reduce_3x1<<<grid_for(N), kBlock>>>(N, segment_ids, in_vecs, out_vecs);
+        fmt::println(stderr, "[corex_seg3x1] memset+sync done");
+        std::fflush(stderr);
+    }
+    if(out_count > 0)
+    {
+        kernel_segmental_reduce_3x1<<<grid_for(out_count), kBlock>>>(
+            N, segment_ids, in_vecs, out_vecs, out_count);
         cudaError_t e = cudaGetLastError();
-        fmt::println(stderr, "[corex_seg3x1] kernel launch err={}", cudaGetErrorString(e));
-        std::fflush(stderr);
+        if(corex_matconv_trace())
+        {
+            fmt::println(stderr, "[corex_seg3x1] kernel launch err={}", cudaGetErrorString(e));
+            std::fflush(stderr);
+        }
         cudaDeviceSynchronize();
-        fmt::println(stderr, "[corex_seg3x1] kernel sync done");
-        std::fflush(stderr);
+        if(corex_matconv_trace())
+        {
+            fmt::println(stderr, "[corex_seg3x1] kernel sync done");
+            std::fflush(stderr);
+        }
     }
 }
 

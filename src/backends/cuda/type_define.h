@@ -8,6 +8,9 @@
  *********************************************************************/
 #include <muda/type_traits/type_label.h>
 #include <muda/ext/eigen/eigen_cxx20.h>
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+#include <Eigen/Geometry>
+#endif
 #include <uipc/common/type_define.h>
 
 #define UIPC_GENERIC MUDA_GENERIC
@@ -45,4 +48,30 @@ struct force_trivially_copy_assignable<Eigen::Matrix<T, M, N>>
 {
     constexpr static bool value = true;
 };
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+
+template <typename T, int Dim>
+struct force_trivially_destructible<Eigen::AlignedBox<T, Dim>>
+{
+    constexpr static bool value = true;
+};
+
+template <typename T, int Dim>
+struct force_trivially_constructible<Eigen::AlignedBox<T, Dim>>
+{
+    constexpr static bool value = true;
+};
+
+template <typename T, int Dim>
+struct force_trivially_copy_constructible<Eigen::AlignedBox<T, Dim>>
+{
+    constexpr static bool value = true;
+};
+
+template <typename T, int Dim>
+struct force_trivially_copy_assignable<Eigen::AlignedBox<T, Dim>>
+{
+    constexpr static bool value = true;
+};
+#endif
 }  // namespace muda

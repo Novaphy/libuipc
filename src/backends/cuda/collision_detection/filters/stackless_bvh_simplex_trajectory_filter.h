@@ -39,6 +39,7 @@ class StacklessBVHSimplexTrajectoryFilter final : public SimplexTrajectoryFilter
         // Used to detect CodimP-AllE, and AllE-AllE pairs.
         ThisBVH              lbvh_E;
         ThisBVH::QueryBuffer candidate_CodimP_AllE_pairs;
+        ThisBVH::QueryBuffer candidate_AllP_AllE_pairs;
         ThisBVH::QueryBuffer candidate_AllE_AllE_pairs;
 
         // Used to detect AllP-AllT pairs.
@@ -59,6 +60,7 @@ class StacklessBVHSimplexTrajectoryFilter final : public SimplexTrajectoryFilter
         muda::DeviceBuffer<Vector4i> EEs;
         muda::DeviceBuffer<Vector3i> PEs;
         muda::DeviceBuffer<Vector2i> PPs;
+        muda::DeviceBuffer<IndexT>   allpe_point_flags;
 
 
         /****************************************************

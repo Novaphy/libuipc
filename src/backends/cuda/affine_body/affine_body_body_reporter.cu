@@ -36,6 +36,15 @@ void AffineBodyBodyReporter::Impl::report_attributes(BodyAttributeInfo& info)
 {
     using namespace muda;
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    {
+        int n = static_cast<int>(info.coindices().size());
+        std::vector<IndexT> h_iota(n);
+        for(int i = 0; i < n; ++i) h_iota[i] = i;
+        cudaMemcpy((void*)info.coindices().data(), h_iota.data(),
+                   n * sizeof(IndexT), cudaMemcpyHostToDevice);
+    }
+#else
     ParallelFor()
         .file_line(__FILE__, __LINE__)
         .apply(info.coindices().size(),
@@ -43,6 +52,7 @@ void AffineBodyBodyReporter::Impl::report_attributes(BodyAttributeInfo& info)
                {
                    coindices(i) = i;  // just iota
                });
+#endif
 
     span<const IndexT> self_collision = affine_body_dynamics->m_impl.h_body_id_to_self_collision;
 

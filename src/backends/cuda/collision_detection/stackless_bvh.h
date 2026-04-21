@@ -1,3 +1,6 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+#include "stackless_bvh_corex.h"
+#else
 /**
  * @file stackless_bvh.h
  * 
@@ -110,7 +113,7 @@ class StacklessBVH
      * @param callback f: (int i, int j) -> bool Callback predicate to filter overlapping pairs
      * @param qbuffer Output buffer to store detected overlapping pairs
      */
-    template <typename Pred = DefaultQueryCallback>
+    template <std::invocable<IndexT, IndexT> Pred = DefaultQueryCallback>
     void detect(Pred callback, QueryBuffer& qbuffer);
 
 
@@ -121,7 +124,7 @@ class StacklessBVH
     * @param callback f: (int i, int j) -> bool Callback predicate to filter overlapping pairs
     * @param qbuffer Output buffer to store detected overlapping pairs
     */
-    template <typename Pred = DefaultQueryCallback>
+    template <std::invocable<IndexT, IndexT> Pred = DefaultQueryCallback>
     void query(muda::CBufferView<AABB> aabbs, Pred callback, QueryBuffer& qbuffer);
 
 
@@ -194,3 +197,4 @@ class StacklessBVH
 }  // namespace uipc::backend::cuda
 
 #include "details/stackless_bvh.inl"
+#endif

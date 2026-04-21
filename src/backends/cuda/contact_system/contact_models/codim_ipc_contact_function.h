@@ -5,6 +5,7 @@
 #include <utils/distance/distance_flagged.h>
 #include <muda/ext/eigen/evd.h>
 #include <utils/friction_utils.h>
+#include <limits>
 
 namespace uipc::backend::cuda
 {
@@ -23,7 +24,8 @@ namespace sym::codim_ipc_contact
         else
         {
             //tex: $$\frac{y^{2}}{\epsilon_{x}} + \frac{1}{3 \epsilon_{x}} - \frac{y^{3}}{3 \epsilon_{x}^{2}}$$
-            f0 = x2 * (-std::sqrt(x2) / 3.0 + epsvh) / (epsvh * epsvh) + epsvh / 3.0;
+            f0 = x2 * (-std::sqrt(x2) / Float(3) + epsvh) / (epsvh * epsvh)
+                 + epsvh / Float(3);
         }
     }
 
@@ -37,7 +39,7 @@ namespace sym::codim_ipc_contact
         else
         {
             //tex: $$ \frac{2 \epsilon_{x} - y}{ \epsilon_{x}^{2}}$$
-            result = (-std::sqrt(x2) + 2.0 * epsvh) / (epsvh * epsvh);
+            result = (-std::sqrt(x2) + Float(2) * epsvh) / (epsvh * epsvh);
         }
     }
 
@@ -93,7 +95,7 @@ namespace sym::codim_ipc_contact
         }
         else
         {
-            if(sq_norm == 0.0)
+            if(sq_norm <= Float(64) * std::numeric_limits<Float>::epsilon())
             {
                 // no SPD projection needed
                 H2x2 = (mu * lambda * f1_div_rel_dx_norm_val) * Matrix2x2::Identity();
@@ -122,7 +124,7 @@ namespace sym::codim_ipc_contact
         Float d = std::sqrt(D);
         Float dBdD;
         dKappaBarrierdD(dBdD, kappa, D, d_hat, thickness);
-        Float dBdd = dBdD * 2.0 * d;
+        Float dBdd = dBdD * Float(2) * d;
         return -dBdd;  // > 0
     }
 }  // namespace sym::codim_ipc_contact

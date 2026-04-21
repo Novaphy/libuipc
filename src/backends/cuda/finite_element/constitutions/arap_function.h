@@ -6,9 +6,6 @@ namespace uipc::backend::cuda
 {
 namespace sym::arap_3d
 {
-    constexpr double sqrt2 =
-        1.4142135623730950488016887242096980785696718753769480731766797379907324784621070388503875343276;
-
     // Function to compute the ARAP energy
     template <typename T>
     __host__ __device__ void E(T&                            energy,
@@ -76,9 +73,10 @@ namespace sym::arap_3d
         T2.row(1) = Eigen::Vector3<T>(0, 0, 0);
         T2.row(2) = Eigen::Vector3<T>(-1, 0, 0);
 
-        T0 = (1 / sqrt2) * U * T0 * V.transpose();
-        T1 = (1 / sqrt2) * U * T1 * V.transpose();
-        T2 = (1 / sqrt2) * U * T2 * V.transpose();
+        const T inv_sqrt2 = static_cast<T>(0.7071067811865475244008443621048490392848359376884740365883398690);
+        T0 = inv_sqrt2 * U * T0 * V.transpose();
+        T1 = inv_sqrt2 * U * T1 * V.transpose();
+        T2 = inv_sqrt2 * U * T2 * V.transpose();
 
         // Flatten the twist modes
         Eigen::Matrix<T, 9, 1> t0 = vec(T0);

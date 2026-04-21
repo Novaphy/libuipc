@@ -33,6 +33,13 @@ class InterAffineBodyConstitution : public SimSystem
 
     virtual U64 get_uid() const noexcept = 0;  // unique identifier for this constitution
 
+    template <typename ForEachGeometry>
+    void for_each(span<S<geometry::GeometrySlot>> geo_slots,
+                  ForEachGeometry&&               for_every_geometry)
+    {
+        InterAffineBodyConstitutionManager::FilteredInfo info{&m_manager->m_impl, m_index};
+        info.for_each(geo_slots, std::forward<ForEachGeometry>(for_every_geometry));
+    }
 
   private:
     friend class InterAffineBodyConstitutionManager;
@@ -46,5 +53,6 @@ class InterAffineBodyConstitution : public SimSystem
     void compute_gradient_hessian(ComputeGradientHessianInfo& info);
 
     IndexT m_index = -1;  // index in the InterAffineBodyConstitutionManager
+    SimSystemSlot<InterAffineBodyConstitutionManager> m_manager;
 };
 }  // namespace uipc::backend::cuda

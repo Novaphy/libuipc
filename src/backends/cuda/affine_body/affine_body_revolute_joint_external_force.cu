@@ -8,6 +8,18 @@
 
 namespace uipc::backend::cuda
 {
+namespace
+{
+constexpr Float revolute_joint_lever_arm_sq_eps()
+{
+#if defined(UIPC_FLOAT_SCALAR) && UIPC_FLOAT_SCALAR
+    return Float(1e-8);
+#else
+    return Float(1e-12);
+#endif
+}
+}  // namespace
+
 class AffineBodyRevoluteJointExternalForce final : public AffineBodyExternalForceReporter
 {
   public:
@@ -84,16 +96,14 @@ class AffineBodyRevoluteJointExternalForce final : public AffineBodyExternalForc
                        //   F = tau * (e × r) / |r|^2
                        // Body_i receives +tau, body_j receives -tau (reaction).
 
-                       constexpr Float eps = 1e-12;
-
                        Vector12 F_i = Vector12::Zero();
-                       if(r_sq_i > eps)
+                       if(r_sq_i > revolute_joint_lever_arm_sq_eps())
                        {
                            F_i.segment<3>(0) = tau * e_world_i.cross(r_i) / r_sq_i;
                        }
 
                        Vector12 F_j = Vector12::Zero();
-                       if(r_sq_j > eps)
+                       if(r_sq_j > revolute_joint_lever_arm_sq_eps())
                        {
                            F_j.segment<3>(0) = -tau * e_world_j.cross(r_j) / r_sq_j;
                        }

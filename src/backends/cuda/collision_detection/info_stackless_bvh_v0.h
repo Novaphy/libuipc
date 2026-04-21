@@ -1,3 +1,6 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+#include "info_stackless_bvh_v0_corex.h"
+#else
 #pragma once
 #include <type_define.h>
 #include <collision_detection/aabb.h>
@@ -173,3 +176,4 @@ class InfoStacklessBVHV0
 }  // namespace uipc::backend::cuda
 
 #include "details/info_stackless_bvh_v0.inl"
+#endif

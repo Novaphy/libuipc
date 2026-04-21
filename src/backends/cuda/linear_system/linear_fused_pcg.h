@@ -1,3 +1,6 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+#include "linear_fused_pcg_corex.h"
+#else
 #pragma once
 #include <linear_system/iterative_solver.h>
 #include <muda/buffer/device_var.h>
@@ -41,3 +44,4 @@ class LinearFusedPCG : public IterativeSolver
     SizeT check_interval  = 5;
 };
 }  // namespace uipc::backend::cuda
+#endif
