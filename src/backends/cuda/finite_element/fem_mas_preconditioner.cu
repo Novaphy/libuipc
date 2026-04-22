@@ -405,6 +405,7 @@ class FEMMASPreconditioner : public LocalPreconditioner
 
         // MAS assembly for partitioned vertices
         fill_identity_indices(sorted_indices, triplet_count);
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
         engine.set_preconditioner(A.values().data(),
                                   A.row_indices().data(),
                                   A.col_indices().data(),
@@ -412,6 +413,14 @@ class FEMMASPreconditioner : public LocalPreconditioner
                                   dof_offset / 3,
                                   static_cast<int>(triplet_count),
                                   0);
+#else
+        engine.set_preconditioner(A.values(),
+                                  A.row_indices(),
+                                  A.col_indices(),
+                                  sorted_indices.view(),
+                                  dof_offset / 3,
+                                  0);
+#endif
 
         auto dump_mas = world().scene().config().find<IndexT>("extras/debug/dump_mas_matrices");
         if(dump_mas && dump_mas->view()[0] != 0)

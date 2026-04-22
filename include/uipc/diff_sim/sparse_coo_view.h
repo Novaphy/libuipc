@@ -2,12 +2,7 @@
 #include <uipc/common/dllexport.h>
 #include <uipc/common/type_define.h>
 #include <uipc/common/span.h>
-
-namespace Eigen
-{
-template <typename _Scalar, int _Options, typename _StorageIndex>
-class SparseMatrix;
-}
+#include <Eigen/Sparse>
 
 namespace uipc::diff_sim
 {
@@ -27,7 +22,7 @@ class UIPC_CORE_API SparseCOOView
     Vector2i           shape() const;
 
     Matrix<Float, Eigen::Dynamic, Eigen::Dynamic> to_dense() const;
-    Eigen::SparseMatrix<Float, Eigen::ColMajor, IndexT> to_sparse() const;
+    Eigen::SparseMatrix<Float> to_sparse() const;
 
   private:
     span<const IndexT> m_row_indices;

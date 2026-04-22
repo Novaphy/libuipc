@@ -74,32 +74,20 @@ class ABDBDF1Integrator final : public ABDTimeIntegrator
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
         if(n > 0)
         {
-            Float dt = info.dt();
-            std::vector<Vector12> h_q(n), h_qv(n), h_grav(n), h_ext(n), h_qprev(n), h_qt(n);
-            std::vector<IndexT>   h_fixed(n), h_dyn(n);
-
-            cudaMemcpy(h_q.data(), info.qs().data(), n*sizeof(Vector12), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_qv.data(), info.q_vs().data(), n*sizeof(Vector12), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_grav.data(), info.gravities().data(), n*sizeof(Vector12), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_ext.data(), info.external_force_accs().data(), n*sizeof(Vector12), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_fixed.data(), info.is_fixed().data(), n*sizeof(IndexT), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_dyn.data(), info.is_dynamic().data(), n*sizeof(IndexT), cudaMemcpyDeviceToHost);
-
-            for(int i = 0; i < n; ++i)
-            {
-                h_qprev[i] = h_q[i];
-                Vector12 q_tilde = h_qprev[i];
-                if(!h_fixed[i])
-                {
-                    q_tilde += (h_grav[i] + h_ext[i]) * dt * dt;
-                    if(h_dyn[i])
-                        q_tilde += h_qv[i] * dt;
-                }
-                h_qt[i] = q_tilde;
-            }
-
-            cudaMemcpy((void*)info.q_prevs().data(), h_qprev.data(), n*sizeof(Vector12), cudaMemcpyHostToDevice);
-            cudaMemcpy((void*)info.q_tildes().data(), h_qt.data(), n*sizeof(Vector12), cudaMemcpyHostToDevice);
+            constexpr int block = 128;
+            int grid            = (n + block - 1) / block;
+            bdf1_predict_dof_kernel<<<grid, block>>>(n,
+                                                     info.dt(),
+                                                     info.is_fixed().data(),
+                                                     info.is_dynamic().data(),
+                                                     info.qs().data(),
+                                                     info.q_vs().data(),
+                                                     info.gravities().data(),
+                                                     info.external_force_accs().data(),
+                                                     info.q_prevs().data(),
+                                                     info.q_tildes().data());
+            checkCudaErrors(cudaGetLastError());
+            checkCudaErrors(cudaDeviceSynchronize());
         }
 #else
         ParallelFor()
@@ -147,16 +135,12 @@ class ABDBDF1Integrator final : public ABDTimeIntegrator
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
         if(n > 0)
         {
-            Float inv_dt = 1.0 / info.dt();
-            std::vector<Vector12> h_q(n), h_qprev(n), h_qv(n);
-
-            cudaMemcpy(h_q.data(), info.qs().data(), n*sizeof(Vector12), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_qprev.data(), info.q_prevs().data(), n*sizeof(Vector12), cudaMemcpyDeviceToHost);
-
-            for(int i = 0; i < n; ++i)
-                h_qv[i] = (h_q[i] - h_qprev[i]) * inv_dt;
-
-            cudaMemcpy((void*)info.q_vs().data(), h_qv.data(), n*sizeof(Vector12), cudaMemcpyHostToDevice);
+            constexpr int block = 128;
+            int grid            = (n + block - 1) / block;
+            bdf1_update_state_kernel<<<grid, block>>>(
+                n, Float(1) / info.dt(), info.qs().data(), info.q_prevs().data(), info.q_vs().data());
+            checkCudaErrors(cudaGetLastError());
+            checkCudaErrors(cudaDeviceSynchronize());
         }
 #else
         ParallelFor()

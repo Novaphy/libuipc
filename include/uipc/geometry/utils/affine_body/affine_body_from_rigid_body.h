@@ -42,4 +42,33 @@ UIPC_GEOMETRY_API Matrix12x12 build_abd_mass_matrix(
     Float             m,
     const Vector3&    m_x_bar,
     const Matrix3x3&  m_x_bar_x_bar);
+
+/**
+ * @brief Inverse of from_rigid_body / build_abd_mass_matrix.
+ *
+ * Given the dyadic ABD mass components (m, m*c, S), recover the standard
+ * rigid body quantities:
+ *   - total_mass     = m
+ *   - center_of_mass = m_x_bar / m
+ *   - inertia_cm     = (tr(S) * I_3 - S) - m * (|c|^2 I_3 - c c^T)
+ *
+ * If m <= 0, returns total_mass = m and zeros for center/inertia.
+ */
+UIPC_GEOMETRY_API void to_rigid_body(
+    Float             m,
+    const Vector3&    m_x_bar,
+    const Matrix3x3&  m_x_bar_x_bar,
+    Float&            total_mass,
+    Vector3&          center_of_mass,
+    Matrix3x3&        inertia_cm);
+
+/**
+ * @brief Convenience overload that decomposes a 12x12 ABD mass matrix
+ * into rigid-body quantities.
+ */
+UIPC_GEOMETRY_API void to_rigid_body(
+    const Matrix12x12& mass_matrix,
+    Float&             total_mass,
+    Vector3&           center_of_mass,
+    Matrix3x3&         inertia_cm);
 }  // namespace uipc::geometry::affine_body

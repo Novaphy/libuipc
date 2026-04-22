@@ -7,19 +7,53 @@
 #include <collision_detection/global_trajectory_filter.h>
 #include <sim_engine.h>
 #include <algorithm>
+#include <cstdlib>
 #include <vector>
 
 /*************************************************************************************************
 * Core Implementation
 *************************************************************************************************/
+
 namespace uipc::backend::cuda
 {
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+// CoreX: muda::ParallelFor device lambdas can silently fail; use explicit __global__ kernels.
+// Per-vertex Vector3* matches buffer layout (do not cast to flat double/float*).
+// Ref: docs/Libuipc在国产平台天数Corex环境上的适配移植（3.27～4.3）.md §1.2
+__global__ void kernel_gvm_step_forward(int N, Vector3* pos, const Vector3* safe_pos,
+                                        const Vector3* disp, Float alpha)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    pos[i] = safe_pos[i] + alpha * disp[i];
+}
+
+__global__ void kernel_gvm_setup_ccd(int N, Vector3* pos, Vector3* tmp, Vector3* disp,
+                                     const Vector3* base_pos)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    disp[i] = pos[i] - base_pos[i];
+    tmp[i]  = pos[i];
+    pos[i]  = base_pos[i];
+}
+#endif
+
 REGISTER_SIM_SYSTEM(GlobalVertexManager);
 
 void GlobalVertexManager::do_build()
 {
     auto d_hat = world().scene().config().find<Float>("contact/d_hat");
     m_impl.default_d_hat = d_hat->view()[0];
+#if defined(UIPC_FLOAT_SCALAR)
+    if(const char* env = std::getenv("UIPC_FLOAT_D_HAT_SCALE"))
+    {
+        char* end = nullptr;
+        double factor = std::strtod(env, &end);
+        if(end != env && factor > 0.0)
+            m_impl.default_d_hat *= static_cast<Float>(factor);
+    }
+#endif
 
     m_impl.global_trajectory_filter  = find<GlobalTrajectoryFilter>();
     m_impl.global_active_set_manager  = find<GlobalActiveSetManager>();
@@ -60,14 +94,49 @@ void GlobalVertexManager::Impl::init()
     positions.resize(total_count);
     rest_positions.resize(total_count);
     safe_positions.resize(total_count);
+
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    // BufferLaunch().fill() silently fails on CoreX, so resize(N,val) leaves
+    // buffers uninitialized.  Use host vectors + cudaMemcpy for reliable init.
+    contact_element_ids.resize(total_count);
+    subscene_element_ids.resize(total_count);
+    thicknesses.resize(total_count);
+    dimensions.resize(total_count);
+    displacements.resize(total_count);
+    displacement_norms.resize(total_count);
+    body_ids.resize(total_count);
+    d_hats.resize(total_count);
+
+    {
+        int N = static_cast<int>(total_count);
+        std::vector<int>     h_cids(N, 0);
+        std::vector<int>     h_sids(N, 0);
+        std::vector<Float>   h_thick(N, 0.0);
+        std::vector<int>     h_dims(N, 3);
+        std::vector<Vector3> h_disp(N, Vector3::Zero());
+        std::vector<Float>   h_dnorms(N, 0.0);
+        std::vector<int>     h_bids(N, -1);
+        std::vector<Float>   h_dhats(N, default_d_hat);
+
+        cudaMemcpy(contact_element_ids.data(),  h_cids.data(),  N * sizeof(int),     cudaMemcpyHostToDevice);
+        cudaMemcpy(subscene_element_ids.data(), h_sids.data(),  N * sizeof(int),     cudaMemcpyHostToDevice);
+        cudaMemcpy(thicknesses.data(),          h_thick.data(), N * sizeof(Float),   cudaMemcpyHostToDevice);
+        cudaMemcpy(dimensions.data(),           h_dims.data(),  N * sizeof(int),     cudaMemcpyHostToDevice);
+        cudaMemcpy(displacements.data(),        h_disp.data(),  N * sizeof(Vector3), cudaMemcpyHostToDevice);
+        cudaMemcpy(displacement_norms.data(),   h_dnorms.data(),N * sizeof(Float),   cudaMemcpyHostToDevice);
+        cudaMemcpy(body_ids.data(),             h_bids.data(),  N * sizeof(int),     cudaMemcpyHostToDevice);
+        cudaMemcpy(d_hats.data(),               h_dhats.data(), N * sizeof(Float),   cudaMemcpyHostToDevice);
+    }
+#else
     contact_element_ids.resize(total_count, 0);
     subscene_element_ids.resize(total_count, 0);
     thicknesses.resize(total_count, 0.0);
-    dimensions.resize(total_count, 3);  // default 3D
+    dimensions.resize(total_count, 3);
     displacements.resize(total_count, Vector3::Zero());
     displacement_norms.resize(total_count, 0.0);
-    body_ids.resize(total_count, -1);  // -1 means no care about body id
-    d_hats.resize(total_count, default_d_hat);  // use default d_hat if not specified
+    body_ids.resize(total_count, -1);
+    d_hats.resize(total_count, default_d_hat);
+#endif
 
     // 4) Create the subviews for each attribute_reporter,
     //    so that each reporter can write to its own subview
@@ -82,8 +151,16 @@ void GlobalVertexManager::Impl::init()
     }
 
     // 5) Initialize previous positions and safe positions
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    prev_positions.resize(total_count);
+    checkCudaErrors(cudaMemcpy(prev_positions.data(), positions.data(),
+                               sizeof(Vector3) * total_count, cudaMemcpyDeviceToDevice));
+    checkCudaErrors(cudaMemcpy(safe_positions.data(), positions.data(),
+                               sizeof(Vector3) * total_count, cudaMemcpyDeviceToDevice));
+#else
     prev_positions = positions;
     safe_positions = positions;
+#endif
 
     // 6) Other initializations
     axis_max_disp = 0.0;
@@ -115,16 +192,13 @@ void GlobalVertexManager::Impl::step_forward(Float alpha)
 {
     using namespace muda;
 
+    int N = static_cast<int>(positions.size());
+    if(N == 0) return;
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    {
-        int n = static_cast<int>(positions.size());
-        std::vector<Vector3> h_safe(n), h_disp(n), h_pos(n);
-        cudaMemcpy(h_safe.data(), safe_positions.data(), n*sizeof(Vector3), cudaMemcpyDeviceToHost);
-        cudaMemcpy(h_disp.data(), displacements.data(), n*sizeof(Vector3), cudaMemcpyDeviceToHost);
-        for(int i = 0; i < n; ++i)
-            h_pos[i] = h_safe[i] + alpha * h_disp[i];
-        cudaMemcpy(positions.data(), h_pos.data(), n*sizeof(Vector3), cudaMemcpyHostToDevice);
-    }
+    int block = 256;
+    int grid  = (N + block - 1) / block;
+    kernel_gvm_step_forward<<<grid, block>>>(
+        N, positions.data(), safe_positions.data(), displacements.data(), alpha);
 #else
     ParallelFor()
         .file_line(__FILE__, __LINE__)
@@ -151,18 +225,13 @@ void GlobalVertexManager::Impl::setup_ccd(muda::CBufferView<Vector3> base_positi
     auto& tmp_pos = safe_positions;
     UIPC_ASSERT(base_positions.size() == positions.size(),
                 "Base positions size not equal to vertex count");
+    int N = static_cast<int>(positions.size());
+    if(N == 0) return;
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    {
-        int n = static_cast<int>(positions.size());
-        std::vector<Vector3> h_pos(n), h_base(n), h_disp(n);
-        cudaMemcpy(h_pos.data(), positions.data(), n*sizeof(Vector3), cudaMemcpyDeviceToHost);
-        cudaMemcpy(h_base.data(), base_positions.data(), n*sizeof(Vector3), cudaMemcpyDeviceToHost);
-        for(int i = 0; i < n; ++i)
-            h_disp[i] = h_pos[i] - h_base[i];
-        cudaMemcpy(displacements.data(), h_disp.data(), n*sizeof(Vector3), cudaMemcpyHostToDevice);
-        cudaMemcpy(tmp_pos.data(), h_pos.data(), n*sizeof(Vector3), cudaMemcpyHostToDevice);
-        cudaMemcpy(positions.data(), h_base.data(), n*sizeof(Vector3), cudaMemcpyHostToDevice);
-    }
+    int block = 256;
+    int grid  = (N + block - 1) / block;
+    kernel_gvm_setup_ccd<<<grid, block>>>(N, positions.data(), tmp_pos.data(),
+                                          displacements.data(), base_positions.data());
 #else
     muda::ParallelFor()
         .file_line(__FILE__, __LINE__)
@@ -192,7 +261,12 @@ void GlobalVertexManager::Impl::restore_ccd()
 void GlobalVertexManager::Impl::overwrite_positions(muda::CBufferView<Vector3> src)
 {
     UIPC_ASSERT(src.size() == positions.size(), "Source size not equal to vertex count");
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    checkCudaErrors(cudaMemcpy(positions.data(), src.data(),
+                               sizeof(Vector3) * positions.size(), cudaMemcpyDeviceToDevice));
+#else
     muda::BufferLaunch().copy<Vector3>(positions.view(), src);
+#endif
 }
 
 void GlobalVertexManager::VertexAttributeInfo::require_discard_friction() const noexcept
@@ -211,7 +285,12 @@ void GlobalVertexManager::VertexAttributeInfo::require_discard_friction() const 
 void GlobalVertexManager::Impl::record_prev_positions()
 {
     using namespace muda;
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    checkCudaErrors(cudaMemcpy(prev_positions.data(), positions.data(),
+                               sizeof(Vector3) * positions.size(), cudaMemcpyDeviceToDevice));
+#else
     BufferLaunch().copy<Vector3>(prev_positions.view(), std::as_const(positions).view());
+#endif
 }
 
 void GlobalVertexManager::Impl::record_start_point()
@@ -229,24 +308,6 @@ void GlobalVertexManager::Impl::record_start_point()
 
 Float GlobalVertexManager::Impl::compute_axis_max_displacement()
 {
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    {
-        int n = static_cast<int>(displacements.size());
-        std::vector<Vector3> h_disp(n);
-        cudaMemcpy(h_disp.data(), displacements.data(), n*sizeof(Vector3), cudaMemcpyDeviceToHost);
-        Float max_val = 0.0;
-        for(int i = 0; i < n; ++i)
-        {
-            for(int d = 0; d < 3; ++d)
-            {
-                Float v = std::abs(h_disp[i](d));
-                if(v > max_val) max_val = v;
-            }
-        }
-        axis_max_disp = max_val;
-        return max_val;
-    }
-#else
     muda::DeviceReduce().Reduce((Float*)displacements.data(),
                                 axis_max_disp.data(),
                                 displacements.size() * 3,
@@ -258,7 +319,6 @@ Float GlobalVertexManager::Impl::compute_axis_max_displacement()
                                 },
                                 0.0);
     return axis_max_disp;
-#endif
 }
 
 AABB GlobalVertexManager::Impl::compute_vertex_bounding_box()

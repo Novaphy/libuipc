@@ -120,13 +120,11 @@ void AffineBodyDynamics::init()
 void AffineBodyDynamics::Impl::init(WorldVisitor& world)
 {
     _init_dof_info();
-
     _build_constitutions(world);
     _build_geo_infos(world);
     _setup_geometry_attributes(world);
     _build_geometry_on_host(world);
     _build_geometry_on_device(world);
-
     _distribute_geo_infos();
     _init_diff_reporters();
 }
@@ -215,7 +213,6 @@ void AffineBodyDynamics::Impl::_build_constitutions(WorldVisitor& world)
         constitution_body_offsets_counts.offsets();
     span<const IndexT> constitution_vertex_offsets =
         constitution_vertex_offsets_counts.offsets();
-
 
     for(auto&& [i, info] : enumerate(constitution_infos))
     {
@@ -354,7 +351,6 @@ void AffineBodyDynamics::Impl::_build_geometry_on_host(WorldVisitor& world)
             });
     }
 
-
     // 2) Setup `J` for every vertex
     {
         h_vertex_id_to_J.resize(abd_vertex_count);
@@ -384,7 +380,6 @@ void AffineBodyDynamics::Impl::_build_geometry_on_host(WorldVisitor& world)
                      }
                  });
     }
-
 
     // 3) Setup:
     // - `vertex_id_to_body_id`
@@ -631,7 +626,6 @@ void AffineBodyDynamics::Impl::_build_geometry_on_host(WorldVisitor& world)
             });
     }
 
-
     // 5) Compute the inverse of the mass matrix
     h_body_id_to_abd_mass_inv.resize(abd_body_count);
     std::ranges::transform(h_body_id_to_abd_mass,
@@ -645,8 +639,6 @@ void AffineBodyDynamics::Impl::_build_geometry_on_host(WorldVisitor& world)
         auto    gravity_attr = scene.config().find<Vector3>("gravity");
         Vector3 gravity      = gravity_attr->view()[0];
         h_body_id_to_abd_gravity.resize(abd_body_count, Vector12::Zero());
-        body_id_to_external_force.resize(abd_body_count);
-        body_id_to_external_force_acc.resize(abd_body_count);
         for_each(
             geo_slots,
             [&](const ForEachInfo& I, geometry::SimplicialComplex& sc)
@@ -661,7 +653,6 @@ void AffineBodyDynamics::Impl::_build_geometry_on_host(WorldVisitor& world)
                 auto sub_Js = Js.subspan(vert_offset, vert_count);
                 // auto sub_mass = vertex_mass.subspan(vert_offset, vert_count);
 
-
                 auto gravity_attr = sc.instances().find<Vector3>(builtin::gravity);
                 auto gravity_view =
                     gravity_attr ? gravity_attr->view() : span<const Vector3>{};
@@ -669,7 +660,8 @@ void AffineBodyDynamics::Impl::_build_geometry_on_host(WorldVisitor& world)
                 auto mass_override = sc.meta().find<Float>(builtin::abd_mass);
 
                 auto rho = sc.meta().find<Float>(builtin::mass_density);
-                UIPC_ASSERT(rho, "The `mass_density` attribute is not found in the affine body geometry, why can it happen?");
+                UIPC_ASSERT(rho,
+                            "The `mass_density` attribute is not found in the affine body geometry, why can it happen?");
                 auto rho_view = rho->view();
 
                 for(auto i : range(body_count))
@@ -703,7 +695,6 @@ void AffineBodyDynamics::Impl::_build_geometry_on_host(WorldVisitor& world)
                 }
             });
     }
-
 
     // 7) Setup the boundary type
     {
@@ -741,32 +732,143 @@ void AffineBodyDynamics::Impl::_build_geometry_on_host(WorldVisitor& world)
 
 void AffineBodyDynamics::Impl::_build_geometry_on_device(WorldVisitor& world)
 {
-    auto async_copy = []<typename T>(span<T> src, muda::DeviceBuffer<T>& dst)
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+
+    // CoreX workaround: muda::DeviceBuffer::resize() can hang on the first allocation path.
+    // Bypass resize() here and manage the buffer storage directly with cudaMalloc/cudaFree.
+    auto corex_raw_resize = []<typename T>(muda::DeviceBuffer<T>& dst, size_t n)
     {
+        struct DeviceBufferHack
+        {
+            size_t m_size;
+            size_t m_capacity;
+            T*     m_data;
+        };
+
+        auto& hack = reinterpret_cast<DeviceBufferHack&>(dst);
+        size_t alloc_n = n;
+        if(n > 0)
+        {
+            constexpr size_t min_alloc_bytes = 256;
+            const size_t     min_alloc_n =
+                (min_alloc_bytes + sizeof(T) - 1) / sizeof(T);
+            alloc_n = std::max(n, min_alloc_n);
+        }
+
+        if(hack.m_capacity < alloc_n)
+        {
+            if(hack.m_data)
+                checkCudaErrors(cudaFree(hack.m_data));
+
+            if(alloc_n > 0)
+            {
+                const size_t alloc_bytes = alloc_n * sizeof(T);
+
+                auto alloc_err =
+                    cudaMalloc(reinterpret_cast<void**>(&hack.m_data), alloc_bytes);
+                if(alloc_err == cudaSuccess)
+                {
+                }
+                else
+                {
+                    (void)cudaGetLastError();
+
+                    size_t pitch = 0;
+                    alloc_err = cudaMallocPitch(reinterpret_cast<void**>(&hack.m_data),
+                                               &pitch,
+                                               alloc_bytes,
+                                               1);
+                    if(alloc_err == cudaSuccess)
+                    {
+                    }
+                    else
+                    {
+                        (void)cudaGetLastError();
+
+                        auto extent = make_cudaExtent(alloc_bytes, 1, 1);
+                        cudaPitchedPtr pitched_ptr{};
+                        alloc_err = cudaMalloc3D(&pitched_ptr, extent);
+                        if(alloc_err == cudaSuccess)
+                        {
+                            hack.m_data = reinterpret_cast<T*>(pitched_ptr.ptr);
+                        }
+                        else
+                        {
+                        }
+                    }
+                }
+                checkCudaErrors(alloc_err);
+            }
+            else
+                hack.m_data = nullptr;
+
+            hack.m_capacity = alloc_n;
+        }
+        hack.m_size = n;
+    };
+#endif
+    auto async_copy = [&]<typename T>(span<T> src, muda::DeviceBuffer<T>& dst)
+    {
+        if(src.size() == 0)
+            return;
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        corex_raw_resize(dst, src.size());
+        checkCudaErrors(cudaMemcpy(dst.view().data(),
+                                   src.data(),
+                                   src.size() * sizeof(T),
+                                   cudaMemcpyHostToDevice));
+#else
         muda::BufferLaunch().resize<T>(dst, src.size());
         muda::BufferLaunch().copy<T>(dst.view(), src.data());
+#endif
     };
 
-    async_copy(span{h_body_id_to_q}, body_id_to_q);
-    async_copy(span{h_body_id_to_q_v}, body_id_to_q_v);
-    async_copy(span{h_body_id_to_dim}, body_id_to_dim);
-    async_copy(span{h_vertex_id_to_J}, vertex_id_to_J);
-    async_copy(span{h_vertex_id_to_body_id}, vertex_id_to_body_id);
-    async_copy(span{h_body_id_to_abd_mass}, body_id_to_abd_mass);
-    async_copy(span{h_body_id_to_volume}, body_id_to_volume);
-    async_copy(span{h_body_id_to_abd_mass_inv}, body_id_to_abd_mass_inv);
-    async_copy(span{h_body_id_to_total_mass}, body_id_to_total_mass);
-    async_copy(span{h_body_id_to_inertia_tensor}, body_id_to_inertia_tensor);
-    async_copy(span{h_body_id_to_abd_gravity}, body_id_to_abd_gravity);
-    async_copy(span{h_body_id_to_is_fixed}, body_id_to_is_fixed);
-    async_copy(span{h_body_id_to_is_dynamic}, body_id_to_is_dynamic);
-    async_copy(span{h_body_id_to_external_kinetic}, body_id_to_external_kinetic);
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    auto named_async_copy = [&](const char* name, auto src, auto& dst)
+    {
+        async_copy(src, dst);
+        checkCudaErrors(cudaDeviceSynchronize());
+    };
+#else
+    auto named_async_copy = [&](const char*, auto src, auto& dst) { async_copy(src, dst); };
+#endif
+
+    named_async_copy("body_id_to_dim", span{h_body_id_to_dim}, body_id_to_dim);
+    named_async_copy("body_id_to_q", span{h_body_id_to_q}, body_id_to_q);
+    named_async_copy("body_id_to_q_v", span{h_body_id_to_q_v}, body_id_to_q_v);
+    named_async_copy("vertex_id_to_J", span{h_vertex_id_to_J}, vertex_id_to_J);
+    named_async_copy("vertex_id_to_body_id", span{h_vertex_id_to_body_id}, vertex_id_to_body_id);
+    named_async_copy("body_id_to_abd_mass", span{h_body_id_to_abd_mass}, body_id_to_abd_mass);
+    named_async_copy("body_id_to_volume", span{h_body_id_to_volume}, body_id_to_volume);
+    named_async_copy("body_id_to_abd_mass_inv", span{h_body_id_to_abd_mass_inv}, body_id_to_abd_mass_inv);
+    named_async_copy("body_id_to_total_mass", span{h_body_id_to_total_mass}, body_id_to_total_mass);
+    named_async_copy("body_id_to_inertia_tensor", span{h_body_id_to_inertia_tensor}, body_id_to_inertia_tensor);
+    named_async_copy("body_id_to_abd_gravity", span{h_body_id_to_abd_gravity}, body_id_to_abd_gravity);
+    named_async_copy("body_id_to_is_fixed", span{h_body_id_to_is_fixed}, body_id_to_is_fixed);
+    named_async_copy("body_id_to_is_dynamic", span{h_body_id_to_is_dynamic}, body_id_to_is_dynamic);
+    named_async_copy("body_id_to_external_kinetic", span{h_body_id_to_external_kinetic}, body_id_to_external_kinetic);
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    corex_raw_resize(body_id_to_external_force, abd_body_count);
+    checkCudaErrors(cudaMemset(body_id_to_external_force.view().data(),
+                               0,
+                               abd_body_count * sizeof(Vector12)));
+    corex_raw_resize(body_id_to_external_force_acc, abd_body_count);
+    checkCudaErrors(cudaMemset(body_id_to_external_force_acc.view().data(),
+                               0,
+                               abd_body_count * sizeof(Vector12)));
+    checkCudaErrors(cudaDeviceSynchronize());
+#else
+    muda::BufferLaunch().resize<Vector12>(body_id_to_external_force, abd_body_count);
+    muda::BufferLaunch().fill<Vector12>(body_id_to_external_force.view(), Vector12::Zero().eval());
+    muda::BufferLaunch().resize<Vector12>(body_id_to_external_force_acc, abd_body_count);
+    muda::BufferLaunch().fill<Vector12>(body_id_to_external_force_acc.view(), Vector12::Zero().eval());
+#endif
 
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    auto async_transfer = []<typename T>(const muda::DeviceBuffer<T>& src,
-                                         muda::DeviceBuffer<T>&       dst)
+    auto async_transfer = [&]<typename T>(const muda::DeviceBuffer<T>& src,
+                                          muda::DeviceBuffer<T>&       dst)
     {
-        muda::BufferLaunch().resize<T>(dst, src.size());
+        corex_raw_resize(dst, src.size());
         checkCudaErrors(cudaMemcpy(dst.view().data(),
                                    src.view().data(),
                                    src.size() * sizeof(T),
@@ -784,10 +886,14 @@ void AffineBodyDynamics::Impl::_build_geometry_on_device(WorldVisitor& world)
     async_transfer(body_id_to_q, body_id_to_q_temp);
     async_transfer(body_id_to_q, body_id_to_q_tilde);
     async_transfer(body_id_to_q, body_id_to_q_prev);
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    checkCudaErrors(cudaDeviceSynchronize());
+
+#endif
 
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
     {
-        muda::BufferLaunch().resize<Vector12>(body_id_to_dq, abd_body_count);
+        corex_raw_resize(body_id_to_dq, abd_body_count);
         checkCudaErrors(cudaMemset(body_id_to_dq.view().data(),
                                    0,
                                    abd_body_count * sizeof(Vector12)));
@@ -800,6 +906,11 @@ void AffineBodyDynamics::Impl::_build_geometry_on_device(WorldVisitor& world)
     };
 
     async_resize(body_id_to_dq, abd_body_count, Vector12::Zero().eval());
+#endif
+
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    checkCudaErrors(cudaDeviceSynchronize());
+
 #endif
 
     muda::wait_stream(nullptr);
@@ -892,7 +1003,6 @@ IndexT AffineBodyDynamics::Impl::dof_count(SizeT frame) const
     return frame_to_dof_count[frame];
 }
 }  // namespace uipc::backend::cuda
-
 
 // Dump & Recover:
 namespace uipc::backend::cuda

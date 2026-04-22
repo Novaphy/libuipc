@@ -42,6 +42,24 @@ class UIPC_CONSTITUTION_API AffineBodyConstitution : public IConstitution
                   const Matrix12x12&           mass,
                   Float                        volume) const;
 
+    /**
+     * @brief Build an ABD-ready proxy SimplicialComplex from rigid-body
+     * inertia inputs (mass, center, inertia tensor) and a volume.
+     */
+    geometry::SimplicialComplex create_proxy(Float            kappa,
+                                             Float            mass,
+                                             const Vector3&   mass_center,
+                                             const Matrix3x3& inertia,
+                                             Float            volume) const;
+
+    /**
+     * @brief Build an ABD-ready proxy SimplicialComplex from an explicit
+     * 12x12 ABD mass matrix and a volume.
+     */
+    geometry::SimplicialComplex create_proxy(Float              kappa,
+                                             const Matrix12x12& abd_mass,
+                                             Float              volume) const;
+
     static Json default_config() noexcept;
 
   protected:
@@ -57,10 +75,13 @@ class UIPC_CONSTITUTION_API AffineBodyConstitution : public IConstitution
      * Subclasses (AffineBodyShell, AffineBodyRod) call this with their
      * own pre-computed volume instead of compute_mesh_volume().
      */
-    void setup_abd_attributes(geometry::SimplicialComplex& sc,
-                              Float                        kappa,
-                              Float                        mass_density,
-                              Float                        volume) const;
+    void create_abd_attributes(geometry::SimplicialComplex& sc,
+                               Float                        kappa,
+                               Float                        mass_density,
+                               Float                        volume,
+                               Float                        m,
+                               const Vector3&               m_x_bar,
+                               const Matrix3x3&             m_x_bar_x_bar) const;
 
   private:
     Json m_config;

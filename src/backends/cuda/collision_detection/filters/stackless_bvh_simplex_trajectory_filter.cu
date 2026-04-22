@@ -10,6 +10,9 @@
 #include <uipc/common/zip.h>
 #include <utils/primitive_d_hat.h>
 #include <cstdio>
+#include <cstdlib>
+#include <algorithm>
+#include <string>
 
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 namespace uipc::backend::cuda::corex_filter
@@ -81,6 +84,406 @@ static __global__ void kernel_build_triangle_aabbs(
     aabbs[i] = aabb;
 }
 
+static __global__ void kernel_filter_toi_PP(
+    int N, const Vector2i* pairs, const IndexT* codim_vertices, const IndexT* surf_vertices,
+    const Float* thicknesses, const Vector3* positions, const Vector3* displacements,
+    const Float* d_hats, Float alpha, Float eta, SizeT max_iter, Float large_enough_toi,
+    Float* out_tois)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    auto   indices = pairs[i];
+    IndexT V0      = surf_vertices[indices(0)];
+    IndexT V1      = codim_vertices[indices(1)];
+
+    Float thickness = PP_thickness(thicknesses[V0], thicknesses[V1]);
+    Float d_hat     = PP_d_hat(d_hats[V0], d_hats[V1]);
+
+    Vector3 VP0  = positions[V0];
+    Vector3 VP1  = positions[V1];
+    Vector3 dVP0 = alpha * displacements[V0];
+    Vector3 dVP1 = alpha * displacements[V1];
+
+    Float toi = large_enough_toi;
+
+    bool faraway = !distance::point_point_ccd_broadphase(
+        VP0, VP1, dVP0, dVP1, d_hat + thickness);
+
+    if(!faraway)
+    {
+        bool hit = distance::point_point_ccd(
+            VP0, VP1, dVP0, dVP1, eta, thickness, static_cast<int>(max_iter), toi);
+        if(!hit) toi = large_enough_toi;
+    }
+    out_tois[i] = toi;
+}
+
+static __global__ void kernel_filter_toi_PE(
+    int N, const Vector2i* pairs, const IndexT* codim_vertices, const Vector2i* surf_edges,
+    const Float* thicknesses, const Vector3* positions, const Vector3* displacements,
+    const Float* d_hats, Float alpha, Float eta, SizeT max_iter, Float large_enough_toi,
+    Float* out_tois)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    auto     indices = pairs[i];
+    IndexT   V       = codim_vertices[indices(0)];
+    Vector2i E       = surf_edges[indices(1)];
+
+    Float thickness =
+        PE_thickness(thicknesses[V], thicknesses[E(0)], thicknesses[E(1)]);
+    Float d_hat = PE_d_hat(d_hats[V], d_hats[E(0)], d_hats[E(1)]);
+
+    Vector3 VP  = positions[V];
+    Vector3 dVP = alpha * displacements[V];
+
+    Vector3 EP0  = positions[E[0]];
+    Vector3 EP1  = positions[E[1]];
+    Vector3 dEP0 = alpha * displacements[E[0]];
+    Vector3 dEP1 = alpha * displacements[E[1]];
+
+    Float toi = large_enough_toi;
+
+    bool faraway = !distance::point_edge_ccd_broadphase(
+        VP, EP0, EP1, dVP, dEP0, dEP1, d_hat + thickness);
+
+    if(!faraway)
+    {
+        bool hit = distance::point_edge_ccd(
+            VP, EP0, EP1, dVP, dEP0, dEP1, eta, thickness, static_cast<int>(max_iter), toi);
+        if(!hit) toi = large_enough_toi;
+    }
+    out_tois[i] = toi;
+}
+
+static __global__ void kernel_filter_toi_PT(
+    int N, const Vector2i* pairs, const IndexT* surf_vertices, const Vector3i* surf_triangles,
+    const Float* thicknesses, const Vector3* positions, const Vector3* displacements,
+    const Float* d_hats, Float alpha, Float eta, SizeT max_iter, Float large_enough_toi,
+    Float* out_tois)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    auto     indices = pairs[i];
+    IndexT   V       = surf_vertices[indices(0)];
+    Vector3i F       = surf_triangles[indices(1)];
+
+    Float thickness = PT_thickness(thicknesses[V],
+                                 thicknesses[F(0)],
+                                 thicknesses[F(1)],
+                                 thicknesses[F(2)]);
+    Float d_hat =
+        PT_d_hat(d_hats[V], d_hats[F(0)], d_hats[F(1)], d_hats[F(2)]);
+
+    Vector3 VP  = positions[V];
+    Vector3 dVP = alpha * displacements[V];
+
+    Vector3 FP0 = positions[F[0]];
+    Vector3 FP1 = positions[F[1]];
+    Vector3 FP2 = positions[F[2]];
+
+    Vector3 dFP0 = alpha * displacements[F[0]];
+    Vector3 dFP1 = alpha * displacements[F[1]];
+    Vector3 dFP2 = alpha * displacements[F[2]];
+
+    Float toi = large_enough_toi;
+
+    bool faraway = !distance::point_triangle_ccd_broadphase(
+        VP, FP0, FP1, FP2, dVP, dFP0, dFP1, dFP2, d_hat + thickness);
+
+    if(!faraway)
+    {
+        bool hit = distance::point_triangle_ccd(
+            VP, FP0, FP1, FP2, dVP, dFP0, dFP1, dFP2, eta, thickness, static_cast<int>(max_iter), toi);
+        if(!hit) toi = large_enough_toi;
+    }
+    out_tois[i] = toi;
+}
+
+static __global__ void kernel_filter_toi_EE(
+    int N, const Vector2i* pairs, const Vector2i* surf_edges, const Float* thicknesses,
+    const Vector3* positions, const Vector3* displacements, const Float* d_hats, Float alpha,
+    Float eta, SizeT max_iter, Float large_enough_toi, Float* out_tois)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    auto     indices = pairs[i];
+    Vector2i E0      = surf_edges[indices(0)];
+    Vector2i E1      = surf_edges[indices(1)];
+
+    Float thickness = EE_thickness(thicknesses[E0(0)],
+                                   thicknesses[E0(1)],
+                                   thicknesses[E1(0)],
+                                   thicknesses[E1(1)]);
+
+    Float d_hat =
+        EE_d_hat(d_hats[E0(0)], d_hats[E0(1)], d_hats[E1(0)], d_hats[E1(1)]);
+
+    Vector3 EP0  = positions[E0[0]];
+    Vector3 EP1  = positions[E0[1]];
+    Vector3 dEP0 = alpha * displacements[E0[0]];
+    Vector3 dEP1 = alpha * displacements[E0[1]];
+
+    Vector3 EP2  = positions[E1[0]];
+    Vector3 EP3  = positions[E1[1]];
+    Vector3 dEP2 = alpha * displacements[E1[0]];
+    Vector3 dEP3 = alpha * displacements[E1[1]];
+
+    Float toi = large_enough_toi;
+
+    bool faraway = !distance::edge_edge_ccd_broadphase(
+        EP0, EP1, EP2, EP3, dEP0, dEP1, dEP2, dEP3, d_hat + thickness);
+
+    if(!faraway)
+    {
+        bool hit = distance::edge_edge_ccd(
+            EP0, EP1, EP2, EP3, dEP0, dEP1, dEP2, dEP3, eta, thickness, static_cast<int>(max_iter), toi);
+        if(!hit) toi = large_enough_toi;
+    }
+    out_tois[i] = toi;
+}
+
+// filter_active kernels
+
+static __global__ void kernel_filter_active_PP(
+    int N, const Vector2i* PCodimP_pairs, const IndexT* surf_vertices,
+    const IndexT* codim_vertices, const Vector3* positions,
+    const Float* thicknesses, const Float* d_hats, Vector2i* out_PPs)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    out_PPs[i].setConstant(-1);
+    Vector2i indices = PCodimP_pairs[i];
+    IndexT P0 = surf_vertices[indices(0)];
+    IndexT P1 = codim_vertices[indices(1)];
+    const auto& V0 = positions[P0];
+    const auto& V1 = positions[P1];
+    Float thickness = PP_thickness(thicknesses[P0], thicknesses[P1]);
+    Float d_hat = PP_d_hat(d_hats[P0], d_hats[P1]);
+    Vector2 range = D_range(thickness, d_hat);
+    Float D;
+    distance::point_point_distance2(V0, V1, D);
+    if(!is_active_D(range, D))
+        return;
+    out_PPs[i] = {P0, P1};
+}
+
+static __global__ void kernel_filter_active_CodimPE(
+    int N, const Vector2i* CodimP_AllE_pairs, const IndexT* codim_vertices,
+    const Vector2i* surf_edges, const Vector3* positions,
+    const Float* thicknesses, const Float* d_hats,
+    Vector2i* out_PPs, Vector3i* out_PEs)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    out_PPs[i].setConstant(-1);
+    out_PEs[i].setConstant(-1);
+    Vector2i indices = CodimP_AllE_pairs[i];
+    IndexT   V       = codim_vertices[indices(0)];
+    Vector2i E       = surf_edges[indices(1)];
+    Vector3i vIs = {V, E(0), E(1)};
+    Vector3 Ps_arr[] = {positions[vIs(0)], positions[vIs(1)], positions[vIs(2)]};
+    Float thickness = PE_thickness(thicknesses[V], thicknesses[E(0)], thicknesses[E(1)]);
+    Float d_hat = PE_d_hat(d_hats[V], d_hats[E(0)], d_hats[E(1)]);
+    Vector3i flag = distance::point_edge_distance_flag(Ps_arr[0], Ps_arr[1], Ps_arr[2]);
+    Vector2 range = D_range(thickness, d_hat);
+    Float D;
+    distance::point_edge_distance2(flag, Ps_arr[0], Ps_arr[1], Ps_arr[2], D);
+    if(!is_active_D(range, D))
+        return;
+    Vector3i offsets;
+    auto dim = distance::degenerate_point_edge(flag, offsets);
+    switch(dim)
+    {
+        case 2:
+        {
+            IndexT V0 = vIs(offsets(0));
+            IndexT V1 = vIs(offsets(1));
+            out_PPs[i] = {V0, V1};
+        }
+        break;
+        case 3:
+        {
+            out_PEs[i] = vIs;
+        }
+        break;
+        default:
+            break;
+    }
+}
+
+static __global__ void kernel_filter_active_PT(
+    int N, const Vector2i* PT_pairs, const IndexT* surf_vertices,
+    const Vector3i* surf_triangles, const Vector3* positions,
+    const Float* thicknesses, const Float* d_hats,
+    Float pt_pe_hyst_scale,
+    Vector2i* out_PPs, Vector3i* out_PEs, Vector4i* out_PTs)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    out_PPs[i].setConstant(-1);
+    out_PEs[i].setConstant(-1);
+    out_PTs[i].setConstant(-1);
+    Vector2i indices = PT_pairs[i];
+    IndexT   V       = surf_vertices[indices(0)];
+    Vector3i F       = surf_triangles[indices(1)];
+    Vector4i vIs  = {V, F(0), F(1), F(2)};
+    Vector3  Ps_arr[] = {positions[vIs(0)], positions[vIs(1)], positions[vIs(2)], positions[vIs(3)]};
+    Float thickness = PT_thickness(thicknesses[V], thicknesses[F(0)], thicknesses[F(1)], thicknesses[F(2)]);
+    Float d_hat = PT_d_hat(d_hats[V], d_hats[F(0)], d_hats[F(1)], d_hats[F(2)]);
+    Vector4i flag = distance::point_triangle_distance_flag(Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3]);
+    Vector2 range = D_range(thickness, d_hat);
+    Float D;
+    distance::point_triangle_distance2(flag, Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3], D);
+    Vector4i offsets;
+    offsets.setConstant(-1);
+    auto dim = distance::degenerate_point_triangle(flag, offsets);
+    bool active = is_active_D(range, D);
+    if(!active && dim == 3)
+    {
+        // Keep near-threshold PT->PE transitions from dropping on one-frame float noise.
+        Float slack = max(static_cast<Float>(1e-6),
+                          (range.y() - range.x()) * pt_pe_hyst_scale);
+        active = (D > range.x()) && (D < range.y() + slack);
+    }
+    if(!active)
+        return;
+    switch(dim)
+    {
+        case 2:
+        {
+            IndexT V0 = vIs(offsets(0));
+            IndexT V1 = vIs(offsets(1));
+            out_PPs[i] = {V0, V1};
+        }
+        break;
+        case 3:
+        {
+            IndexT V0 = vIs(offsets(0));
+            IndexT V1 = vIs(offsets(1));
+            IndexT V2 = vIs(offsets(2));
+            out_PEs[i] = {V0, V1, V2};
+        }
+        break;
+        case 4:
+        {
+            out_PTs[i] = vIs;
+        }
+        break;
+        default:
+            break;
+    }
+}
+
+static __global__ void kernel_filter_active_EE(
+    int N, const Vector2i* EE_pairs, const Vector2i* surf_edges,
+    const Vector3* positions, const Vector3* rest_positions,
+    const Float* thicknesses, const Float* d_hats,
+    Vector2i* out_PPs, Vector3i* out_PEs, Vector4i* out_EEs)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    out_PPs[i].setConstant(-1);
+    out_PEs[i].setConstant(-1);
+    out_EEs[i].setConstant(-1);
+    Vector2i indices = EE_pairs[i];
+    Vector2i E0_edge = surf_edges[indices(0)];
+    Vector2i E1_edge = surf_edges[indices(1)];
+    Vector4i vIs  = {E0_edge(0), E0_edge(1), E1_edge(0), E1_edge(1)};
+    Vector3  Ps_arr[] = {positions[vIs(0)], positions[vIs(1)], positions[vIs(2)], positions[vIs(3)]};
+    Float thickness = EE_thickness(thicknesses[E0_edge(0)], thicknesses[E0_edge(1)],
+                                   thicknesses[E1_edge(0)], thicknesses[E1_edge(1)]);
+    Float d_hat = EE_d_hat(d_hats[E0_edge(0)], d_hats[E0_edge(1)],
+                           d_hats[E1_edge(0)], d_hats[E1_edge(1)]);
+    Vector2 range = D_range(thickness, d_hat);
+    Vector4i flag = distance::edge_edge_distance_flag(Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3]);
+    Float D;
+    distance::edge_edge_distance2(flag, Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3], D);
+    if(D <= range.x())
+    {
+        out_EEs[i] = vIs;
+        return;
+    }
+    if(!is_active_D(range, D))
+        return;
+    Vector4i offsets;
+    auto dim = distance::degenerate_edge_edge(flag, offsets);
+    Float eps_x;
+    distance::edge_edge_mollifier_threshold(rest_positions[vIs(0)], rest_positions[vIs(1)],
+                                            rest_positions[vIs(2)], rest_positions[vIs(3)],
+                                            static_cast<Float>(1e-3), eps_x);
+    if(distance::need_mollify(Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3], eps_x))
+    {
+        out_EEs[i] = vIs;
+        return;
+    }
+    else
+    {
+        switch(dim)
+        {
+            case 2:
+            {
+                IndexT V0 = vIs(offsets(0));
+                IndexT V1 = vIs(offsets(1));
+                out_PPs[i] = {V0, V1};
+            }
+            break;
+            case 3:
+            {
+                IndexT V0 = vIs(offsets(0));
+                IndexT V1 = vIs(offsets(1));
+                IndexT V2 = vIs(offsets(2));
+                out_PEs[i] = {V0, V1, V2};
+            }
+            break;
+            case 4:
+            {
+                out_EEs[i] = vIs;
+            }
+            break;
+            default:
+                break;
+        }
+    }
+}
+
+static __global__ void kernel_invalidate_vector3i(int N, Vector3i* data)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    data[i].setConstant(-1);
+}
+
+static __global__ void kernel_count_valid_vector3i(int N, const Vector3i* data, IndexT* out_count)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    if(data[i](0) != -1)
+        atomicAdd(out_count, static_cast<IndexT>(1));
+}
+
+static __global__ void kernel_mark_point_from_pe(int N, const Vector3i* data, IndexT* point_flags)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    auto pe = data[i];
+    if(pe(0) == -1)
+        return;
+    point_flags[pe(0)] = 1;
+}
+
+static __global__ void kernel_invalidate_pe_if_point_marked(
+    int N, Vector3i* data, const IndexT* point_flags)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    auto pe = data[i];
+    if(pe(0) == -1)
+        return;
+    if(point_flags[pe(0)] != 0)
+        data[i].setConstant(-1);
+}
+
 }  // namespace uipc::backend::cuda::corex_filter
 #endif
 
@@ -129,7 +532,8 @@ muda::CBufferView<Vector2i> StacklessBVHSimplexTrajectoryFilter::candidate_EEs()
 muda::CBufferView<Float> StacklessBVHSimplexTrajectoryFilter::toi_PTs() const noexcept
 {
     auto pp_size = m_impl.candidate_AllP_CodimP_pairs.size();
-    auto pe_size = m_impl.candidate_CodimP_AllE_pairs.size();
+    auto pe_size = m_impl.candidate_CodimP_AllE_pairs.size()
+                 + m_impl.candidate_AllP_AllE_pairs.size();
     auto pt_size = m_impl.candidate_AllP_AllT_pairs.size();
     return m_impl.tois.view(pp_size + pe_size, pt_size);
 }
@@ -137,7 +541,8 @@ muda::CBufferView<Float> StacklessBVHSimplexTrajectoryFilter::toi_PTs() const no
 muda::CBufferView<Float> StacklessBVHSimplexTrajectoryFilter::toi_EEs() const noexcept
 {
     auto pp_size = m_impl.candidate_AllP_CodimP_pairs.size();
-    auto pe_size = m_impl.candidate_CodimP_AllE_pairs.size();
+    auto pe_size = m_impl.candidate_CodimP_AllE_pairs.size()
+                 + m_impl.candidate_AllP_AllE_pairs.size();
     auto pt_size = m_impl.candidate_AllP_AllT_pairs.size();
     auto ee_size = m_impl.candidate_AllE_AllE_pairs.size();
     return m_impl.tois.view(pp_size + pe_size + pt_size, ee_size);
@@ -154,6 +559,244 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
     auto Vs      = info.surf_vertices();
     auto Es      = info.surf_edges();
     auto Fs      = info.surf_triangles();
+    const bool trace_simplex_filter = (std::getenv("UIPC_COREX_TRACE_SIMPLEX_FILTER") != nullptr);
+
+    if(trace_simplex_filter)
+    {
+        static int detect_call = 0;
+        if(detect_call < 4 || (detect_call % 50 == 0))
+        {
+            int nv = (int)Ps.size();
+            std::vector<Vector3> h_pos(nv);
+            std::vector<Vector3> h_disp(nv);
+            cudaMemcpy(h_pos.data(), Ps.data(), nv * sizeof(Vector3), cudaMemcpyDeviceToHost);
+            cudaMemcpy(h_disp.data(), dxs.data(), nv * sizeof(Vector3), cudaMemcpyDeviceToHost);
+            for(int i = 0; i < nv; ++i)
+                spdlog::info("[detect_pos] call={} alpha={} v{} pos=({},{},{}) disp=({},{},{})",
+                    detect_call, alpha, i,
+                    h_pos[i][0], h_pos[i][1], h_pos[i][2],
+                    h_disp[i][0], h_disp[i][1], h_disp[i][2]);
+        }
+
+        if(detect_call < 2)
+        {
+            const int nv    = static_cast<int>(Ps.size());
+            const int nVs   = static_cast<int>(Vs.size());
+            const int nCoVs = static_cast<int>(codimVs.size());
+            const int nEs   = static_cast<int>(Es.size());
+            const int nFs   = static_cast<int>(Fs.size());
+
+            std::vector<IndexT> h_vs(nVs);
+            std::vector<IndexT> h_codim_vs(nCoVs);
+            std::vector<IndexT> h_cids(nv);
+            std::vector<IndexT> h_scids(nv);
+            std::vector<IndexT> h_bids(nv);
+            std::vector<IndexT> h_dims(nv);
+
+            if(nVs > 0)
+                cudaMemcpy(h_vs.data(), Vs.data(), sizeof(IndexT) * nVs, cudaMemcpyDeviceToHost);
+            if(nCoVs > 0)
+                cudaMemcpy(h_codim_vs.data(),
+                           codimVs.data(),
+                           sizeof(IndexT) * nCoVs,
+                           cudaMemcpyDeviceToHost);
+            if(nv > 0)
+            {
+                cudaMemcpy(h_cids.data(),
+                           info.contact_element_ids().data(),
+                           sizeof(IndexT) * nv,
+                           cudaMemcpyDeviceToHost);
+                cudaMemcpy(h_scids.data(),
+                           info.subscene_element_ids().data(),
+                           sizeof(IndexT) * nv,
+                           cudaMemcpyDeviceToHost);
+                cudaMemcpy(h_bids.data(),
+                           info.v2b().data(),
+                           sizeof(IndexT) * nv,
+                           cudaMemcpyDeviceToHost);
+                cudaMemcpy(h_dims.data(),
+                           info.dimensions().data(),
+                           sizeof(IndexT) * nv,
+                           cudaMemcpyDeviceToHost);
+            }
+
+            auto contact_mask_extent = info.contact_mask_tabular().extent();
+            auto subscene_mask_extent = info.subscene_mask_tabular().extent();
+            const int cm_h = static_cast<int>(contact_mask_extent.height());
+            const int cm_w = static_cast<int>(contact_mask_extent.width());
+            const int sm_h = static_cast<int>(subscene_mask_extent.height());
+            const int sm_w = static_cast<int>(subscene_mask_extent.width());
+            std::vector<IndexT> h_contact_mask(cm_h * cm_w);
+            std::vector<IndexT> h_subscene_mask(sm_h * sm_w);
+            if(cm_h > 0 && cm_w > 0)
+            {
+                cudaMemcpy(h_contact_mask.data(),
+                           info.contact_mask_tabular().data(0),
+                           sizeof(IndexT) * h_contact_mask.size(),
+                           cudaMemcpyDeviceToHost);
+            }
+            if(sm_h > 0 && sm_w > 0)
+            {
+                cudaMemcpy(h_subscene_mask.data(),
+                           info.subscene_mask_tabular().data(0),
+                           sizeof(IndexT) * h_subscene_mask.size(),
+                           cudaMemcpyDeviceToHost);
+            }
+
+            spdlog::info(
+                "[corex_trace][detect_input] call={} alpha={} Nv={} Vs={} codimVs={} Es={} Fs={} "
+                "contactMask={}x{} subsceneMask={}x{}",
+                detect_call,
+                alpha,
+                nv,
+                nVs,
+                nCoVs,
+                nEs,
+                nFs,
+                cm_h,
+                cm_w,
+                sm_h,
+                sm_w);
+
+            int surf_neg_cid = 0;
+            int codim_neg_cid = 0;
+            int surf_neg_scid = 0;
+            int codim_neg_scid = 0;
+            std::vector<IndexT> surf_cids;
+            std::vector<IndexT> codim_cids;
+            std::vector<IndexT> surf_bodies;
+            std::vector<IndexT> codim_bodies;
+            surf_cids.reserve(nVs);
+            codim_cids.reserve(nCoVs);
+            surf_bodies.reserve(nVs);
+            codim_bodies.reserve(nCoVs);
+
+            for(auto v : h_vs)
+            {
+                if(v < 0 || v >= nv)
+                    continue;
+                auto cid  = h_cids[v];
+                auto scid = h_scids[v];
+                auto bid  = h_bids[v];
+                if(cid < 0)
+                    ++surf_neg_cid;
+                else
+                    surf_cids.push_back(cid);
+                if(scid < 0)
+                    ++surf_neg_scid;
+                if(bid >= 0)
+                    surf_bodies.push_back(bid);
+            }
+            for(auto v : h_codim_vs)
+            {
+                if(v < 0 || v >= nv)
+                    continue;
+                auto cid  = h_cids[v];
+                auto scid = h_scids[v];
+                auto bid  = h_bids[v];
+                if(cid < 0)
+                    ++codim_neg_cid;
+                else
+                    codim_cids.push_back(cid);
+                if(scid < 0)
+                    ++codim_neg_scid;
+                if(bid >= 0)
+                    codim_bodies.push_back(bid);
+            }
+
+            auto uniq_count = [](std::vector<IndexT>& values) -> size_t
+            {
+                if(values.empty())
+                    return 0;
+                std::sort(values.begin(), values.end());
+                values.erase(std::unique(values.begin(), values.end()), values.end());
+                return values.size();
+            };
+
+            auto surf_cid_unique = uniq_count(surf_cids);
+            auto codim_cid_unique = uniq_count(codim_cids);
+            auto surf_body_unique = uniq_count(surf_bodies);
+            auto codim_body_unique = uniq_count(codim_bodies);
+
+            spdlog::info(
+                "[corex_trace][detect_input] surf_neg_cid={} codim_neg_cid={} "
+                "surf_neg_scid={} codim_neg_scid={} surf_cid_unique={} codim_cid_unique={} "
+                "surf_body_unique={} codim_body_unique={}",
+                surf_neg_cid,
+                codim_neg_cid,
+                surf_neg_scid,
+                codim_neg_scid,
+                surf_cid_unique,
+                codim_cid_unique,
+                surf_body_unique,
+                codim_body_unique);
+
+            auto sample_count = std::min(nVs, 8);
+            for(int i = 0; i < sample_count; ++i)
+            {
+                auto v = h_vs[i];
+                if(v < 0 || v >= nv)
+                    continue;
+                spdlog::info(
+                    "[corex_trace][detect_input] surf_sample[{}] v={} body={} dim={} cid={} scid={}",
+                    i,
+                    v,
+                    h_bids[v],
+                    h_dims[v],
+                    h_cids[v],
+                    h_scids[v]);
+            }
+
+            auto first_body_vertex = [&](IndexT bid) -> IndexT
+            {
+                for(auto v : h_vs)
+                {
+                    if(v >= 0 && v < nv && h_bids[v] == bid)
+                        return v;
+                }
+                return -1;
+            };
+            auto v0 = first_body_vertex(0);
+            auto v1 = first_body_vertex(1);
+            if(v0 >= 0 && v1 >= 0)
+            {
+                auto cid0  = h_cids[v0];
+                auto cid1  = h_cids[v1];
+                auto scid0 = h_scids[v0];
+                auto scid1 = h_scids[v1];
+                auto contact_allow = -1;
+                auto subscene_allow = -1;
+                if(cid0 >= 0 && cid0 < cm_h && cid1 >= 0 && cid1 < cm_w)
+                    contact_allow = h_contact_mask[cid0 * cm_w + cid1];
+                if(scid0 >= 0 && scid0 < sm_h && scid1 >= 0 && scid1 < sm_w)
+                    subscene_allow = h_subscene_mask[scid0 * sm_w + scid1];
+                spdlog::info(
+                    "[corex_trace][detect_input] body_pair_samples b0_v={} cid/scid=({},{}) "
+                    "b1_v={} cid/scid=({},{}) contact_allow={} subscene_allow={}",
+                    v0,
+                    cid0,
+                    scid0,
+                    v1,
+                    cid1,
+                    scid1,
+                    contact_allow,
+                    subscene_allow);
+            }
+
+            for(int r = 0; r < std::min(cm_h, 4); ++r)
+            {
+                std::string row;
+                for(int c = 0; c < std::min(cm_w, 4); ++c)
+                {
+                    if(!row.empty())
+                        row += ",";
+                    row += std::to_string(h_contact_mask[r * cm_w + c]);
+                }
+                spdlog::info("[corex_trace][detect_input] contact_mask_row{}={}", r, row);
+            }
+        }
+        detect_call++;
+    }
 
     //lbvh_E      = {};
     //lbvh_T      = {};
@@ -465,6 +1108,94 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
         }
     }
 
+    // Use AllP to query AllE (independent PE channel to avoid relying only on PT/EE degeneration)
+    bool allpe_detect_dim3_only = true;
+    if(const char* env = std::getenv("UIPC_COREX_ALLPE_DETECT_DIM3_ONLY"))
+    {
+        // Exact "0" disables narrow-phase tightening (broadphase-only, legacy behavior).
+        allpe_detect_dim3_only = !(env[0] == '0' && env[1] == '\0');
+    }
+    if(Vs.size() > 0 && Es.size() > 0)
+    {
+        muda::KernelLabel label{__FUNCTION__, __FILE__, __LINE__};
+        lbvh_E.query(
+            point_aabbs,
+            [Vs          = Vs.viewer().name("Vs"),
+             Es          = Es.viewer().name("Es"),
+             Ps          = Ps.viewer().name("Ps"),
+             dxs         = dxs.viewer().name("dxs"),
+             thicknesses = info.thicknesses().viewer().name("thicknesses"),
+             contact_element_ids = info.contact_element_ids().viewer().name("contact_element_ids"),
+             contact_mask_tabular = info.contact_mask_tabular().viewer().name("contact_mask_tabular"),
+             subscene_element_ids = info.subscene_element_ids().viewer().name("subscene_element_ids"),
+             subscene_mask_tabular = info.subscene_mask_tabular().viewer().name("subscene_mask_tabular"),
+             v2b = info.v2b().viewer().name("v2b"),
+             body_self_collision = info.body_self_collision().viewer().name("body_self_collision"),
+             d_hats = info.d_hats().viewer().name("d_hats"),
+             alpha  = alpha,
+             allpe_detect_dim3_only = allpe_detect_dim3_only] __device__(IndexT i, IndexT j)
+            {
+                const auto& V = Vs(i);
+                const auto& E = Es(j);
+
+                Vector3i cids = {contact_element_ids(V),
+                                 contact_element_ids(E[0]),
+                                 contact_element_ids(E[1])};
+
+                Vector3i scids = {subscene_element_ids(V),
+                                  subscene_element_ids(E[0]),
+                                  subscene_element_ids(E[1])};
+
+                if(!allow_PE_contact(subscene_mask_tabular, scids))
+                    return false;
+                if(!allow_PE_contact(contact_mask_tabular, cids))
+                    return false;
+
+                if(E[0] == V || E[1] == V)
+                    return false;
+
+                auto body_i = v2b(V);
+                auto body_j = v2b(E[0]);
+                if(body_i == body_j && !body_self_collision(body_i))
+                    return false;
+
+                Vector3 E0  = Ps(E[0]);
+                Vector3 E1  = Ps(E[1]);
+                Vector3 dE0 = alpha * dxs(E[0]);
+                Vector3 dE1 = alpha * dxs(E[1]);
+
+                Vector3 P  = Ps(V);
+                Vector3 dP = alpha * dxs(V);
+
+                Float thickness = PE_thickness(thicknesses(V),
+                                               thicknesses(E[0]),
+                                               thicknesses(E[1]));
+                Float d_hat = PE_d_hat(d_hats(V), d_hats(E[0]), d_hats(E[1]));
+
+                Float expand = d_hat + thickness;
+
+                if(!distance::point_edge_ccd_broadphase(P, E0, E1, dP, dE0, dE1, expand))
+                    return false;
+
+                if(!allpe_detect_dim3_only)
+                    return true;
+
+                Vector3 Ps_arr[] = {P, E0, E1};
+                Vector3i flag =
+                    distance::point_edge_distance_flag(Ps_arr[0], Ps_arr[1], Ps_arr[2]);
+                Vector2 range = D_range(thickness, d_hat);
+                Float D;
+                distance::point_edge_distance2(
+                    flag, Ps_arr[0], Ps_arr[1], Ps_arr[2], D);
+                if(!is_active_D(range, D))
+                    return false;
+                Vector3i offsets;
+                auto dim = distance::degenerate_point_edge(flag, offsets);
+                return dim == 3;
+            },
+            candidate_AllP_AllE_pairs);
+    }
+
     // Use AllE to query AllE
     if(Es.size() > 0)
     {
@@ -619,24 +1350,49 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
             },
             candidate_AllP_AllT_pairs);
     }
+
+    if(trace_simplex_filter)
+        spdlog::info("[corex_trace][detect] alpha={} PP_cands={} CodimPE_cands={} AllPE_cands={} PT_cands={} EE_cands={}",
+                     alpha,
+                     (int)candidate_AllP_CodimP_pairs.size(),
+                     (int)candidate_CodimP_AllE_pairs.size(),
+                     (int)candidate_AllP_AllE_pairs.size(),
+                     (int)candidate_AllP_AllT_pairs.size(),
+                     (int)candidate_AllE_AllE_pairs.size());
 }
 
 void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& info)
 {
     using namespace muda;
+    const bool trace_filter_active_diag =
+        (std::getenv("UIPC_COREX_TRACE_FILTER_ACTIVE_DIAG") != nullptr);
+    Float pt_pe_hyst_scale = static_cast<Float>(0.0);
+    if(const char* env = std::getenv("UIPC_COREX_PTPE_HYST_SCALE"))
+    {
+        char* end = nullptr;
+        double v = std::strtod(env, &end);
+        if(end != env && v >= 0.0 && v <= 0.5)
+            pt_pe_hyst_scale = static_cast<Float>(v);
+    }
+    bool suppress_degenerate_pe_when_allpe = false;
+    if(const char* env = std::getenv("UIPC_COREX_ALLPE_SUPPRESS_DEGENERATE_PE"))
+    {
+        suppress_degenerate_pe_when_allpe = (env[0] != '0');
+    }
 
     // we will filter-out the active pairs
     auto positions = info.positions();
 
     SizeT N_PCoimP  = candidate_AllP_CodimP_pairs.size();
     SizeT N_CodimPE = candidate_CodimP_AllE_pairs.size();
+    SizeT N_AllPE   = candidate_AllP_AllE_pairs.size();
     SizeT N_PTs     = candidate_AllP_AllT_pairs.size();
     SizeT N_EEs     = candidate_AllE_AllE_pairs.size();
 
     // PT, EE, PT, PP can degenerate to PP
-    temp_PPs.resize(N_PCoimP + N_CodimPE + N_PTs + N_EEs);
+    temp_PPs.resize(N_PCoimP + N_CodimPE + N_AllPE + N_PTs + N_EEs);
     // PT, EE, PT can degenerate to PE
-    temp_PEs.resize(N_CodimPE + N_PTs + N_EEs);
+    temp_PEs.resize(N_CodimPE + N_AllPE + N_PTs + N_EEs);
 
     temp_PTs.resize(N_PTs);
     temp_EEs.resize(N_EEs);
@@ -649,6 +1405,22 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
     {
         auto PP_view = temp_PPs.view(temp_PP_offset, N_PCoimP);
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        {
+            int n = (int)candidate_AllP_CodimP_pairs.size();
+            int block = 256, grid = (n + block - 1) / block;
+            corex_filter::kernel_filter_active_PP<<<grid, block>>>(
+                n,
+                (const Vector2i*)candidate_AllP_CodimP_pairs.view().data(),
+                (const IndexT*)info.surf_vertices().data(),
+                (const IndexT*)info.codim_vertices().data(),
+                (const Vector3*)positions.data(),
+                (const Float*)info.thicknesses().data(),
+                (const Float*)info.d_hats().data(),
+                PP_view.data());
+            cudaDeviceSynchronize();
+        }
+#else
         ParallelFor()
             .file_line(__FILE__, __LINE__)
             .apply(candidate_AllP_CodimP_pairs.size(),
@@ -712,6 +1484,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
 
                        PP = {P0, P1};
                    });
+#endif
 
         temp_PP_offset += N_PCoimP;
     }
@@ -721,6 +1494,23 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
         auto PP_view = temp_PPs.view(temp_PP_offset, N_CodimPE);
         auto PE_view = temp_PEs.view(temp_PE_offset, N_CodimPE);
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        {
+            int n = (int)candidate_CodimP_AllE_pairs.size();
+            int block = 256, grid = (n + block - 1) / block;
+            corex_filter::kernel_filter_active_CodimPE<<<grid, block>>>(
+                n,
+                (const Vector2i*)candidate_CodimP_AllE_pairs.view().data(),
+                (const IndexT*)info.codim_vertices().data(),
+                (const Vector2i*)info.surf_edges().data(),
+                (const Vector3*)positions.data(),
+                (const Float*)info.thicknesses().data(),
+                (const Float*)info.d_hats().data(),
+                PP_view.data(),
+                PE_view.data());
+            cudaDeviceSynchronize();
+        }
+#else
         ParallelFor()
             .file_line(__FILE__, __LINE__)
             .apply(
@@ -820,9 +1610,102 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
                         break;
                     }
                 });
+#endif
 
         temp_PP_offset += N_CodimPE;
         temp_PE_offset += N_CodimPE;
+    }
+
+    // AllP and AllE (independent PE channel)
+    if(N_AllPE > 0)
+    {
+        auto PP_view = temp_PPs.view(temp_PP_offset, N_AllPE);
+        auto PE_view = temp_PEs.view(temp_PE_offset, N_AllPE);
+
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        {
+            int n = (int)candidate_AllP_AllE_pairs.size();
+            int block = 256, grid = (n + block - 1) / block;
+            corex_filter::kernel_filter_active_CodimPE<<<grid, block>>>(
+                n,
+                (const Vector2i*)candidate_AllP_AllE_pairs.view().data(),
+                (const IndexT*)info.surf_vertices().data(),
+                (const Vector2i*)info.surf_edges().data(),
+                (const Vector3*)positions.data(),
+                (const Float*)info.thicknesses().data(),
+                (const Float*)info.d_hats().data(),
+                PP_view.data(),
+                PE_view.data());
+            cudaDeviceSynchronize();
+        }
+#else
+        ParallelFor()
+            .file_line(__FILE__, __LINE__)
+            .apply(
+                candidate_AllP_AllE_pairs.size(),
+                [positions = positions.viewer().name("positions"),
+                 AllP_AllE_pairs = candidate_AllP_AllE_pairs.viewer().name("PE_pairs"),
+                 surf_vertices = info.surf_vertices().viewer().name("surf_vertices"),
+                 surf_edges  = info.surf_edges().viewer().name("surf_edges"),
+                 thicknesses = info.thicknesses().viewer().name("thicknesses"),
+                 temp_PPs    = PP_view.viewer().name("temp_PPs"),
+                 temp_PEs    = PE_view.viewer().name("temp_PEs"),
+                 d_hats = info.d_hats().viewer().name("d_hats")] __device__(int i) mutable
+                {
+                    auto& PP = temp_PPs(i);
+                    PP.setConstant(-1);
+                    auto& PE = temp_PEs(i);
+                    PE.setConstant(-1);
+
+                    Vector2i indices = AllP_AllE_pairs(i);
+                    IndexT   V       = surf_vertices(indices(0));
+                    Vector2i E       = surf_edges(indices(1));
+
+                    Vector3i vIs = {V, E(0), E(1)};
+                    Vector3 Ps[] = {positions(vIs(0)), positions(vIs(1)), positions(vIs(2))};
+
+                    Float thickness = PE_thickness(
+                        thicknesses(V), thicknesses(E(0)), thicknesses(E(1)));
+                    Float d_hat = PE_d_hat(d_hats(V), d_hats(E(0)), d_hats(E(1)));
+
+                    Vector3i flag =
+                        distance::point_edge_distance_flag(Ps[0], Ps[1], Ps[2]);
+
+                    Vector2 range = D_range(thickness, d_hat);
+
+                    Float D;
+                    distance::point_edge_distance2(flag, Ps[0], Ps[1], Ps[2], D);
+
+                    if(!is_active_D(range, D))
+                        return;  // early return
+
+                    Vector3i offsets;
+                    auto dim = distance::degenerate_point_edge(flag, offsets);
+
+                    switch(dim)
+                    {
+                        case 2:  // PP
+                        {
+                            IndexT V0 = vIs(offsets(0));
+                            IndexT V1 = vIs(offsets(1));
+                            PP        = {V0, V1};
+                        }
+                        break;
+                        case 3:  // PE
+                        {
+                            PE = vIs;
+                        }
+                        break;
+                        default: {
+                            MUDA_ERROR_WITH_LOCATION("unexpected degenerate case dim=%d", dim);
+                        }
+                        break;
+                    }
+                });
+#endif
+
+        temp_PP_offset += N_AllPE;
+        temp_PE_offset += N_AllPE;
     }
 
     // AllP and AllT
@@ -830,6 +1713,28 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
         auto PP_view = temp_PPs.view(temp_PP_offset, N_PTs);
         auto PE_view = temp_PEs.view(temp_PE_offset, N_PTs);
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        {
+            int n = (int)candidate_AllP_AllT_pairs.size();
+            if(n > 0)
+            {
+                int block = 256, grid = (n + block - 1) / block;
+                corex_filter::kernel_filter_active_PT<<<grid, block>>>(
+                    n,
+                    (const Vector2i*)candidate_AllP_AllT_pairs.view().data(),
+                    (const IndexT*)info.surf_vertices().data(),
+                    (const Vector3i*)info.surf_triangles().data(),
+                    (const Vector3*)positions.data(),
+                    (const Float*)info.thicknesses().data(),
+                    (const Float*)info.d_hats().data(),
+                    pt_pe_hyst_scale,
+                    PP_view.data(),
+                    PE_view.data(),
+                    temp_PTs.data());
+                cudaDeviceSynchronize();
+            }
+        }
+#else
         ParallelFor()
             .file_line(__FILE__, __LINE__)
             .apply(
@@ -842,7 +1747,8 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
                  temp_PPs    = PP_view.viewer().name("temp_PPs"),
                  temp_PEs    = PE_view.viewer().name("temp_PEs"),
                  temp_PTs    = temp_PTs.viewer().name("temp_PTs"),
-                 d_hats = info.d_hats().viewer().name("d_hats")] __device__(int i) mutable
+                 d_hats = info.d_hats().viewer().name("d_hats"),
+                 pt_pe_hyst_scale] __device__(int i) mutable
                 {
                     auto& PP = temp_PPs(i);
                     PP.setConstant(-1);
@@ -918,11 +1824,18 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
                                 flag(3),
                                 thickness,
                                 d_hat);
-                       if(!is_active_D(range, D))
-                        return;  // early return
-
                     Vector4i offsets;
+                    offsets.setConstant(-1);
                     auto dim = distance::degenerate_point_triangle(flag, offsets);
+                    bool active = is_active_D(range, D);
+                    if(!active && dim == 3)
+                    {
+                        Float slack = max(static_cast<Float>(1e-6),
+                                          (range.y() - range.x()) * pt_pe_hyst_scale);
+                        active = (D > range.x()) && (D < range.y() + slack);
+                    }
+                    if(!active)
+                        return;  // early return
 
                     switch(dim)
                     {
@@ -952,6 +1865,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
                         break;
                     }
                 });
+#endif
 
         temp_PP_offset += N_PTs;
         temp_PE_offset += N_PTs;
@@ -961,6 +1875,27 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
         auto PP_view = temp_PPs.view(temp_PP_offset, N_EEs);
         auto PE_view = temp_PEs.view(temp_PE_offset, N_EEs);
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        {
+            int n = (int)candidate_AllE_AllE_pairs.size();
+            if(n > 0)
+            {
+                int block = 256, grid = (n + block - 1) / block;
+                corex_filter::kernel_filter_active_EE<<<grid, block>>>(
+                    n,
+                    (const Vector2i*)candidate_AllE_AllE_pairs.view().data(),
+                    (const Vector2i*)info.surf_edges().data(),
+                    (const Vector3*)positions.data(),
+                    (const Vector3*)info.rest_positions().data(),
+                    (const Float*)info.thicknesses().data(),
+                    (const Float*)info.d_hats().data(),
+                    PP_view.data(),
+                    PE_view.data(),
+                    temp_EEs.data());
+                cudaDeviceSynchronize();
+            }
+        }
+#else
         ParallelFor()
             .file_line(__FILE__, __LINE__)
             .apply(
@@ -1040,6 +1975,8 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
                     }
                        if(!is_active_D(range, D))
                         return;  // early return
+                    Vector4i offsets;
+                    auto dim = distance::degenerate_edge_edge(flag, offsets);
 
                     Float eps_x;
                     distance::edge_edge_mollifier_threshold(rest_positions(vIs(0)),
@@ -1056,9 +1993,6 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
                     }
                     else  // classify to EE/PE/PP
                     {
-                        Vector4i offsets;
-                        auto dim = distance::degenerate_edge_edge(flag, offsets);
-
                         switch(dim)
                         {
                             case 2:  // PP
@@ -1088,13 +2022,342 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
                         }
                     }
                 });
+#endif
 
         temp_PP_offset += N_EEs;
         temp_PE_offset += N_EEs;
     }
 
+    if(suppress_degenerate_pe_when_allpe && N_AllPE > 0)
+    {
+        // temp_PEs layout: [CodimPE][AllPE][PT][EE]
+        SizeT pt_pe_offset = N_CodimPE + N_AllPE;
+        SizeT ee_pe_offset = pt_pe_offset + N_PTs;
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        if(N_PTs > 0)
+        {
+            int n = static_cast<int>(N_PTs);
+            int block = 256, grid = (n + block - 1) / block;
+            corex_filter::kernel_invalidate_vector3i<<<grid, block>>>(
+                n, temp_PEs.view(pt_pe_offset, N_PTs).data());
+        }
+        if(N_EEs > 0)
+        {
+            int n = static_cast<int>(N_EEs);
+            int block = 256, grid = (n + block - 1) / block;
+            corex_filter::kernel_invalidate_vector3i<<<grid, block>>>(
+                n, temp_PEs.view(ee_pe_offset, N_EEs).data());
+        }
+        cudaDeviceSynchronize();
+#else
+        if(N_PTs > 0)
+        {
+            auto pt_view = temp_PEs.view(pt_pe_offset, N_PTs);
+            ParallelFor()
+                .file_line(__FILE__, __LINE__)
+                .apply(N_PTs,
+                       [pt_view = pt_view.viewer().name("pt_pe_view")] __device__(int i) mutable
+                       { pt_view(i).setConstant(-1); });
+        }
+        if(N_EEs > 0)
+        {
+            auto ee_view = temp_PEs.view(ee_pe_offset, N_EEs);
+            ParallelFor()
+                .file_line(__FILE__, __LINE__)
+                .apply(N_EEs,
+                       [ee_view = ee_view.viewer().name("ee_pe_view")] __device__(int i) mutable
+                       { ee_view(i).setConstant(-1); });
+        }
+#endif
+    }
+
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    // If other PE sources are already active, suppress AllP-AllE PE block to avoid
+    // over-constraining the same contact region via multiple generation paths.
+    bool allpe_fallback_only = false;
+    bool allpe_pointwise_dedup = false;
+    bool allpe_fill_missing_only = false;
+    if(const char* env = std::getenv("UIPC_COREX_ALLPE_FALLBACK_ONLY"))
+        allpe_fallback_only = (env[0] != '0');
+    if(const char* env = std::getenv("UIPC_COREX_ALLPE_POINTWISE_DEDUP"))
+        allpe_pointwise_dedup = (env[0] != '0');
+    if(const char* env = std::getenv("UIPC_COREX_ALLPE_FILL_MISSING_ONLY"))
+        allpe_fill_missing_only = (env[0] != '0');
+    if(allpe_fallback_only && N_AllPE > 0)
+    {
+        muda::DeviceVar<IndexT> pe_other_valid_count;
+        cudaMemset(pe_other_valid_count.data(), 0, sizeof(IndexT));
+        const int block = 256;
+        if(N_CodimPE > 0)
+        {
+            int grid = (static_cast<int>(N_CodimPE) + block - 1) / block;
+            corex_filter::kernel_count_valid_vector3i<<<grid, block>>>(
+                static_cast<int>(N_CodimPE),
+                temp_PEs.view(0, N_CodimPE).data(),
+                pe_other_valid_count.data());
+        }
+        if((N_PTs + N_EEs) > 0)
+        {
+            SizeT tail_offset = N_CodimPE + N_AllPE;
+            SizeT tail_size   = N_PTs + N_EEs;
+            int grid = (static_cast<int>(tail_size) + block - 1) / block;
+            corex_filter::kernel_count_valid_vector3i<<<grid, block>>>(
+                static_cast<int>(tail_size),
+                temp_PEs.view(tail_offset, tail_size).data(),
+                pe_other_valid_count.data());
+        }
+        cudaDeviceSynchronize();
+        IndexT other_valid = pe_other_valid_count;
+        if(other_valid > 0)
+        {
+            int grid = (static_cast<int>(N_AllPE) + block - 1) / block;
+            corex_filter::kernel_invalidate_vector3i<<<grid, block>>>(
+                static_cast<int>(N_AllPE),
+                temp_PEs.view(N_CodimPE, N_AllPE).data());
+            cudaDeviceSynchronize();
+        }
+    }
+
+    if(allpe_pointwise_dedup && N_AllPE > 0 && (N_PTs + N_EEs) > 0)
+    {
+        allpe_point_flags.resize(positions.size());
+        cudaMemset(allpe_point_flags.data(), 0, sizeof(IndexT) * positions.size());
+        const int block = 256;
+        {
+            int grid = (static_cast<int>(N_AllPE) + block - 1) / block;
+            corex_filter::kernel_mark_point_from_pe<<<grid, block>>>(
+                static_cast<int>(N_AllPE),
+                temp_PEs.view(N_CodimPE, N_AllPE).data(),
+                allpe_point_flags.data());
+        }
+        {
+            SizeT tail_offset = N_CodimPE + N_AllPE;
+            SizeT tail_size   = N_PTs + N_EEs;
+            int grid = (static_cast<int>(tail_size) + block - 1) / block;
+            corex_filter::kernel_invalidate_pe_if_point_marked<<<grid, block>>>(
+                static_cast<int>(tail_size),
+                temp_PEs.view(tail_offset, tail_size).data(),
+                allpe_point_flags.data());
+        }
+        cudaDeviceSynchronize();
+    }
+
+    if(allpe_fill_missing_only && N_AllPE > 0)
+    {
+        allpe_point_flags.resize(positions.size());
+        cudaMemset(allpe_point_flags.data(), 0, sizeof(IndexT) * positions.size());
+        const int block = 256;
+        if(N_CodimPE > 0)
+        {
+            int grid = (static_cast<int>(N_CodimPE) + block - 1) / block;
+            corex_filter::kernel_mark_point_from_pe<<<grid, block>>>(
+                static_cast<int>(N_CodimPE),
+                temp_PEs.view(0, N_CodimPE).data(),
+                allpe_point_flags.data());
+        }
+        if((N_PTs + N_EEs) > 0)
+        {
+            SizeT tail_offset = N_CodimPE + N_AllPE;
+            SizeT tail_size   = N_PTs + N_EEs;
+            int grid = (static_cast<int>(tail_size) + block - 1) / block;
+            corex_filter::kernel_mark_point_from_pe<<<grid, block>>>(
+                static_cast<int>(tail_size),
+                temp_PEs.view(tail_offset, tail_size).data(),
+                allpe_point_flags.data());
+        }
+        {
+            int grid = (static_cast<int>(N_AllPE) + block - 1) / block;
+            corex_filter::kernel_invalidate_pe_if_point_marked<<<grid, block>>>(
+                static_cast<int>(N_AllPE),
+                temp_PEs.view(N_CodimPE, N_AllPE).data(),
+                allpe_point_flags.data());
+        }
+        cudaDeviceSynchronize();
+    }
+#endif
+
     UIPC_ASSERT(temp_PP_offset == temp_PPs.size(), "size mismatch");
     UIPC_ASSERT(temp_PE_offset == temp_PEs.size(), "size mismatch");
+
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    if(trace_filter_active_diag)
+    {
+        static int filter_active_diag_call = 0;
+        bool do_diag_log = (filter_active_diag_call < 3) || (filter_active_diag_call % 50 == 0);
+        if((N_PTs > 0 || N_EEs > 0) && do_diag_log)
+        {
+            cudaDeviceSynchronize();
+            int n_temp_pt = (int)temp_PTs.size();
+            int n_temp_ee = (int)temp_EEs.size();
+            int n_temp_pp = (int)temp_PPs.size();
+            int n_temp_pe = (int)temp_PEs.size();
+            std::vector<Vector4i> h_tpt(n_temp_pt);
+            std::vector<Vector4i> h_tee(n_temp_ee);
+            std::vector<Vector3i> h_tpe(n_temp_pe);
+            if(n_temp_pt > 0)
+                cudaMemcpy(h_tpt.data(), temp_PTs.data(), n_temp_pt * sizeof(Vector4i), cudaMemcpyDeviceToHost);
+            if(n_temp_ee > 0)
+                cudaMemcpy(h_tee.data(), temp_EEs.data(), n_temp_ee * sizeof(Vector4i), cudaMemcpyDeviceToHost);
+            if(n_temp_pe > 0)
+                cudaMemcpy(h_tpe.data(), temp_PEs.data(), n_temp_pe * sizeof(Vector3i), cudaMemcpyDeviceToHost);
+            int pt_valid = 0, ee_valid = 0, pe_valid = 0;
+            for(int i = 0; i < n_temp_pt; ++i)
+                if(h_tpt[i](0) != -1) pt_valid++;
+            for(int i = 0; i < n_temp_ee; ++i)
+                if(h_tee[i](0) != -1) ee_valid++;
+            for(int i = 0; i < n_temp_pe; ++i)
+                if(h_tpe[i](0) != -1) pe_valid++;
+            spdlog::info("[corex_trace][filter_active] temp_PT={} valid_PT={} temp_EE={} valid_EE={} temp_PP={} temp_PE={}",
+                         n_temp_pt, pt_valid, n_temp_ee, ee_valid, n_temp_pp, n_temp_pe);
+            for(int i = 0; i < std::min(n_temp_pt, 3); ++i)
+                spdlog::info("[corex_trace][filter_active] temp_PT[{}] = ({},{},{},{})",
+                             i, h_tpt[i](0), h_tpt[i](1), h_tpt[i](2), h_tpt[i](3));
+
+            // Verify PT distance on host for first few pairs
+            if(N_PTs > 0)
+            {
+                static int fa_host_diag = 0;
+                const bool force_pt_drop_diag = (pt_valid == 0);
+                if(fa_host_diag < 5 || force_pt_drop_diag)
+                {
+                    int nv = (int)positions.size();
+                    std::vector<Vector3> h_pos(nv);
+                    std::vector<Float> h_thick(nv), h_dhat(nv);
+                    cudaMemcpy(h_pos.data(), positions.data(), nv * sizeof(Vector3), cudaMemcpyDeviceToHost);
+                    cudaMemcpy(h_thick.data(), info.thicknesses().data(), nv * sizeof(Float), cudaMemcpyDeviceToHost);
+                    cudaMemcpy(h_dhat.data(), info.d_hats().data(), nv * sizeof(Float), cudaMemcpyDeviceToHost);
+                    std::vector<Vector2i> h_pt_pairs(N_PTs);
+                    std::vector<IndexT> h_sverts(info.surf_vertices().size());
+                    std::vector<Vector3i> h_stris(info.surf_triangles().size());
+                    cudaMemcpy(h_pt_pairs.data(), candidate_AllP_AllT_pairs.view().data(), N_PTs * sizeof(Vector2i), cudaMemcpyDeviceToHost);
+                    cudaMemcpy(h_sverts.data(), info.surf_vertices().data(), h_sverts.size() * sizeof(IndexT), cudaMemcpyDeviceToHost);
+                    cudaMemcpy(h_stris.data(), info.surf_triangles().data(), h_stris.size() * sizeof(Vector3i), cudaMemcpyDeviceToHost);
+                    spdlog::info("[corex_trace][fa_host_PT] mode={} N_PTs={} valid_PT={}",
+                                 force_pt_drop_diag ? "pt_drop" : "warmup",
+                                 (int)N_PTs,
+                                 pt_valid);
+                    for(int i = 0; i < std::min((int)N_PTs, 8); ++i)
+                    {
+                        auto indices = h_pt_pairs[i];
+                        IndexT V = h_sverts[indices(0)];
+                        Vector3i F = h_stris[indices(1)];
+                        Vector4i vIs = {V, F(0), F(1), F(2)};
+                        Vector3 Ps_arr[] = {h_pos[vIs(0)], h_pos[vIs(1)], h_pos[vIs(2)], h_pos[vIs(3)]};
+                        Float thickness = PT_thickness(h_thick[V], h_thick[F(0)], h_thick[F(1)], h_thick[F(2)]);
+                        Float d_hat = PT_d_hat(h_dhat[V], h_dhat[F(0)], h_dhat[F(1)], h_dhat[F(2)]);
+                        Vector4i flag = distance::point_triangle_distance_flag(Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3]);
+                        Vector2 range = D_range(thickness, d_hat);
+                        Float D;
+                        distance::point_triangle_distance2(flag, Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3], D);
+                        Vector4i offsets;
+                        offsets.setConstant(-1);
+                        auto dim = distance::degenerate_point_triangle(flag, offsets);
+                        bool active = (D > range.x() && D < range.y());
+                        bool low = (D <= range.x());
+                        bool high = (D >= range.y());
+                        spdlog::info("[corex_trace][fa_host_PT] i={} V={} F=({},{},{}) P0=({},{},{}) D={} range=({},{}) active={} low={} high={} dim={} offsets=({},{},{},{}) flag=({},{},{},{})",
+                                     i, V, F(0), F(1), F(2),
+                                     Ps_arr[0][0], Ps_arr[0][1], Ps_arr[0][2],
+                                     D, range.x(), range.y(), (int)active, (int)low, (int)high, (int)dim,
+                                     offsets(0), offsets(1), offsets(2), offsets(3),
+                                     flag(0), flag(1), flag(2), flag(3));
+                    }
+                    if(!force_pt_drop_diag)
+                        fa_host_diag++;
+                }
+            }
+
+            if(ee_valid > 0 && pe_valid == 0 && N_EEs > 0)
+            {
+                static int ee_host_diag = 0;
+                if(ee_host_diag < 6)
+                {
+                    int nv = (int)positions.size();
+                    std::vector<Vector3> h_pos(nv);
+                    std::vector<Vector3> h_rest(nv);
+                    std::vector<Float> h_thick(nv), h_dhat(nv);
+                    std::vector<Vector2i> h_ee_pairs(N_EEs);
+                    std::vector<Vector2i> h_sedges(info.surf_edges().size());
+                    cudaMemcpy(h_pos.data(), positions.data(), nv * sizeof(Vector3), cudaMemcpyDeviceToHost);
+                    cudaMemcpy(
+                        h_rest.data(), info.rest_positions().data(), nv * sizeof(Vector3), cudaMemcpyDeviceToHost);
+                    cudaMemcpy(h_thick.data(), info.thicknesses().data(), nv * sizeof(Float), cudaMemcpyDeviceToHost);
+                    cudaMemcpy(h_dhat.data(), info.d_hats().data(), nv * sizeof(Float), cudaMemcpyDeviceToHost);
+                    cudaMemcpy(h_ee_pairs.data(),
+                               candidate_AllE_AllE_pairs.view().data(),
+                               N_EEs * sizeof(Vector2i),
+                               cudaMemcpyDeviceToHost);
+                    cudaMemcpy(h_sedges.data(),
+                               info.surf_edges().data(),
+                               h_sedges.size() * sizeof(Vector2i),
+                               cudaMemcpyDeviceToHost);
+                    spdlog::info("[corex_trace][fa_host_EE] mode=ee_only_window N_EEs={} valid_EE={} valid_PE={}",
+                                 (int)N_EEs,
+                                 ee_valid,
+                                 pe_valid);
+                    for(int i = 0; i < std::min((int)N_EEs, 8); ++i)
+                    {
+                        auto pair = h_ee_pairs[i];
+                        Vector2i e0 = h_sedges[pair(0)];
+                        Vector2i e1 = h_sedges[pair(1)];
+                        Vector4i vIs = {e0(0), e0(1), e1(0), e1(1)};
+                        Vector3 Ps_arr[] = {h_pos[vIs(0)], h_pos[vIs(1)], h_pos[vIs(2)], h_pos[vIs(3)]};
+                        Vector3 Rs_arr[] = {h_rest[vIs(0)], h_rest[vIs(1)], h_rest[vIs(2)], h_rest[vIs(3)]};
+                        Float thickness = EE_thickness(
+                            h_thick[vIs(0)], h_thick[vIs(1)], h_thick[vIs(2)], h_thick[vIs(3)]);
+                        Float d_hat = EE_d_hat(h_dhat[vIs(0)], h_dhat[vIs(1)], h_dhat[vIs(2)], h_dhat[vIs(3)]);
+                        Vector2 range = D_range(thickness, d_hat);
+                        Vector4i flag = distance::edge_edge_distance_flag(
+                            Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3]);
+                        Float D;
+                        distance::edge_edge_distance2(
+                            flag, Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3], D);
+                        Vector4i offsets;
+                        offsets.setConstant(-1);
+                        auto dim = distance::degenerate_edge_edge(flag, offsets);
+                        Float eps_x;
+                        distance::edge_edge_mollifier_threshold(Rs_arr[0],
+                                                                Rs_arr[1],
+                                                                Rs_arr[2],
+                                                                Rs_arr[3],
+                                                                static_cast<Float>(1e-3),
+                                                                eps_x);
+                        bool need_mollify =
+                            distance::need_mollify(Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3], eps_x);
+                        bool low = (D <= range.x());
+                        bool high = (D >= range.y());
+                        spdlog::info(
+                            "[corex_trace][fa_host_EE] i={} e0=({},{}) e1=({},{}) D={} range=({},{}) "
+                            "low={} high={} dim={} need_mollify={} eps_x={} offsets=({},{},{},{}) flag=({},{},{},{})",
+                            i,
+                            e0(0),
+                            e0(1),
+                            e1(0),
+                            e1(1),
+                            D,
+                            range.x(),
+                            range.y(),
+                            (int)low,
+                            (int)high,
+                            (int)dim,
+                            (int)need_mollify,
+                            eps_x,
+                            offsets(0),
+                            offsets(1),
+                            offsets(2),
+                            offsets(3),
+                            flag(0),
+                            flag(1),
+                            flag(2),
+                            flag(3));
+                    }
+                    ee_host_diag++;
+                }
+            }
+        }
+        filter_active_diag_call++;
+    }
+#endif
 
     {  // select the valid ones
         PPs.resize(temp_PPs.size());
@@ -1134,6 +2397,287 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
         IndexT PE_count = selected_PE_count;
         IndexT PT_count = selected_PT_count;
         IndexT EE_count = selected_EE_count;
+
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        if(trace_filter_active_diag)
+        {
+            static int after_select_log_call = 0;
+            if(after_select_log_call < 10 || (after_select_log_call % 50 == 0))
+                spdlog::info("[corex_trace][filter_active] AFTER_SELECT PP={} PE={} PT={} EE={}",
+                             PP_count, PE_count, PT_count, EE_count);
+            after_select_log_call++;
+
+            static bool first_contact_contract_dumped = false;
+            if(!first_contact_contract_dumped && (PE_count > 0 || PT_count > 0 || EE_count > 0))
+            {
+                cudaDeviceSynchronize();
+
+                const int nv = static_cast<int>(positions.size());
+                std::vector<Vector3> h_pos(nv);
+                std::vector<Float> h_thick(nv);
+                std::vector<Float> h_dhat(nv);
+                if(nv > 0)
+                {
+                    cudaMemcpy(h_pos.data(), positions.data(), nv * sizeof(Vector3), cudaMemcpyDeviceToHost);
+                    cudaMemcpy(h_thick.data(),
+                               info.thicknesses().data(),
+                               nv * sizeof(Float),
+                               cudaMemcpyDeviceToHost);
+                    cudaMemcpy(
+                        h_dhat.data(), info.d_hats().data(), nv * sizeof(Float), cudaMemcpyDeviceToHost);
+                }
+
+                std::vector<IndexT> h_codim_vs(info.codim_vertices().size());
+                std::vector<IndexT> h_surf_vs(info.surf_vertices().size());
+                std::vector<Vector2i> h_sedges(info.surf_edges().size());
+                std::vector<Vector3i> h_stris(info.surf_triangles().size());
+
+                if(!h_codim_vs.empty())
+                    cudaMemcpy(h_codim_vs.data(),
+                               info.codim_vertices().data(),
+                               h_codim_vs.size() * sizeof(IndexT),
+                               cudaMemcpyDeviceToHost);
+                if(!h_surf_vs.empty())
+                    cudaMemcpy(h_surf_vs.data(),
+                               info.surf_vertices().data(),
+                               h_surf_vs.size() * sizeof(IndexT),
+                               cudaMemcpyDeviceToHost);
+                if(!h_sedges.empty())
+                    cudaMemcpy(h_sedges.data(),
+                               info.surf_edges().data(),
+                               h_sedges.size() * sizeof(Vector2i),
+                               cudaMemcpyDeviceToHost);
+                if(!h_stris.empty())
+                    cudaMemcpy(h_stris.data(),
+                               info.surf_triangles().data(),
+                               h_stris.size() * sizeof(Vector3i),
+                               cudaMemcpyDeviceToHost);
+
+                std::vector<Vector2i> h_pe_pairs(N_CodimPE);
+                std::vector<Vector2i> h_pt_pairs(N_PTs);
+                if(N_CodimPE > 0)
+                    cudaMemcpy(h_pe_pairs.data(),
+                               candidate_CodimP_AllE_pairs.view().data(),
+                               N_CodimPE * sizeof(Vector2i),
+                               cudaMemcpyDeviceToHost);
+                if(N_PTs > 0)
+                    cudaMemcpy(h_pt_pairs.data(),
+                               candidate_AllP_AllT_pairs.view().data(),
+                               N_PTs * sizeof(Vector2i),
+                               cudaMemcpyDeviceToHost);
+
+                spdlog::info(
+                    "[corex_trace][first_contact_contract] selected PP={} PE={} PT={} EE={} candPE={} candPT={}",
+                    PP_count,
+                    PE_count,
+                    PT_count,
+                    EE_count,
+                    static_cast<int>(N_CodimPE),
+                    static_cast<int>(N_PTs));
+
+                for(int i = 0; i < std::min(static_cast<int>(N_CodimPE), 8); ++i)
+                {
+                    auto pair = h_pe_pairs[i];
+                    if(pair(0) < 0 || pair(1) < 0 || pair(0) >= static_cast<IndexT>(h_codim_vs.size())
+                       || pair(1) >= static_cast<IndexT>(h_sedges.size()))
+                        continue;
+
+                    IndexT V = h_codim_vs[pair(0)];
+                    auto   E = h_sedges[pair(1)];
+                    if(V < 0 || E(0) < 0 || E(1) < 0 || V >= nv || E(0) >= nv || E(1) >= nv)
+                        continue;
+
+                    Vector3 p = h_pos[V];
+                    Vector3 e0 = h_pos[E(0)];
+                    Vector3 e1 = h_pos[E(1)];
+
+                    const Float raw_t_p = h_thick[V];
+                    const Float raw_t_e0 = h_thick[E(0)];
+                    const Float raw_t_e1 = h_thick[E(1)];
+                    const Float raw_d_p = h_dhat[V];
+                    const Float raw_d_e0 = h_dhat[E(0)];
+                    const Float raw_d_e1 = h_dhat[E(1)];
+
+                    Float thickness = PE_thickness(raw_t_p, raw_t_e0, raw_t_e1);
+                    Float d_hat = PE_d_hat(raw_d_p, raw_d_e0, raw_d_e1);
+                    auto  flag = distance::point_edge_distance_flag(p, e0, e1);
+                    auto  range = D_range(thickness, d_hat);
+                    Float D;
+                    distance::point_edge_distance2(flag, p, e0, e1, D);
+                    Vector3i offsets;
+                    offsets.setConstant(-1);
+                    auto     dim = distance::degenerate_point_edge(flag, offsets);
+                    bool     active = is_active_D(range, D);
+
+                    spdlog::info(
+                        "[corex_trace][first_contact_contract][PE] i={} pair=({},{}) V/E=({},{}:{}) "
+                        "raw_t=({},{},{}) raw_d=({},{},{}) flag=({},{},{}) dim={} offsets=({},{},{}) "
+                        "D={} range=({},{}) active={}",
+                        i,
+                        pair(0),
+                        pair(1),
+                        V,
+                        E(0),
+                        E(1),
+                        raw_t_p,
+                        raw_t_e0,
+                        raw_t_e1,
+                        raw_d_p,
+                        raw_d_e0,
+                        raw_d_e1,
+                        flag(0),
+                        flag(1),
+                        flag(2),
+                        dim,
+                        offsets(0),
+                        offsets(1),
+                        offsets(2),
+                        D,
+                        range.x(),
+                        range.y(),
+                        static_cast<int>(active));
+                }
+
+                for(int i = 0; i < std::min(static_cast<int>(N_PTs), 8); ++i)
+                {
+                    auto pair = h_pt_pairs[i];
+                    if(pair(0) < 0 || pair(1) < 0 || pair(0) >= static_cast<IndexT>(h_surf_vs.size())
+                       || pair(1) >= static_cast<IndexT>(h_stris.size()))
+                        continue;
+
+                    IndexT V = h_surf_vs[pair(0)];
+                    auto   F = h_stris[pair(1)];
+                    if(V < 0 || F(0) < 0 || F(1) < 0 || F(2) < 0 || V >= nv || F(0) >= nv
+                       || F(1) >= nv || F(2) >= nv)
+                        continue;
+
+                    Vector3 p = h_pos[V];
+                    Vector3 t0 = h_pos[F(0)];
+                    Vector3 t1 = h_pos[F(1)];
+                    Vector3 t2 = h_pos[F(2)];
+
+                    const Float raw_t_p = h_thick[V];
+                    const Float raw_t_t0 = h_thick[F(0)];
+                    const Float raw_t_t1 = h_thick[F(1)];
+                    const Float raw_t_t2 = h_thick[F(2)];
+                    const Float raw_d_p = h_dhat[V];
+                    const Float raw_d_t0 = h_dhat[F(0)];
+                    const Float raw_d_t1 = h_dhat[F(1)];
+                    const Float raw_d_t2 = h_dhat[F(2)];
+
+                    Float thickness = PT_thickness(raw_t_p, raw_t_t0, raw_t_t1, raw_t_t2);
+                    Float d_hat = PT_d_hat(raw_d_p, raw_d_t0, raw_d_t1, raw_d_t2);
+                    auto  flag = distance::point_triangle_distance_flag(p, t0, t1, t2);
+                    auto  range = D_range(thickness, d_hat);
+                    Float D;
+                    distance::point_triangle_distance2(flag, p, t0, t1, t2, D);
+                    Vector4i offsets;
+                    offsets.setConstant(-1);
+                    auto     dim = distance::degenerate_point_triangle(flag, offsets);
+                    bool     active = is_active_D(range, D);
+
+                    spdlog::info(
+                        "[corex_trace][first_contact_contract][PT] i={} pair=({},{}) V/F=({},{}:{}:{}) "
+                        "raw_t=({},{},{},{}) raw_d=({},{},{},{}) flag=({},{},{},{}) dim={} "
+                        "offsets=({},{},{},{}) D={} range=({},{}) active={}",
+                        i,
+                        pair(0),
+                        pair(1),
+                        V,
+                        F(0),
+                        F(1),
+                        F(2),
+                        raw_t_p,
+                        raw_t_t0,
+                        raw_t_t1,
+                        raw_t_t2,
+                        raw_d_p,
+                        raw_d_t0,
+                        raw_d_t1,
+                        raw_d_t2,
+                        flag(0),
+                        flag(1),
+                        flag(2),
+                        flag(3),
+                        dim,
+                        offsets(0),
+                        offsets(1),
+                        offsets(2),
+                        offsets(3),
+                        D,
+                        range.x(),
+                        range.y(),
+                        static_cast<int>(active));
+                }
+
+                if(PE_count > 0)
+                {
+                    std::vector<Vector3i> h_selected_pes(PE_count);
+                    cudaMemcpy(h_selected_pes.data(),
+                               PEs.data(),
+                               PE_count * sizeof(Vector3i),
+                               cudaMemcpyDeviceToHost);
+
+                    for(int i = 0; i < std::min(static_cast<int>(PE_count), 8); ++i)
+                    {
+                        auto pe = h_selected_pes[i];
+                        if(pe(0) < 0 || pe(1) < 0 || pe(2) < 0 || pe(0) >= nv || pe(1) >= nv
+                           || pe(2) >= nv)
+                            continue;
+
+                        Vector3 p = h_pos[pe(0)];
+                        Vector3 e0 = h_pos[pe(1)];
+                        Vector3 e1 = h_pos[pe(2)];
+                        const Float raw_t_p = h_thick[pe(0)];
+                        const Float raw_t_e0 = h_thick[pe(1)];
+                        const Float raw_t_e1 = h_thick[pe(2)];
+                        const Float raw_d_p = h_dhat[pe(0)];
+                        const Float raw_d_e0 = h_dhat[pe(1)];
+                        const Float raw_d_e1 = h_dhat[pe(2)];
+
+                        Float thickness = PE_thickness(raw_t_p, raw_t_e0, raw_t_e1);
+                        Float d_hat = PE_d_hat(raw_d_p, raw_d_e0, raw_d_e1);
+                        auto  flag = distance::point_edge_distance_flag(p, e0, e1);
+                        auto  range = D_range(thickness, d_hat);
+                        Float D;
+                        distance::point_edge_distance2(flag, p, e0, e1, D);
+                        Vector3i offsets;
+                        offsets.setConstant(-1);
+                        auto dim = distance::degenerate_point_edge(flag, offsets);
+                        bool active = is_active_D(range, D);
+
+                        spdlog::info(
+                            "[corex_trace][first_contact_contract][PE_selected] i={} pe=({},{},{}) "
+                            "raw_t=({},{},{}) raw_d=({},{},{}) flag=({},{},{}) dim={} "
+                            "offsets=({},{},{}) D={} range=({},{}) active={}",
+                            i,
+                            pe(0),
+                            pe(1),
+                            pe(2),
+                            raw_t_p,
+                            raw_t_e0,
+                            raw_t_e1,
+                            raw_d_p,
+                            raw_d_e0,
+                            raw_d_e1,
+                            flag(0),
+                            flag(1),
+                            flag(2),
+                            dim,
+                            offsets(0),
+                            offsets(1),
+                            offsets(2),
+                            D,
+                            range.x(),
+                            range.y(),
+                            static_cast<int>(active));
+                    }
+                }
+
+                first_contact_contract_dumped = true;
+            }
+        }
+#endif
 
         PPs.resize(PP_count);
         PEs.resize(PE_count);
@@ -1197,6 +2741,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_toi(FilterTOIInfo& info)
 
     auto toi_size =
         candidate_AllP_CodimP_pairs.size() + candidate_CodimP_AllE_pairs.size()
+        + candidate_AllP_AllE_pairs.size()
         + candidate_AllP_AllT_pairs.size() + candidate_AllE_AllE_pairs.size();
 
     tois.resize(toi_size);
@@ -1204,8 +2749,10 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_toi(FilterTOIInfo& info)
     auto offset  = 0;
     auto PP_tois = tois.view(offset, candidate_AllP_CodimP_pairs.size());
     offset += candidate_AllP_CodimP_pairs.size();
-    auto PE_tois = tois.view(offset, candidate_CodimP_AllE_pairs.size());
+    auto PE_codim_tois = tois.view(offset, candidate_CodimP_AllE_pairs.size());
     offset += candidate_CodimP_AllE_pairs.size();
+    auto PE_allp_tois = tois.view(offset, candidate_AllP_AllE_pairs.size());
+    offset += candidate_AllP_AllE_pairs.size();
     auto PT_tois = tois.view(offset, candidate_AllP_AllT_pairs.size());
     offset += candidate_AllP_AllT_pairs.size();
     auto EE_tois = tois.view(offset, candidate_AllE_AllE_pairs.size());
@@ -1213,17 +2760,135 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_toi(FilterTOIInfo& info)
 
     UIPC_ASSERT(offset == toi_size, "size mismatch");
 
-
-    // TODO: Now hard code the minimum separation coefficient
-    // gap = eta * (dist2_cur - thickness * thickness) / (dist_cur + thickness);
     constexpr Float eta = 0.1;
-
-    // TODO: Now hard code the maximum iteration
     constexpr SizeT max_iter = 1000;
-
-    // large enough toi (>1)
     constexpr Float large_enough_toi = 1.1;
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    // CoreX: same CCD formulas as the NVIDIA ParallelFor path, but explicit __global__
+    // kernels in corex_filter (ParallelFor device lambdas are unreliable on CoreX).
+    if(toi_size > 0)
+    {
+        cudaDeviceSynchronize();
+
+        constexpr int block_dim = 256;
+        SizeT         toi_seg = 0;
+        Float*        d_tois    = tois.data();
+
+        const int n_pp = static_cast<int>(candidate_AllP_CodimP_pairs.size());
+        if(n_pp > 0)
+        {
+            const int grid = (n_pp + block_dim - 1) / block_dim;
+            corex_filter::kernel_filter_toi_PP<<<grid, block_dim>>>(
+                n_pp,
+                candidate_AllP_CodimP_pairs.view().data(),
+                info.codim_vertices().data(),
+                info.surf_vertices().data(),
+                info.thicknesses().data(),
+                info.positions().data(),
+                info.displacements().data(),
+                info.d_hats().data(),
+                info.alpha(),
+                eta,
+                max_iter,
+                large_enough_toi,
+                d_tois + toi_seg);
+        }
+        toi_seg += static_cast<SizeT>(n_pp);
+
+        const int n_pe_codim = static_cast<int>(candidate_CodimP_AllE_pairs.size());
+        if(n_pe_codim > 0)
+        {
+            const int grid = (n_pe_codim + block_dim - 1) / block_dim;
+            corex_filter::kernel_filter_toi_PE<<<grid, block_dim>>>(
+                n_pe_codim,
+                candidate_CodimP_AllE_pairs.view().data(),
+                info.codim_vertices().data(),
+                info.surf_edges().data(),
+                info.thicknesses().data(),
+                info.positions().data(),
+                info.displacements().data(),
+                info.d_hats().data(),
+                info.alpha(),
+                eta,
+                max_iter,
+                large_enough_toi,
+                d_tois + toi_seg);
+        }
+        toi_seg += static_cast<SizeT>(n_pe_codim);
+
+        const int n_pe_allp = static_cast<int>(candidate_AllP_AllE_pairs.size());
+        if(n_pe_allp > 0)
+        {
+            const int grid = (n_pe_allp + block_dim - 1) / block_dim;
+            corex_filter::kernel_filter_toi_PE<<<grid, block_dim>>>(
+                n_pe_allp,
+                candidate_AllP_AllE_pairs.view().data(),
+                info.surf_vertices().data(),
+                info.surf_edges().data(),
+                info.thicknesses().data(),
+                info.positions().data(),
+                info.displacements().data(),
+                info.d_hats().data(),
+                info.alpha(),
+                eta,
+                max_iter,
+                large_enough_toi,
+                d_tois + toi_seg);
+        }
+        toi_seg += static_cast<SizeT>(n_pe_allp);
+
+        const int n_pt = static_cast<int>(candidate_AllP_AllT_pairs.size());
+        if(n_pt > 0)
+        {
+            const int grid = (n_pt + block_dim - 1) / block_dim;
+            corex_filter::kernel_filter_toi_PT<<<grid, block_dim>>>(
+                n_pt,
+                candidate_AllP_AllT_pairs.view().data(),
+                info.surf_vertices().data(),
+                info.surf_triangles().data(),
+                info.thicknesses().data(),
+                info.positions().data(),
+                info.displacements().data(),
+                info.d_hats().data(),
+                info.alpha(),
+                eta,
+                max_iter,
+                large_enough_toi,
+                d_tois + toi_seg);
+        }
+        toi_seg += static_cast<SizeT>(n_pt);
+
+        const int n_ee = static_cast<int>(candidate_AllE_AllE_pairs.size());
+        if(n_ee > 0)
+        {
+            const int grid = (n_ee + block_dim - 1) / block_dim;
+            corex_filter::kernel_filter_toi_EE<<<grid, block_dim>>>(
+                n_ee,
+                candidate_AllE_AllE_pairs.view().data(),
+                info.surf_edges().data(),
+                info.thicknesses().data(),
+                info.positions().data(),
+                info.displacements().data(),
+                info.d_hats().data(),
+                info.alpha(),
+                eta,
+                max_iter,
+                large_enough_toi,
+                d_tois + toi_seg);
+        }
+
+        UIPC_ASSERT(static_cast<SizeT>(n_pp + n_pe_codim + n_pe_allp + n_pt + n_ee)
+                        == static_cast<SizeT>(toi_size),
+                    "filter_toi segment size mismatch");
+
+        DeviceReduce().Min(tois.data(), info.toi().data(), tois.size());
+    }
+    else
+    {
+        info.toi().fill(large_enough_toi);
+    }
+#else
     // AllP and CodimP
     {
         ParallelFor()
@@ -1281,7 +2946,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_toi(FilterTOIInfo& info)
         ParallelFor()
             .file_line(__FILE__, __LINE__)
             .apply(candidate_CodimP_AllE_pairs.size(),
-                   [PE_tois = PE_tois.viewer().name("PE_tois"),
+                   [PE_tois = PE_codim_tois.viewer().name("PE_tois"),
                     CodimP_AllE_pairs = candidate_CodimP_AllE_pairs.viewer().name("PE_pairs"),
                     codim_vertices = info.codim_vertices().viewer().name("codim_vertices"),
                     thicknesses = info.thicknesses().viewer().name("thicknesses"),
@@ -1296,6 +2961,61 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_toi(FilterTOIInfo& info)
                    {
                        auto     indices = CodimP_AllE_pairs(i);
                        IndexT   V       = codim_vertices(indices(0));
+                       Vector2i E       = surf_edges(indices(1));
+
+                       Float thickness = PE_thickness(
+                           thicknesses(V), thicknesses(E(0)), thicknesses(E(1)));
+                       Float d_hat = PE_d_hat(d_hats(V), d_hats(E(0)), d_hats(E(1)));
+
+                       Vector3 VP  = Ps(V);
+                       Vector3 dVP = alpha * dxs(V);
+
+                       Vector3 EP0  = Ps(E[0]);
+                       Vector3 EP1  = Ps(E[1]);
+                       Vector3 dEP0 = alpha * dxs(E[0]);
+                       Vector3 dEP1 = alpha * dxs(E[1]);
+
+                       Float toi = large_enough_toi;
+
+                       bool faraway = !distance::point_edge_ccd_broadphase(
+                           VP, EP0, EP1, dVP, dEP0, dEP1, d_hat + thickness);
+
+                       if(faraway)
+                       {
+                           PE_tois(i) = toi;
+                           return;
+                       }
+
+                       bool hit = distance::point_edge_ccd(
+                           VP, EP0, EP1, dVP, dEP0, dEP1, eta, thickness, max_iter, toi);
+
+                       if(!hit)
+                           toi = large_enough_toi;
+
+                       PE_tois(i) = toi;
+                   });
+    }
+
+    // AllP and AllE
+    {
+        ParallelFor()
+            .file_line(__FILE__, __LINE__)
+            .apply(candidate_AllP_AllE_pairs.size(),
+                   [PE_tois = PE_allp_tois.viewer().name("PE_tois"),
+                    AllP_AllE_pairs = candidate_AllP_AllE_pairs.viewer().name("PE_pairs"),
+                    surf_vertices = info.surf_vertices().viewer().name("surf_vertices"),
+                    thicknesses = info.thicknesses().viewer().name("thicknesses"),
+                    surf_edges = info.surf_edges().viewer().name("surf_edges"),
+                    Ps         = info.positions().viewer().name("Ps"),
+                    dxs        = info.displacements().viewer().name("dxs"),
+                    d_hats     = info.d_hats().viewer().name("d_hats"),
+                    alpha      = info.alpha(),
+                    eta,
+                    max_iter,
+                    large_enough_toi] __device__(int i) mutable
+                   {
+                       auto     indices = AllP_AllE_pairs(i);
+                       IndexT   V       = surf_vertices(indices(0));
                        Vector2i E       = surf_edges(indices(1));
 
                        Float thickness = PE_thickness(
@@ -1436,17 +3156,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_toi(FilterTOIInfo& info)
                        Float toi = large_enough_toi;
 
                        bool faraway = !distance::edge_edge_ccd_broadphase(
-                           // position
-                           EP0,
-                           EP1,
-                           EP2,
-                           EP3,
-                           // displacement
-                           dEP0,
-                           dEP1,
-                           dEP2,
-                           dEP3,
-                           d_hat + thickness);
+                           EP0, EP1, EP2, EP3, dEP0, dEP1, dEP2, dEP3, d_hat + thickness);
 
                        if(faraway)
                        {
@@ -1455,20 +3165,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_toi(FilterTOIInfo& info)
                        }
 
                        bool hit = distance::edge_edge_ccd(
-                           // position
-                           EP0,
-                           EP1,
-                           EP2,
-                           EP3,
-                           // displacement
-                           dEP0,
-                           dEP1,
-                           dEP2,
-                           dEP3,
-                           eta,
-                           thickness,
-                           max_iter,
-                           toi);
+                           EP0, EP1, EP2, EP3, dEP0, dEP1, dEP2, dEP3, eta, thickness, max_iter, toi);
 
                        if(!hit)
                            toi = large_enough_toi;
@@ -1479,12 +3176,12 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_toi(FilterTOIInfo& info)
 
     if(tois.size())
     {
-        // get min toi
         DeviceReduce().Min(tois.data(), info.toi().data(), tois.size());
     }
     else
     {
         info.toi().fill(large_enough_toi);
     }
+#endif
 }
 }  // namespace uipc::backend::cuda

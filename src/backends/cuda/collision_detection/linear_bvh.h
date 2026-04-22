@@ -1,3 +1,6 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+#include "linear_bvh_corex.h"
+#else
 /*****************************************************************/ /**
  * \file   linear_bvh.h
  * \brief  The LinearBVH class and its viewer class.
@@ -23,20 +26,20 @@ namespace detail
 {
     struct LinearBVHMortonIndex
     {
-        MUDA_HOST MUDA_DEVICE LinearBVHMortonIndex(uint32_t m, uint32_t idx) noexcept;
+        MUDA_GENERIC LinearBVHMortonIndex(uint32_t m, uint32_t idx) noexcept;
 
-        MUDA_HOST MUDA_DEVICE LinearBVHMortonIndex() noexcept = default;
+        MUDA_GENERIC LinearBVHMortonIndex() noexcept = default;
 
-        MUDA_HOST MUDA_DEVICE operator uint64_t() const noexcept;
+        MUDA_GENERIC operator uint64_t() const noexcept;
 
       private:
-        friend MUDA_HOST MUDA_DEVICE bool operator==(const LinearBVHMortonIndex& lhs,
-                                                     const LinearBVHMortonIndex& rhs) noexcept;
+        friend MUDA_GENERIC bool operator==(const LinearBVHMortonIndex& lhs,
+                                            const LinearBVHMortonIndex& rhs) noexcept;
         uint64_t                 m_morton_index = 0;
     };
 
-    MUDA_HOST MUDA_DEVICE bool operator==(const LinearBVHMortonIndex& lhs,
-                                          const LinearBVHMortonIndex& rhs) noexcept;
+    MUDA_GENERIC bool operator==(const LinearBVHMortonIndex& lhs,
+                                 const LinearBVHMortonIndex& rhs) noexcept;
 }  // namespace detail
 
 class LinearBVHNode
@@ -269,3 +272,4 @@ class LinearBVHVisitor
 }  // namespace uipc::backend::cuda
 
 #include "details/linear_bvh.inl"
+#endif

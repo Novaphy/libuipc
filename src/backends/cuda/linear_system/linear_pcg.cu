@@ -1,3 +1,6 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+#  include "linear_pcg_corex.cu.inc"
+#else
 #include <linear_system/linear_pcg.h>
 #include <sim_engine.h>
 #include <linear_system/global_linear_system.h>
@@ -5,9 +8,6 @@
 #include <utils/matrix_market.h>
 #include <backends/common/backend_path_tool.h>
 #include <uipc/common/timer.h>
-#include <cstdlib>
-#include <vector>
-#include <cmath>
 namespace uipc::backend::cuda
 {
 REGISTER_SIM_SYSTEM(LinearPCG);
@@ -46,9 +46,8 @@ void LinearPCG::do_solve(GlobalLinearSystem::SolvingInfo& info)
 {
     auto x = info.x();
     auto b = info.b();
-    auto stream = ctx().stream();
 
-    checkCudaErrors(cudaMemsetAsync(x.data(), 0, sizeof(Float) * x.size(), stream));
+    x.buffer_view().fill(0);
 
     auto N = x.size();
     if(z.capacity() < N)
@@ -64,10 +63,9 @@ void LinearPCG::do_solve(GlobalLinearSystem::SolvingInfo& info)
     p.resize(N);
     r.resize(N);
     Ap.resize(N);
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    muda::wait_device();
-#endif
-    checkCudaErrors(cudaMemsetAsync(d_converged_false.data(), 0, sizeof(IndexT), stream));
+    d_converged_false = 0;
+
+    r0 = r;
 
     auto max_iter = static_cast<SizeT>(max_iter_ratio * static_cast<Float>(b.size()));
     max_iter  = std::max(max_iter, SizeT{1});
@@ -181,25 +179,7 @@ void LinearPCG::check_iter_rz_nan_inf(Float rz, SizeT k)
     }
 }
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-__global__ void kernel_update_xr(int n, Float alpha, Float* x, const Float* p, Float* r, const Float* Ap)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if(i >= n) return;
-    x[i] += alpha * p[i];
-    r[i] -= alpha * Ap[i];
-}
-
-__global__ void kernel_update_p(int n, Float beta, Float* p, const Float* z)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if(i >= n) return;
-    p[i] = z[i] + beta * p[i];
-}
-#endif
-
-void update_xr(cudaStream_t                  stream,
-               Float                         alpha,
+void update_xr(Float                         alpha,
                muda::DenseVectorView<Float>  x,
                muda::CDenseVectorView<Float> p,
                muda::DenseVectorView<Float>  r,
@@ -207,22 +187,8 @@ void update_xr(cudaStream_t                  stream,
 {
     using namespace muda;
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    int n = static_cast<int>(r.size());
-    std::vector<Float> hx(n), hp(n), hr(n), hAp(n);
-    checkCudaErrors(cudaMemcpy(hx.data(), x.buffer_view().data(), sizeof(Float)*n, cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaMemcpy(hp.data(), p.buffer_view().data(), sizeof(Float)*n, cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaMemcpy(hr.data(), r.buffer_view().data(), sizeof(Float)*n, cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaMemcpy(hAp.data(), Ap.buffer_view().data(), sizeof(Float)*n, cudaMemcpyDeviceToHost));
-    for(int i = 0; i < n; ++i)
-    {
-        hx[i] += alpha * hp[i];
-        hr[i] -= alpha * hAp[i];
-    }
-    checkCudaErrors(cudaMemcpy(x.buffer_view().data(), hx.data(), sizeof(Float)*n, cudaMemcpyHostToDevice));
-    checkCudaErrors(cudaMemcpy(r.buffer_view().data(), hr.data(), sizeof(Float)*n, cudaMemcpyHostToDevice));
-#else
-    ParallelFor(0, stream)
+    // Fused update of x and r for better performance
+    ParallelFor()
         .file_line(__FILE__, __LINE__)
         .apply(r.size(),
                [alpha = alpha,
@@ -234,72 +200,34 @@ void update_xr(cudaStream_t                  stream,
                    x(i) += alpha * p(i);
                    r(i) -= alpha * Ap(i);
                });
-#endif
 }
 
-void update_p(cudaStream_t                  stream,
-              muda::DenseVectorView<Float> p,
-              muda::CDenseVectorView<Float> z,
-              Float                         beta)
+void update_p(muda::DenseVectorView<Float> p, muda::CDenseVectorView<Float> z, Float beta)
 {
     using namespace muda;
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    int n = static_cast<int>(p.size());
-    std::vector<Float> hp(n), hz(n);
-    checkCudaErrors(cudaMemcpy(hp.data(), p.buffer_view().data(), sizeof(Float)*n, cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaMemcpy(hz.data(), z.buffer_view().data(), sizeof(Float)*n, cudaMemcpyDeviceToHost));
-    for(int i = 0; i < n; ++i)
-        hp[i] = hz[i] + beta * hp[i];
-    checkCudaErrors(cudaMemcpy(p.buffer_view().data(), hp.data(), sizeof(Float)*n, cudaMemcpyHostToDevice));
-#else
-    ParallelFor(0, stream)
+    // Simple axpby
+    ParallelFor()
         .file_line(__FILE__, __LINE__)
         .apply(p.size(),
                [p = p.viewer().name("p"), z = z.cviewer().name("z"), beta = beta] __device__(
                    int i) mutable { p(i) = z(i) + beta * p(i); });
-#endif
 }
 
 SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Float> b, SizeT max_iter)
 {
     Timer pcg_timer{"PCG"};
-    auto  stream = ctx().stream();
 
     SizeT k = 0;
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    const bool corex_trace_pcg = (std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr);
-#else
-    constexpr bool corex_trace_pcg = false;
-#endif
-
     // r = b - A * x
     {
         // r = b;
-        checkCudaErrors(cudaMemcpyAsync(
-            r.buffer_view().data(), b.data(), sizeof(Float) * b.size(), cudaMemcpyDeviceToDevice, stream));
+        r.buffer_view().copy_from(b.buffer_view());
 
         // x == 0, so we don't need to do the following
         // r = - A * x + r
         //spmv(-1.0, x.as_const(), 1.0, r.view());
     }
-
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    {
-        checkCudaErrors(cudaDeviceSynchronize());
-        auto n = static_cast<int>(b.size());
-        std::vector<Float> hb(n);
-        checkCudaErrors(cudaMemcpy(hb.data(), b.data(), sizeof(Float) * n, cudaMemcpyDeviceToHost));
-        Float hnorm_b = 0;
-        for(int i = 0; i < n; ++i)
-            hnorm_b += hb[i] * hb[i];
-        if(hnorm_b == 0.0)
-        {
-            logger::info("[corex] PCG: b==0, trivial solution x=0");
-            return 0;
-        }
-    }
-#endif
 
     Float alpha, beta, rz, abs_rz0;
 
@@ -313,11 +241,7 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
         dump_r_z(k);
 
     // p = z
-    checkCudaErrors(cudaMemcpyAsync(p.buffer_view().data(),
-                                    z.buffer_view().data(),
-                                    sizeof(Float) * z.size(),
-                                    cudaMemcpyDeviceToDevice,
-                                    stream));
+    p = z;
 
     // init rz
     // rz = r^T * z
@@ -328,13 +252,7 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
 
     // check convergence
     if(accuracy_statisfied(r) && abs_rz0 == Float{0.0})
-    {
-        logger::info("LinearPCG: early exit with zero initial rz, norm(b)={}, norm(r)={}, norm(z)={}",
-                     ctx().norm(b),
-                     ctx().norm(r.cview()),
-                     ctx().norm(z.cview()));
         return 0;
-    }
 
     for(k = 1; k < max_iter; ++k)
     {
@@ -343,20 +261,15 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
             spmv(p.cview(), Ap.view());
         }
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-        checkCudaErrors(cudaDeviceSynchronize());
-#endif
-
         if(need_debug_dump) [[unlikely]]
             dump_p_Ap(k);
 
         // alpha = rz / p^T * Ap
-        Float pAp = ctx().dot(p.cview(), Ap.cview());
-        alpha = rz / pAp;
+        alpha = rz / ctx().dot(p.cview(), Ap.cview());
 
         // x = x + alpha * p
         // r = r - alpha * Ap
-        update_xr(stream, alpha, x, p.cview(), r.view(), Ap.cview());
+        update_xr(alpha, x, p.cview(), r.view(), Ap.cview());
 
         // z = P * r (apply preconditioner)
         {
@@ -379,7 +292,7 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
         beta = rz_new / rz;
 
         // p = z + beta * p
-        update_p(stream, p.view(), z.cview(), beta);
+        update_p(p.view(), z.cview(), beta);
 
         rz = rz_new;
     }
@@ -387,3 +300,4 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
     return k;
 }
 }  // namespace uipc::backend::cuda
+#endif

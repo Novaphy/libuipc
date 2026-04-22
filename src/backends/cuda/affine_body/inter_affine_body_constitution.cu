@@ -11,13 +11,13 @@ void InterAffineBodyConstitution::do_build()
             fmt::format("{} requires Constraint UID={}", name(), uid()));
     }
 
-    auto& manager = require<InterAffineBodyConstitutionManager>();
+    m_manager = require<InterAffineBodyConstitutionManager>();
 
     // let the subclass take care of its own build
     BuildInfo info;
     do_build(info);
 
-    manager.add_constitution(this);
+    m_manager->add_constitution(this);
 }
 
 void InterAffineBodyConstitution::init(FilteredInfo& info)

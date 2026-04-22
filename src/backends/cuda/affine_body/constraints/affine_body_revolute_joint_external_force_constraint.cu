@@ -8,6 +8,24 @@ static constexpr uipc::U64 RevoluteJointConstitutionUID = 18;
 
 namespace uipc::backend::cuda
 {
+namespace
+{
+constexpr Float revolute_joint_external_force_axis_norm_eps()
+{
+#if defined(UIPC_FLOAT_SCALAR) && UIPC_FLOAT_SCALAR
+    return Float(1e-6);
+#else
+    return Float(1e-12);
+#endif
+}
+
+constexpr Float revolute_joint_external_force_axis_sq_eps()
+{
+    const Float e = revolute_joint_external_force_axis_norm_eps();
+    return e * e;
+}
+}  // namespace
+
 REGISTER_SIM_SYSTEM(AffineBodyRevoluteJointExternalForceConstraint);
 
 void AffineBodyRevoluteJointExternalForceConstraint::do_build(BuildInfo& info)
@@ -90,7 +108,7 @@ static void collect_joint_data(InterAffineBodyAnimator::FilteredInfo& info,
                 Vector3 mid = (P0 + P1) / 2;
                 Vector3 Dir = (P1 - P0);
 
-                UIPC_ASSERT(Dir.squaredNorm() > 1e-24,
+                UIPC_ASSERT(Dir.squaredNorm() > revolute_joint_external_force_axis_sq_eps(),
                             "AffineBodyRevoluteJointExternalForceConstraint: Edge with zero length detected");
 
                 Vector3 HalfAxis = Dir.normalized() / 2;

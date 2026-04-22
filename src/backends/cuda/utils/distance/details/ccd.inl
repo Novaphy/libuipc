@@ -1,8 +1,23 @@
 //ref: https://github.com/ipc-sim/Codim-IPC/tree/main/Library/Math/Distance
+#include <limits>
 #include <thrust/extrema.h>
 #include <thrust/swap.h>
 namespace uipc::backend::cuda::distance
 {
+template <typename T>
+MUDA_HOST MUDA_DEVICE constexpr T ccd_zero_tol()
+{
+    return T(64) * std::numeric_limits<T>::epsilon();
+}
+
+template <typename T>
+MUDA_HOST MUDA_DEVICE T ccd_safe_denom(T dist_cur, T thickness)
+{
+    T denom    = dist_cur + thickness;
+    T min_denom = ccd_zero_tol<T>() * (dist_cur + thickness + T(1));
+    return denom > min_denom ? denom : min_denom;
+}
+
 template <typename T>
 MUDA_HOST MUDA_DEVICE bool point_edge_cd_broadphase(const Eigen::Vector<T, 3>& x0,
                                                      const Eigen::Vector<T, 3>& x1,
@@ -218,7 +233,7 @@ MUDA_HOST MUDA_DEVICE bool point_triangle_ccd(Eigen::Vector<T, 3> p,
     Eigen::Array3<T> dispMag2Vec{dt0.squaredNorm(), dt1.squaredNorm(), dt2.squaredNorm()};
     T maxDispMag = dp.norm() + sqrt(dispMag2Vec.maxCoeff());
 
-    if(maxDispMag <= T(0))
+    if(maxDispMag <= ccd_zero_tol<T>())
     {
         return false;
     }
@@ -227,7 +242,7 @@ MUDA_HOST MUDA_DEVICE bool point_triangle_ccd(Eigen::Vector<T, 3> p,
     auto flag = point_triangle_distance_flag(p, t0, t1, t2);
     point_triangle_distance2(flag, p, t0, t1, t2, dist2_cur);
     T dist_cur = sqrt(dist2_cur);
-    T gap = eta * (dist2_cur - thickness * thickness) / (dist_cur + thickness);
+    T gap = eta * (dist2_cur - thickness * thickness) / ccd_safe_denom(dist_cur, thickness);
     T toc_prev = toc;
     toc        = 0;
     while(true)
@@ -238,8 +253,8 @@ MUDA_HOST MUDA_DEVICE bool point_triangle_ccd(Eigen::Vector<T, 3> p,
                 return true;
         }
 
-        T tocLowerBound = (1 - eta) * (dist2_cur - thickness * thickness)
-                          / ((dist_cur + thickness) * maxDispMag);
+        T tocLowerBound = (T(1) - eta) * (dist2_cur - thickness * thickness)
+                          / (ccd_safe_denom(dist_cur, thickness) * maxDispMag);
 
         p += tocLowerBound * dp;
         t0 += tocLowerBound * dt0;
@@ -248,7 +263,7 @@ MUDA_HOST MUDA_DEVICE bool point_triangle_ccd(Eigen::Vector<T, 3> p,
         flag = point_triangle_distance_flag(p, t0, t1, t2);
         point_triangle_distance2(flag, p, t0, t1, t2, dist2_cur);
         dist_cur = sqrt(dist2_cur);
-        if(toc && ((dist2_cur - thickness * thickness) / (dist_cur + thickness) < gap))
+        if(toc && ((dist2_cur - thickness * thickness) / ccd_safe_denom(dist_cur, thickness) < gap))
         {
             break;
         }
@@ -284,7 +299,7 @@ MUDA_HOST MUDA_DEVICE bool edge_edge_ccd(Eigen::Vector<T, 3> ea0,
     deb1 -= mov;
     T maxDispMag = sqrt(std::max(dea0.squaredNorm(), dea1.squaredNorm()))
                    + sqrt(std::max(deb0.squaredNorm(), deb1.squaredNorm()));
-    if(maxDispMag == 0)
+    if(maxDispMag <= ccd_zero_tol<T>())
     {
         return false;
     }
@@ -305,7 +320,7 @@ MUDA_HOST MUDA_DEVICE bool edge_edge_ccd(Eigen::Vector<T, 3> ea0,
         dFunc     = dist2_cur - thickness * thickness;
     }
     T dist_cur = sqrt(dist2_cur);
-    T gap      = eta * dFunc / (dist_cur + thickness);
+    T gap      = eta * dFunc / ccd_safe_denom(dist_cur, thickness);
     T toc_prev = toc;
     toc        = 0;
     while(true)
@@ -316,7 +331,7 @@ MUDA_HOST MUDA_DEVICE bool edge_edge_ccd(Eigen::Vector<T, 3> ea0,
                 return true;
         }
 
-        T tocLowerBound = (1 - eta) * dFunc / ((dist_cur + thickness) * maxDispMag);
+        T tocLowerBound = (T(1) - eta) * dFunc / (ccd_safe_denom(dist_cur, thickness) * maxDispMag);
 
         ea0 += tocLowerBound * dea0;
         ea1 += tocLowerBound * dea1;
@@ -337,7 +352,7 @@ MUDA_HOST MUDA_DEVICE bool edge_edge_ccd(Eigen::Vector<T, 3> ea0,
             dFunc     = dist2_cur - thickness * thickness;
         }
         dist_cur = sqrt(dist2_cur);
-        if(toc && (dFunc / (dist_cur + thickness) < gap))
+        if(toc && (dFunc / ccd_safe_denom(dist_cur, thickness) < gap))
         {
             break;
         }
@@ -369,7 +384,7 @@ MUDA_HOST MUDA_DEVICE bool point_edge_ccd(Eigen::Vector<T, 3> p,
     de1 -= mov;
     dp -= mov;
     T maxDispMag = dp.norm() + sqrt(std::max(de0.squaredNorm(), de1.squaredNorm()));
-    if(maxDispMag == 0)
+    if(maxDispMag <= ccd_zero_tol<T>())
     {
         return false;
     }
@@ -378,7 +393,7 @@ MUDA_HOST MUDA_DEVICE bool point_edge_ccd(Eigen::Vector<T, 3> p,
     auto flag = point_edge_distance_flag(p, e0, e1);
     point_edge_distance2(flag, p, e0, e1, dist2_cur);
     T dist_cur = sqrt(dist2_cur);
-    T gap = eta * (dist2_cur - thickness * thickness) / (dist_cur + thickness);
+    T gap = eta * (dist2_cur - thickness * thickness) / ccd_safe_denom(dist_cur, thickness);
     T toc_prev = toc;
     toc        = 0;
     while(true)
@@ -389,8 +404,8 @@ MUDA_HOST MUDA_DEVICE bool point_edge_ccd(Eigen::Vector<T, 3> p,
                 return true;
         }
 
-        T tocLowerBound = (1 - eta) * (dist2_cur - thickness * thickness)
-                          / ((dist_cur + thickness) * maxDispMag);
+        T tocLowerBound = (T(1) - eta) * (dist2_cur - thickness * thickness)
+                          / (ccd_safe_denom(dist_cur, thickness) * maxDispMag);
 
         p += tocLowerBound * dp;
         e0 += tocLowerBound * de0;
@@ -398,7 +413,7 @@ MUDA_HOST MUDA_DEVICE bool point_edge_ccd(Eigen::Vector<T, 3> p,
         flag = point_edge_distance_flag(p, e0, e1);
         point_edge_distance2(flag, p, e0, e1, dist2_cur);
         dist_cur = sqrt(dist2_cur);
-        if(toc && (dist2_cur - thickness * thickness) / (dist_cur + thickness) < gap)
+        if(toc && (dist2_cur - thickness * thickness) / ccd_safe_denom(dist_cur, thickness) < gap)
         {
             break;
         }
@@ -427,7 +442,7 @@ MUDA_HOST MUDA_DEVICE bool point_point_ccd(Eigen::Vector<T, 3> p0,
     dp1 -= mov;
     dp0 -= mov;
     T maxDispMag = dp0.norm() + dp1.norm();
-    if(maxDispMag == 0)
+    if(maxDispMag <= ccd_zero_tol<T>())
     {
         return false;
     }
@@ -436,7 +451,7 @@ MUDA_HOST MUDA_DEVICE bool point_point_ccd(Eigen::Vector<T, 3> p0,
     auto flag = point_point_distance_flag(p0, p1);
     point_point_distance2(flag, p0, p1, dist2_cur);
     T dist_cur = sqrt(dist2_cur);
-    T gap = eta * (dist2_cur - thickness * thickness) / (dist_cur + thickness);
+    T gap = eta * (dist2_cur - thickness * thickness) / ccd_safe_denom(dist_cur, thickness);
     T toc_prev = toc;
     toc        = 0;
     while(true)
@@ -447,15 +462,15 @@ MUDA_HOST MUDA_DEVICE bool point_point_ccd(Eigen::Vector<T, 3> p0,
                 return true;
         }
 
-        T tocLowerBound = (1 - eta) * (dist2_cur - thickness * thickness)
-                          / ((dist_cur + thickness) * maxDispMag);
+        T tocLowerBound = (T(1) - eta) * (dist2_cur - thickness * thickness)
+                          / (ccd_safe_denom(dist_cur, thickness) * maxDispMag);
 
         p0 += tocLowerBound * dp0;
         p1 += tocLowerBound * dp1;
         flag = point_point_distance_flag(p0, p1);
         point_point_distance2(flag, p0, p1, dist2_cur);
         dist_cur = sqrt(dist2_cur);
-        if(toc && (dist2_cur - thickness * thickness) / (dist_cur + thickness) < gap)
+        if(toc && (dist2_cur - thickness * thickness) / ccd_safe_denom(dist_cur, thickness) < gap)
         {
             break;
         }

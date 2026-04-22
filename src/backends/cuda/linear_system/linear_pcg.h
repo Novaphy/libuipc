@@ -1,3 +1,6 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+#include "linear_pcg_corex.h"
+#else
 #pragma once
 #include <linear_system/iterative_solver.h>
 #include <muda/buffer/device_var.h>
@@ -40,3 +43,4 @@ class LinearPCG : public IterativeSolver
     std::string debug_dump_path;
 };
 }  // namespace uipc::backend::cuda
+#endif

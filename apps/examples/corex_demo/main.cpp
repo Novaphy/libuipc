@@ -7,14 +7,30 @@
 #include <uipc/geometry/utils/affine_body/compute_dyadic_mass.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <filesystem>
 #include <numbers>
+#include <optional>
 #include <string>
 #include <string_view>
 
 namespace
 {
+std::optional<int> env_int(const char* key)
+{
+    if(const char* v = std::getenv(key); v && v[0] != '\0')
+        return std::atoi(v);
+    return std::nullopt;
+}
+
+std::optional<double> env_double(const char* key)
+{
+    if(const char* v = std::getenv(key); v && v[0] != '\0')
+        return std::atof(v);
+    return std::nullopt;
+}
+
 std::string_view pick_backend(int argc, char** argv)
 {
     // Default: try cuda first.
@@ -121,6 +137,33 @@ std::string_view pick_scene(int argc, char** argv)
     }
     return scene;
 }
+
+int pick_gpu_device(int argc, char** argv)
+{
+    int gpu = 0;
+
+    if(const char* env_gpu = std::getenv("UIPC_COREX_GPU_DEVICE");
+       env_gpu && env_gpu[0] != '\0')
+    {
+        gpu = std::max(0, std::atoi(env_gpu));
+    }
+
+    for(int i = 1; i < argc; ++i)
+    {
+        std::string_view a{argv[i]};
+        if(a == "--gpu" && i + 1 < argc)
+        {
+            gpu = std::max(0, std::atoi(argv[i + 1]));
+            ++i;
+        }
+        else if(a.rfind("--gpu=", 0) == 0)
+        {
+            gpu = std::max(0, std::atoi(std::string{a.substr(6)}.c_str()));
+        }
+    }
+
+    return gpu;
+}
 }  // namespace
 
 int main(int argc, char** argv)
@@ -136,7 +179,11 @@ int main(int argc, char** argv)
     // This avoids relying on implicit defaults that may be invalid on some runtimes.
     {
         auto uipc_config = uipc::default_config();
-        uipc_config["module_dir"] = std::filesystem::current_path().string();
+        auto module_dir = std::filesystem::current_path();
+        auto release_bin = module_dir / "Release" / "bin";
+        if(std::filesystem::exists(release_bin / "libuipc_backend_cuda.so"))
+            module_dir = release_bin;
+        uipc_config["module_dir"] = module_dir.string();
         uipc::init(uipc_config);
     }
 
@@ -146,11 +193,17 @@ int main(int argc, char** argv)
     auto requested = pick_backend(argc, argv);
     auto frames    = pick_frames(argc, argv);
     auto scene_name = pick_scene(argc, argv);
+    auto gpu_device = pick_gpu_device(argc, argv);
+
+    auto engine_config = Engine::default_config();
+    engine_config["gpu"]["device"] = gpu_device;
+    fmt::println(stderr, "[corex_demo] target gpu device: {}", gpu_device);
+    std::fflush(stderr);
 
     auto make_engine = [&](std::string_view backend) -> Engine
     {
         // Put backend workspace under the per-app output folder.
-        return Engine{backend, output};
+        return Engine{backend, output, engine_config};
     };
 
     Engine engine = [&]() -> Engine
@@ -180,13 +233,12 @@ int main(int argc, char** argv)
     config["contact"]["enable"]             = true;
     config["contact"]["friction"]["enable"] = true;
     config["contact"]["d_hat"]              = 0.01;
-    config["line_search"]["max_iter"]       = 8;
-    // Limit iterations for debug dumps.
-    config["newton"]["max_iter"]           = 4;
+    config["line_search"]["max_iter"]       = 64;
+    config["newton"]["max_iter"]           = 100;
     // Corex: prefer the non-fused PCG path for stability/compatibility.
     // (fused_pcg uses a more aggressive fused-kernel implementation that may stall on some CUDA-compat runtimes)
     config["linear_system"]["solver"]        = "linear_pcg";
-    config["linear_system"]["tol_rate"]      = 1e-2;
+    config["linear_system"]["tol_rate"]      = 1e-3;
     config["linear_system"]["check_interval"] = 1;
     config["sanity_check"]["enable"]       = 1;
     // Dump linear system to check whether the solver is producing updates.
@@ -200,10 +252,36 @@ int main(int argc, char** argv)
     if(scene_name == "simple")
     {
         config["contact"]["enable"]             = 1;
-        config["contact"]["friction"]["enable"] = 0;
-        config["sanity_check"]["enable"] = 0;
+        config["contact"]["friction"]["enable"] = 1;
+        // Float/CoreX path: slightly larger activation window reduces missed PT/PE activation.
+        config["contact"]["d_hat"]              = 0.03;
+        config["sanity_check"]["enable"]        = 1;
+        if(auto f = env_int("UIPC_SIMPLE_FORCE_FRICTION_ENABLE"))
+            config["contact"]["friction"]["enable"] = (*f != 0) ? 1 : 0;
+        if(auto d = env_double("UIPC_SIMPLE_FORCE_DHAT"))
+            config["contact"]["d_hat"] = *d;
+        if(auto dt = env_double("UIPC_SIMPLE_FORCE_DT"))
+            config["dt"] = *dt;
         fmt::println(stderr,
-                     "[corex_demo] Corex build: simple — contact ON, friction off, sanity_check off.");
+                     "[corex_demo] Corex build: simple — contact/friction/sanity_check ON (d_hat=0.03).");
+        std::fflush(stderr);
+    }
+    else if(scene_name == "slope" || scene_name == "stack" || scene_name == "domino")
+    {
+        config["contact"]["enable"]             = 1;
+        config["contact"]["friction"]["enable"] = 1;
+        config["contact"]["d_hat"]              = 0.02;
+        config["sanity_check"]["enable"]        = 1;
+        if(scene_name == "domino")
+        {
+            // Initial overlap checks off (pieces start close). Keep d_hat=0.02 like slope/stack (large d_hat is costly).
+            config["sanity_check"]["enable"] = 0;
+        }
+        if(auto d = env_double("UIPC_SCENE_DHAT"))
+            config["contact"]["d_hat"] = *d;
+        fmt::println(stderr,
+                     "[corex_demo] Corex build: {} — contact/friction ON.",
+                     scene_name);
         std::fflush(stderr);
     }
 #endif
@@ -215,8 +293,14 @@ int main(int argc, char** argv)
 
         if(scene_name == "simple")
         {
-            scene.contact_tabular().default_model(0.5, 1.0_GPa);
-            auto default_element = scene.contact_tabular().default_element();
+            Float simple_mu    = 0.0;
+            Float simple_kappa = 30.0_GPa;
+            if(auto mu = env_double("UIPC_SIMPLE_FORCE_MU"))
+                simple_mu = static_cast<Float>(*mu);
+            if(auto kgpa = env_double("UIPC_SIMPLE_FORCE_KAPPA_GPA"))
+                simple_kappa = static_cast<Float>(*kgpa) * 1.0_GPa;
+            scene.contact_tabular().default_model(simple_mu, simple_kappa);
+            auto default_contact = scene.contact_tabular().default_element();
 
             vector<Vector3> Vs = {Vector3{0, 1, 0},
                                   Vector3{0, 0, 1},
@@ -254,17 +338,27 @@ int main(int argc, char** argv)
                     fmt::println("[corex_demo:debug] base_mesh missing mass_density/volume attr");
                 }
             }
-            default_element.apply_to(base_mesh);
             label_surface(base_mesh);
             label_triangle_orient(base_mesh);
 
+            auto ensure_vertex_contact_id = [](SimplicialComplex& mesh)
+            {
+                auto meta_cid = mesh.meta().find<IndexT>(builtin::contact_element_id);
+                UIPC_ASSERT(meta_cid,
+                            "simple scene mesh missing meta contact_element_id after default_element.apply_to()");
+                IndexT cid = meta_cid->view().front();
+
+                auto vertex_cid = mesh.vertices().find<IndexT>(builtin::contact_element_id);
+                if(!vertex_cid)
+                    vertex_cid = mesh.vertices().create<IndexT>(builtin::contact_element_id, cid);
+                else
+                    std::ranges::fill(view(*vertex_cid), cid);
+            };
+
             SimplicialComplex falling = base_mesh;
             {
-                // For affine-body motion, the backend streams instance transforms.
-                // Apply the initial offset via transforms (not by mutating positions),
-                // so that subsequent time integration has meaningful translation DOFs.
                 Transform t = Transform::Identity();
-                t.translate(Vector3::UnitY() * 1.005);
+                t.translate(Vector3{0.6, 1.5, 0.0});
                 view(falling.transforms())[0] = t.matrix();
             }
             // Explicitly mark falling body as dynamic (not fixed).
@@ -297,13 +391,17 @@ int main(int argc, char** argv)
                 fmt::println("[corex_demo:debug] simple falling meta mass_density={}, volume={}",
                              md_attr ? md_attr->view().front() : -1.0,
                              vol_attr ? vol_attr->view().front() : -1.0);
+
+                auto contact_id_attr =
+                    falling.meta().find<IndexT>(builtin::contact_element_id);
+                fmt::println("[corex_demo:debug] simple falling meta contact_id={}",
+                             contact_id_attr ? contact_id_attr->view().front() : -1);
             }
 
             SimplicialComplex fixed = base_mesh;
             {
                 auto is_fixed_attr = fixed.instances().find<IndexT>(builtin::is_fixed);
                 view(*is_fixed_attr)[0] = 1;
-                // A fixed body shouldn't participate in kinetics.
                 auto is_dynamic_attr = fixed.instances().find<IndexT>(builtin::is_dynamic);
                 if(is_dynamic_attr)
                     view(*is_dynamic_attr)[0] = 0;
@@ -317,6 +415,13 @@ int main(int argc, char** argv)
                 }
             }
 
+            // Use default contact element for both bodies to keep contact mask enabled.
+            // Inter-body filtering is still controlled by body ids / self-collision flags.
+            default_contact.apply_to(falling);
+            default_contact.apply_to(fixed);
+            ensure_vertex_contact_id(falling);
+            ensure_vertex_contact_id(fixed);
+
             {
                 auto tets = fixed.tetrahedra().topo().view();
                 fmt::println("[corex_demo:debug] simple fixed tetra_count={}", tets.size());
@@ -328,11 +433,315 @@ int main(int argc, char** argv)
                 fmt::println("[corex_demo:debug] simple fixed meta mass_density={}, volume={}",
                              md_attr ? md_attr->view().front() : -1.0,
                              vol_attr ? vol_attr->view().front() : -1.0);
+
+                auto contact_id_attr = fixed.meta().find<IndexT>(builtin::contact_element_id);
+                fmt::println("[corex_demo:debug] simple fixed meta contact_id={}",
+                             contact_id_attr ? contact_id_attr->view().front() : -1);
             }
 
-            auto object = scene.objects().create("tets");
-            object->geometries().create(falling);
-            object->geometries().create(fixed);
+            // Keep falling/fixed in separate objects so collision filtering
+            // does not treat them as a single self-contact group.
+            auto falling_object = scene.objects().create("tets_falling");
+            falling_object->geometries().create(falling);
+            auto fixed_object = scene.objects().create("tets_fixed");
+            fixed_object->geometries().create(fixed);
+        }
+        else if(scene_name == "slope")
+        {
+            // --- Inclined plane friction test ---
+            std::string tetmesh_dir{AssetDir::tetmesh_path()};
+
+            Float slope_mu    = 0.3;
+            Float slope_kappa = 20.0_GPa;
+            if(auto mu = env_double("UIPC_SLOPE_MU"))
+                slope_mu = static_cast<Float>(*mu);
+            scene.contact_tabular().default_model(slope_mu, slope_kappa);
+            auto default_contact = scene.contact_tabular().default_element();
+
+            constexpr Float slope_angle_deg = 30.0;
+            const Float slope_angle = slope_angle_deg * std::numbers::pi / 180.0;
+
+            // Ramp: a flat slab tilted around Z-axis
+            {
+                Transform pre = Transform::Identity();
+                pre.scale(Vector3{6, 0.3, 3});
+                SimplicialComplexIO gio{pre};
+                auto ramp = gio.read(fmt::format("{}cube.msh", tetmesh_dir));
+                label_surface(ramp);
+                label_triangle_orient(ramp);
+                abd.apply_to(ramp, 10.0_MPa);
+                default_contact.apply_to(ramp);
+
+                Transform t = Transform::Identity();
+                t.rotate(AngleAxis(slope_angle, Vector3::UnitZ()));
+                t.translate(Vector3{0, 0, 0});
+                view(ramp.transforms())[0] = t.matrix();
+
+                auto is_fixed = ramp.instances().find<IndexT>(builtin::is_fixed);
+                view(*is_fixed)[0] = 1;
+                auto is_dyn = ramp.instances().find<IndexT>(builtin::is_dynamic);
+                if(is_dyn) view(*is_dyn)[0] = 0;
+
+                auto ramp_obj = scene.objects().create("ramp");
+                ramp_obj->geometries().create(ramp);
+            }
+
+            // Slider cube on top of the ramp
+            {
+                Transform pre = Transform::Identity();
+                pre.scale(Vector3{0.5, 0.5, 0.5});
+                SimplicialComplexIO gio{pre};
+                auto slider = gio.read(fmt::format("{}cube.msh", tetmesh_dir));
+                label_surface(slider);
+                label_triangle_orient(slider);
+                abd.apply_to(slider, 10.0_MPa);
+                default_contact.apply_to(slider);
+
+                // Place above ramp surface along the ramp-normal direction
+                // Ramp top surface: half-thickness (0.15) along normal from origin
+                // Slider half-size: 0.25 along normal + gap
+                Float ramp_half_thick = 0.15;
+                Float slider_half     = 0.25;
+                Float gap             = 0.08;
+                Vector3 ramp_normal{-std::sin(slope_angle), std::cos(slope_angle), 0};
+                Vector3 pos = ramp_normal * (ramp_half_thick + slider_half + gap);
+
+                Transform t = Transform::Identity();
+                t.translate(pos);
+                t.rotate(AngleAxis(slope_angle, Vector3::UnitZ()));
+                view(slider.transforms())[0] = t.matrix();
+
+                auto is_fixed = slider.instances().find<IndexT>(builtin::is_fixed);
+                view(*is_fixed)[0] = 0;
+                auto is_dyn = slider.instances().find<IndexT>(builtin::is_dynamic);
+                if(is_dyn) view(*is_dyn)[0] = 1;
+
+                auto slider_obj = scene.objects().create("slider");
+                slider_obj->geometries().create(slider);
+            }
+
+            fmt::println(stderr, "[corex_demo] slope: angle={}°, mu={}", slope_angle_deg, slope_mu);
+            std::fflush(stderr);
+        }
+        else if(scene_name == "stack")
+        {
+            // --- Stacking stability test ---
+            std::string tetmesh_dir{AssetDir::tetmesh_path()};
+
+            Float stack_mu    = 0.5;
+            Float stack_kappa = 20.0_GPa;
+            if(auto mu = env_double("UIPC_STACK_MU"))
+                stack_mu = static_cast<Float>(*mu);
+            scene.contact_tabular().default_model(stack_mu, stack_kappa);
+            auto default_contact = scene.contact_tabular().default_element();
+
+            // Ground slab
+            {
+                Transform pre = Transform::Identity();
+                pre.scale(Vector3{10, 0.3, 10});
+                SimplicialComplexIO gio{pre};
+                auto ground = gio.read(fmt::format("{}cube.msh", tetmesh_dir));
+                label_surface(ground);
+                label_triangle_orient(ground);
+                abd.apply_to(ground, 10.0_MPa);
+                default_contact.apply_to(ground);
+
+                Transform t = Transform::Identity();
+                t.translate(Vector3{0, -0.15, 0});
+                view(ground.transforms())[0] = t.matrix();
+
+                auto is_fixed = ground.instances().find<IndexT>(builtin::is_fixed);
+                view(*is_fixed)[0] = 1;
+                auto is_dyn = ground.instances().find<IndexT>(builtin::is_dynamic);
+                if(is_dyn) view(*is_dyn)[0] = 0;
+
+                auto ground_obj = scene.objects().create("ground");
+                ground_obj->geometries().create(ground);
+            }
+
+            // 3 stacked cubes with slight horizontal offsets
+            const Float cube_size = 0.8;
+            const Float offsets[] = {0.0, 0.1, -0.15};
+            const Float gap       = Float(0.5);
+            for(int ci = 0; ci < 3; ci++)
+            {
+                Transform pre = Transform::Identity();
+                pre.scale(Vector3{cube_size, cube_size, cube_size});
+                SimplicialComplexIO gio{pre};
+                auto cube = gio.read(fmt::format("{}cube.msh", tetmesh_dir));
+                label_surface(cube);
+                label_triangle_orient(cube);
+                abd.apply_to(cube, 10.0_MPa);
+                default_contact.apply_to(cube);
+
+                Float y = cube_size * 0.5 + gap + (cube_size + gap) * ci;
+                Transform t = Transform::Identity();
+                t.translate(Vector3{offsets[ci], y, 0});
+                view(cube.transforms())[0] = t.matrix();
+
+                auto is_fixed = cube.instances().find<IndexT>(builtin::is_fixed);
+                view(*is_fixed)[0] = 0;
+                auto is_dyn = cube.instances().find<IndexT>(builtin::is_dynamic);
+                if(is_dyn) view(*is_dyn)[0] = 1;
+
+                auto cube_obj = scene.objects().create(fmt::format("cube_{}", ci));
+                cube_obj->geometries().create(cube);
+            }
+
+            fmt::println(stderr, "[corex_demo] stack: 3 cubes, gap={}, mu={}", gap, stack_mu);
+            std::fflush(stderr);
+        }
+        else if(scene_name == "domino")
+        {
+            // --- Domino chain test (tuned for full chain propagation) ---
+            std::string tetmesh_dir{AssetDir::tetmesh_path()};
+
+            // Tuned defaults so the chain fully propagates; all overridable via env.
+            Float domino_mu    = Float(0.25);
+            Float domino_kappa = 40.0_GPa;
+            Float spacing      = Float(0.55);
+            Float tilt_deg     = Float(0);
+            Float abd_mpa      = Float(1000.0);
+            Float d1_vx        = Float(3.0);  // initial +X translational velocity on D1 (m/s)
+            // Ground-vs-domino friction, independent of domino-domino friction.
+            // Defaults to domino_mu (isotropic). Set UIPC_GROUND_MU to raise it so
+            // a struck domino's base sticks and is forced to rotate instead of slide.
+            Float ground_mu    = Float(-1);  // sentinel: "use domino_mu"
+            // Optional density override. 1e3 kg/m^3 gives m=80kg per domino; try
+            // 100 to verify rotational DoF response (10x lower inertia -> bigger
+            // dq_r per Newton step).
+            Float domino_density = Float(-1);  // sentinel: "default 1e3"
+
+            if(auto mu = env_double("UIPC_DOMINO_MU"))
+                domino_mu = static_cast<Float>(*mu);
+            if(auto k = env_double("UIPC_DOMINO_KAPPA_GPA"))
+                domino_kappa = static_cast<Float>(*k) * static_cast<Float>(1.0_GPa);
+            if(auto s = env_double("UIPC_DOMINO_SPACING"))
+                spacing = static_cast<Float>(*s);
+            if(auto td = env_double("UIPC_DOMINO_TILT_DEG"))
+                tilt_deg = static_cast<Float>(*td);
+            if(auto am = env_double("UIPC_DOMINO_ABD_MPA"))
+                abd_mpa = static_cast<Float>(*am);
+            if(auto vx = env_double("UIPC_DOMINO_VX"))
+                d1_vx = static_cast<Float>(*vx);
+            if(auto gmu = env_double("UIPC_GROUND_MU"))
+                ground_mu = static_cast<Float>(*gmu);
+            if(ground_mu < Float(0))
+                ground_mu = domino_mu;
+            if(auto dd = env_double("UIPC_DOMINO_DENSITY"))
+                domino_density = static_cast<Float>(*dd);
+
+            // Default (domino-domino) friction.
+            scene.contact_tabular().default_model(domino_mu, domino_kappa);
+            auto default_contact = scene.contact_tabular().default_element();
+            // Separate element for the ground so we can set an anisotropic
+            // ground-vs-domino friction via insert().
+            auto ground_contact  = scene.contact_tabular().create("ground");
+            scene.contact_tabular().insert(
+                ground_contact, default_contact, ground_mu, domino_kappa);
+
+            // Ground slab
+            {
+                Transform pre = Transform::Identity();
+                pre.scale(Vector3{10, 0.2, 4});
+                SimplicialComplexIO gio{pre};
+                auto ground = gio.read(fmt::format("{}cube.msh", tetmesh_dir));
+                label_surface(ground);
+                label_triangle_orient(ground);
+                abd.apply_to(ground, 10.0_MPa);
+                ground_contact.apply_to(ground);
+
+                Transform t = Transform::Identity();
+                t.translate(Vector3{2, -0.1, 0});
+                view(ground.transforms())[0] = t.matrix();
+
+                auto is_fixed = ground.instances().find<IndexT>(builtin::is_fixed);
+                view(*is_fixed)[0] = 1;
+                auto is_dyn = ground.instances().find<IndexT>(builtin::is_dynamic);
+                if(is_dyn) view(*is_dyn)[0] = 0;
+
+                auto ground_obj = scene.objects().create("ground");
+                ground_obj->geometries().create(ground);
+            }
+
+            const int     num_dominos = 5;
+            const Float   half_h      = Float(0.5);
+            const Vector3 domino_scale{Float(0.2), Float(1.0), Float(0.4)};
+            const Float   gap = Float(0.05);
+
+            for(int di = 0; di < num_dominos; di++)
+            {
+                Transform pre = Transform::Identity();
+                pre.scale(domino_scale);
+                SimplicialComplexIO gio{pre};
+                auto domino = gio.read(fmt::format("{}cube.msh", tetmesh_dir));
+                label_surface(domino);
+                label_triangle_orient(domino);
+                if(domino_density > Float(0))
+                    abd.apply_to(domino,
+                                 abd_mpa * static_cast<Float>(1.0_MPa),
+                                 domino_density);
+                else
+                    abd.apply_to(domino, abd_mpa * static_cast<Float>(1.0_MPa));
+                default_contact.apply_to(domino);
+
+                Float x = di * spacing;
+                Transform t = Transform::Identity();
+                if(di == 0 && tilt_deg > Float(0))
+                {
+                    // Optional: tilt D1 about its FRONT-BOTTOM edge so gravity can tip it forward.
+                    // (Kept here so tilt_deg>0 is still honored; for the velocity-driven mode we
+                    //  keep D1 upright and rely on the initial linear velocity to strike D2.)
+                    const Float   half_w   = domino_scale.x() * Float(0.5);
+                    const Vector3 pivot_local{half_w, -half_h, Float(0)};
+                    const Vector3 world_pivot{x + half_w, gap, Float(0)};
+                    Float         tilt_rad =
+                        tilt_deg * Float(std::numbers::pi / 180.0);
+                    t.translate(world_pivot);
+                    t.rotate(AngleAxis(-tilt_rad, Vector3::UnitZ()));
+                    t.translate(-pivot_local);
+                }
+                else
+                {
+                    t.translate(Vector3{x, half_h + gap, Float(0)});
+                }
+
+                view(domino.transforms())[0] = t.matrix();
+
+                auto is_fixed = domino.instances().find<IndexT>(builtin::is_fixed);
+                view(*is_fixed)[0] = 0;
+                auto is_dyn = domino.instances().find<IndexT>(builtin::is_dynamic);
+                if(is_dyn) view(*is_dyn)[0] = 1;
+
+                // Seed D1 with an initial +X linear velocity to "nudge" the chain.
+                // abd.apply_to already allocates the builtin::velocity <Matrix4x4> attribute.
+                if(di == 0 && d1_vx != Float(0))
+                {
+                    auto vel_attr =
+                        domino.instances().find<Matrix4x4>(builtin::velocity);
+                    if(vel_attr)
+                    {
+                        Matrix4x4 vel   = Matrix4x4::Zero();
+                        vel(0, 3)       = d1_vx;
+                        view(*vel_attr)[0] = vel;
+                    }
+                }
+
+                auto domino_obj = scene.objects().create(fmt::format("domino_{}", di));
+                domino_obj->geometries().create(domino);
+            }
+
+            fmt::println(stderr,
+                         "[corex_demo] domino: {} pieces, 0.2x1.0x0.4, spacing={}, tilt={}deg, abd={}MPa, kappa={}GPa, mu_d={}, mu_g={}, d1_vx={}m/s",
+                         num_dominos,
+                         spacing,
+                         tilt_deg,
+                         abd_mpa,
+                         domino_kappa / static_cast<Float>(1.0_GPa),
+                         domino_mu,
+                         ground_mu,
+                         d1_vx);
+            std::fflush(stderr);
         }
         else  // wrecking_ball
         {

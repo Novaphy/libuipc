@@ -1,3 +1,6 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+#  include "world_corex.cpp.inc"
+#else
 #include <uipc/core/internal/world.h>
 #include <uipc/core/internal/engine.h>
 #include <uipc/core/sanity_checker.h>
@@ -31,13 +34,14 @@ void World::init(internal::Scene& s)
 
     auto engine = lock(m_engine);
 
+    auto& config = m_scene->config();
+    auto  sanity_check_enable =
+        config.find<IndexT>("sanity_check/enable");
+
     // 2. Sanity Check Before Init
-    // initialize sanity checker
-    m_sanity_checker = uipc::make_shared<SanityChecker>(s, engine->workspace());
-    auto& config     = m_scene->config();
-    auto  sanity_check_enable_attr = config.find<IndexT>("sanity_check/enable");
-    if(sanity_check_enable_attr->view()[0])
+    if(sanity_check_enable && sanity_check_enable->view()[0])
     {
+        m_sanity_checker = uipc::make_shared<SanityChecker>(s, *engine);
         _sanity_check();
     }
     if(!m_valid)
@@ -47,11 +51,9 @@ void World::init(internal::Scene& s)
     }
 
     // 3. Init Scene
-    logger::debug("World::init: scene init (host) ...");
     m_scene->init(*this);
 
     // 4. Init Engine
-    logger::debug("World::init: engine init (backend) ...");
     engine->init(*this);
 
     if(engine->status().has_error())
@@ -212,7 +214,6 @@ const SanityChecker& World::sanity_checker() const
 
 void World::_sanity_check()
 {
-    auto  engine         = lock(m_engine);
     auto& sanity_checker = *m_sanity_checker;
     auto  result         = sanity_checker.check();
     if(result != SanityCheckResult::Success)
@@ -220,3 +221,4 @@ void World::_sanity_check()
     m_valid = (result == SanityCheckResult::Success);
 }
 }  // namespace uipc::core::internal
+#endif

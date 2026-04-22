@@ -298,7 +298,7 @@ MUDA_INLINE void build_internal_aabbs(size_t num_objects,
 
     auto internal_aabbs = sorted_aabbs.subview(0, num_internal_nodes);
     on(s)
-        .next<ParallelFor<>>()
+        .next<ParallelFor>()
         .file_line(__FILE__, __LINE__)
         .apply(num_objects,
                [nodes = nodes.cviewer().name("nodes"),
@@ -404,7 +404,7 @@ MUDA_INLINE void LinearBVH::build(muda::CBufferView<LinearBVHAABB> aabbs, muda::
 
     // 2) calculate m_morton_index code
     on(s)
-        .next<ParallelFor<>>()
+        .next<ParallelFor>()
         .file_line(__FILE__, __LINE__)
         .apply(num_objects,
                [max_aabb = m_max_aabb.viewer().name("max_aabb"),
@@ -432,7 +432,7 @@ MUDA_INLINE void LinearBVH::build(muda::CBufferView<LinearBVHAABB> aabbs, muda::
 
     // 3) sort m_morton_index code
     on(s)
-        .next<ParallelFor<>>()
+        .next<ParallelFor>()
         .file_line(__FILE__, __LINE__)
         .apply(m_indices.size(),
                [indices = m_indices.viewer()] __device__(int i) mutable
@@ -447,7 +447,7 @@ MUDA_INLINE void LinearBVH::build(muda::CBufferView<LinearBVHAABB> aabbs, muda::
 
     // 5) expand m_morton_index code to 64bit, the last 32bit is the index
     on(s)
-        .next<ParallelFor<>>()
+        .next<ParallelFor>()
         .file_line(__FILE__, __LINE__)
         .apply(m_mortons.size(),
                [morton64s = m_morton_idx.viewer().name("morton64s"),
@@ -463,7 +463,7 @@ MUDA_INLINE void LinearBVH::build(muda::CBufferView<LinearBVHAABB> aabbs, muda::
     auto leaf_aabbs = m_aabbs.view(leaf_start);  // offset = leaf_start
     auto leaf_nodes = m_nodes.view(leaf_start);  // offset = leaf_start
     on(s)
-        .next<ParallelFor<>>()
+        .next<ParallelFor>()
         .file_line(__FILE__, __LINE__)
         .apply(num_objects,
                [leaf_nodes = leaf_nodes.viewer().name("leaf_nodes"),
@@ -482,7 +482,7 @@ MUDA_INLINE void LinearBVH::build(muda::CBufferView<LinearBVHAABB> aabbs, muda::
 
     // 7) construct internal nodes
     on(s)
-        .next<ParallelFor<>>()
+        .next<ParallelFor>()
         .file_line(__FILE__, __LINE__)
         .apply(num_internal_nodes,
                [nodes      = m_nodes.viewer().name("nodes"),
@@ -524,7 +524,7 @@ MUDA_INLINE void LinearBVH::update(muda::CBufferView<LinearBVHAABB> aabbs, muda:
 
     // 1) update leaf aabbs
     auto leaf_aabbs = m_aabbs.view(m_nodes.size() - aabbs.size());
-    on().next<ParallelFor<>>()
+    on().next<ParallelFor>()
         .file_line(__FILE__, __LINE__)
         .apply(aabbs.size(),
                [indices = m_new_to_old.viewer().name("indices"),

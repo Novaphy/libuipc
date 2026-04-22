@@ -24,7 +24,9 @@ class ABDToleranceChecker final : public NewtonToleranceChecker
         auto  transrate_tol_attr = config.find<Float>("newton/transrate_tol");
         Float transrate_tol      = transrate_tol_attr->view()[0];
         abs_tol                  = transrate_tol * dt;
+#if !defined(UIPC_COREX_CUDA10_COMPAT) || !UIPC_COREX_CUDA10_COMPAT
         success.resize(1);
+#endif
     }
 
     void do_init(InitInfo& info) override {}

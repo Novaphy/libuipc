@@ -13,14 +13,15 @@ namespace uipc::backend::cuda
 __global__ void kernel_step_forward(int            n,
                                     Float          alpha,
                                     const IndexT*  is_fixed,
-                                    const Vector12* q_temps,
-                                    Vector12*       qs,
-                                    const Vector12* dqs)
+                                    const Float*   q_temps,
+                                    Float*         qs,
+                                    const Float*   dqs)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if(i >= n) return;
     if(is_fixed[i]) return;
-    qs[i] = q_temps[i] + alpha * dqs[i];
+    for(int k = 0; k < 12; ++k)
+        qs[i * 12 + k] = q_temps[i * 12 + k] + alpha * dqs[i * 12 + k];
 }
 #endif
 
@@ -67,19 +68,26 @@ void ABDLineSearchReporter::Impl::step_forward(LineSearcher::StepInfo& info)
 {
     using namespace muda;
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    int n = static_cast<int>(abd().abd_body_count);
-    if(n > 0)
     {
-        int block = 128;
-        int grid  = (n + block - 1) / block;
-        kernel_step_forward<<<grid, block>>>(
-            n,
-            info.alpha,
-            (const IndexT*)abd().body_id_to_is_fixed.data(),
-            (const Vector12*)abd().body_id_to_q_temp.data(),
-            (Vector12*)abd().body_id_to_q.data(),
-            (const Vector12*)abd().body_id_to_dq.data());
-        checkCudaErrors(cudaGetLastError());
+        int n = static_cast<int>(abd().abd_body_count);
+        if(n > 0)
+        {
+            std::vector<IndexT> h_fixed(n);
+            std::vector<Float> h_qt(n*12), h_dq(n*12);
+            cudaMemcpy(h_fixed.data(), abd().body_id_to_is_fixed.data(), n*sizeof(IndexT), cudaMemcpyDeviceToHost);
+            cudaMemcpy(h_qt.data(), abd().body_id_to_q_temp.data(), n*12*sizeof(Float), cudaMemcpyDeviceToHost);
+            cudaMemcpy(h_dq.data(), abd().body_id_to_dq.data(), n*12*sizeof(Float), cudaMemcpyDeviceToHost);
+
+            std::vector<Float> h_q(h_qt);
+            for(int i = 0; i < n; ++i)
+            {
+                if(h_fixed[i]) continue;
+                for(int k = 0; k < 12; ++k)
+                    h_q[i*12+k] = h_qt[i*12+k] + info.alpha * h_dq[i*12+k];
+            }
+
+            cudaMemcpy((void*)abd().body_id_to_q.data(), h_q.data(), n*12*sizeof(Float), cudaMemcpyHostToDevice);
+        }
     }
 #else
     ParallelFor()

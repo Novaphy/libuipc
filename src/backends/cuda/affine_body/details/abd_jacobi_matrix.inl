@@ -152,7 +152,7 @@ MUDA_HOST MUDA_DEVICE inline ABDJacobiDyadicMass& ABDJacobiDyadicMass::operator+
 
 MUDA_HOST MUDA_DEVICE inline Matrix3x3 ABDJacobiDyadicMass::inertia_tensor_cm() const
 {
-    const Float m = static_cast<Float>(m_mass);
+    const Float m = m_mass;
     if(m <= 0)
         return Matrix3x3::Zero();
     const Vector3   c = m_mass_times_x_bar / m;

@@ -1,7 +1,9 @@
 #include <catch2/catch_all.hpp>
 #include <uipc/common/logger.h>
+#include <uipc/common/uipc.h>
 
 #include <algorithm>
+#include <filesystem>
 #include <string>
 
 namespace
@@ -47,6 +49,31 @@ int main(int argc, char* argv[])
 
     if(!log_level.empty())
         uipc::logger::set_level(parse_log_level(log_level));
+
+    // Tests that instantiate uipc::core::Engine/SanityChecker need module_dir
+    // to point at the directory holding libuipc_backend_*.so. Mirror the
+    // resolution used by examples/corex_demo/main.cpp so tests work whether
+    // launched from the repo root or from build_*/Release/bin.
+    {
+        namespace fs    = std::filesystem;
+        auto uipc_cfg   = uipc::default_config();
+        auto module_dir = fs::current_path();
+        auto release_bin = module_dir / "Release" / "bin";
+        if(fs::exists(release_bin / "libuipc_backend_none.so")
+           || fs::exists(release_bin / "libuipc_backend_cuda.so"))
+        {
+            module_dir = release_bin;
+        }
+        uipc_cfg["module_dir"] = module_dir.string();
+        try
+        {
+            uipc::init(uipc_cfg);
+        }
+        catch(const std::exception& e)
+        {
+            uipc::logger::warn("uipc::init failed in test main: {}", e.what());
+        }
+    }
 
     return session.run();
 }

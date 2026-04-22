@@ -4,10 +4,70 @@
 #include <linear_system/global_linear_system.h>
 #include <muda/ext/eigen/inverse.h>
 #include <kernel_cout.h>
-#include <vector>
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+#include <muda/check/check_cuda_errors.h>
+#endif
 
 namespace uipc::backend::cuda
 {
+namespace
+{
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+// Jacobi (diagonal-only) preconditioner for CoreX: z_k = r_k / H_{kk}.
+// Full block-inverse suffers catastrophic cancellation at CoreX's float-level
+// double precision when off-diagonal values are close to diagonal values.
+__global__ void kernel_abd_jacobi_extract(int n, const Float* diag_hessian, Float* diag_recip)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= n) return;
+    for(int k = 0; k < 12; ++k)
+    {
+        Float d = diag_hessian[i * 144 + k * 12 + k]; // column-major: element (k,k)
+        diag_recip[i * 12 + k] = (d != 0.0) ? (1.0 / d) : 0.0;
+    }
+}
+
+__global__ void kernel_abd_jacobi_apply(
+    int n, const Float* diag_recip, const Float* r, Float* z, const IndexT* converged)
+{
+    if(*converged != 0) return;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= n) return;
+    for(int k = 0; k < 12; ++k)
+        z[i * 12 + k] = diag_recip[i * 12 + k] * r[i * 12 + k];
+}
+
+#else
+__global__ void kernel_abd_diag_inverse(int n, const Matrix12x12* diag_hessian, Matrix12x12* diag_inv)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= n)
+        return;
+
+    diag_inv[i] = muda::eigen::inverse(diag_hessian[i]);
+}
+
+__global__ void kernel_abd_apply_diag_inverse(
+    int n,
+    const Matrix12x12* diag_inv,
+    const Float* r,
+    Float* z,
+    const IndexT* converged)
+{
+    if(*converged != 0)
+        return;
+
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= n)
+        return;
+
+    Eigen::Map<const Eigen::Vector<Float, 12>> ri(r + i * 12);
+    Eigen::Map<Eigen::Vector<Float, 12>>       zi(z + i * 12);
+    zi = diag_inv[i] * ri;
+}
+#endif
+}  // namespace
+
 class ABDDiagPreconditioner final : public LocalPreconditioner
 {
   public:
@@ -16,6 +76,9 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
     ABDLinearSubsystem* abd_linear_subsystem = nullptr;
 
     muda::DeviceBuffer<Matrix12x12> diag_inv;
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    muda::DeviceBuffer<Float> jacobi_recip; // 12 reciprocals per body
+#endif
 
     virtual void do_build(BuildInfo& info) override
     {
@@ -46,53 +109,18 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
             logger::info("[corex_trace][precond] do_assemble: diag_inv resized to {}", diag_inv.size());
 
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-        auto n = static_cast<int>(diag_inv.size());
-        if(n > 0)
         {
-            std::vector<Matrix12x12> h_hess(n), h_inv(n);
-            checkCudaErrors(cudaMemcpy(h_hess.data(),
-                                       diag_hessian.data(),
-                                       sizeof(Matrix12x12) * n,
-                                       cudaMemcpyDeviceToHost));
-            for(int i = 0; i < n; ++i)
+            auto n = static_cast<int>(diag_hessian.size());
+            if(n > 0)
             {
-                Float diag_sum = 0;
-                for(int d = 0; d < 12; ++d)
-                    diag_sum += std::abs(h_hess[i](d, d));
-
-                if(diag_sum > Float(1e-20))
-                {
-                    Float max_diag = 0;
-                    for(int d = 0; d < 12; ++d)
-                        max_diag = std::max(max_diag, std::abs(h_hess[i](d, d)));
-                    Float eps = max_diag * Float(1e-6);
-                    if(eps < Float(1e-10)) eps = Float(1e-10);
-
-                    Matrix12x12 H_reg = h_hess[i] + eps * Matrix12x12::Identity();
-                    h_inv[i] = H_reg.inverse();
-
-                    if(!h_inv[i].allFinite())
-                    {
-                        h_inv[i] = Matrix12x12::Identity();
-                        logger::warn("[corex] body[{}] inverse produced NaN/Inf, fallback to identity", i);
-                    }
-                }
-                else
-                {
-                    h_inv[i] = Matrix12x12::Identity();
-                }
-
-                if(std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM"))
-                {
-                    logger::info("[corex_trace][precond] body[{}] diag_sum={}, diag[0..2]={},{},{}",
-                                 i, diag_sum,
-                                 h_hess[i](0, 0), h_hess[i](1, 1), h_hess[i](2, 2));
-                }
+                jacobi_recip.resize(n * 12);
+                int blocks = (n + 255) / 256;
+                kernel_abd_jacobi_extract<<<blocks, 256>>>(
+                    n,
+                    (const Float*)diag_hessian.data(),
+                    (Float*)jacobi_recip.data());
+                checkCudaErrors(cudaDeviceSynchronize());
             }
-            checkCudaErrors(cudaMemcpy(diag_inv.data(),
-                                       h_inv.data(),
-                                       sizeof(Matrix12x12) * n,
-                                       cudaMemcpyHostToDevice));
         }
 #else
         ParallelFor()
@@ -110,36 +138,19 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
         auto converged = info.converged();
 
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-        auto n = static_cast<int>(diag_inv.size());
-        if(n > 0)
         {
-            auto r_view = info.r();
-            auto z_view = info.z();
-            auto dof    = static_cast<int>(r_view.size());
-
-            std::vector<Matrix12x12> h_inv(n);
-            std::vector<Float>       h_r(dof), h_z(dof, 0.0);
-
-            checkCudaErrors(cudaMemcpy(h_inv.data(),
-                                       diag_inv.data(),
-                                       sizeof(Matrix12x12) * n,
-                                       cudaMemcpyDeviceToHost));
-            checkCudaErrors(cudaMemcpy(h_r.data(),
-                                       r_view.data(),
-                                       sizeof(Float) * dof,
-                                       cudaMemcpyDeviceToHost));
-
-            for(int i = 0; i < n; ++i)
+            auto n = static_cast<int>(jacobi_recip.size() / 12);
+            if(n > 0)
             {
-                Eigen::Map<const Eigen::Vector<Float, 12>> ri(h_r.data() + i * 12);
-                Eigen::Map<Eigen::Vector<Float, 12>>       zi(h_z.data() + i * 12);
-                zi = h_inv[i] * ri;
+                int blocks = (n + 255) / 256;
+                kernel_abd_jacobi_apply<<<blocks, 256>>>(
+                    n,
+                    (const Float*)jacobi_recip.data(),
+                    (const Float*)info.r().data(),
+                    (Float*)info.z().data(),
+                    (const IndexT*)converged.data());
+                checkCudaErrors(cudaDeviceSynchronize());
             }
-
-            checkCudaErrors(cudaMemcpy(z_view.data(),
-                                       h_z.data(),
-                                       sizeof(Float) * dof,
-                                       cudaMemcpyHostToDevice));
         }
 #else
         ParallelFor()

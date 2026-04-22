@@ -26,12 +26,30 @@ find_package(CUDAToolkit REQUIRED)
 uipc_add_backend(cuda)
 
 # basic setup
+#
+# NOTE on uipc_io:
+# The sanity-check sources under src/backends/cuda/sanity_check/* (compiled
+# only on the NVIDIA path; filtered out on Corex by the `_corex.{cu,h,...}`
+# / `/backends/cuda/sanity_check/` rules below) call
+# `uipc::geometry::SimplicialComplexIO::{ctor,write}` to dump debug meshes
+# when a sanity check fails. Those symbols live in `uipc_io.dll` (see
+# src/io/CMakeLists.txt). On Linux the resulting `.so` is allowed to leave
+# undefined references to be resolved at load time, so the missing link
+# edge silently worked. On Windows MSVC every `__imp_*` reference must be
+# satisfied at link time by an explicit import library, so the missing
+# `uipc_io` link edge surfaces as
+#   LNK2019 / LNK1120 unresolved external symbol
+#       __imp_??0SimplicialComplexIO@geometry@uipc@@QEAA@XZ
+#       __imp_?write@SimplicialComplexIO@geometry@uipc@@QEAAX...
+# in uipc_backend_cuda.dll. Add the dependency explicitly so both
+# platforms link cleanly.
 target_link_libraries(cuda PUBLIC
     muda::muda
     CUDA::cublas
     CUDA::cusparse
     CUDA::cusolver
     uipc_geometry
+    uipc_io
 )
 
 # add CCCL include directory for CUDA 13.0 compatibility
@@ -54,6 +72,14 @@ set_target_properties(cuda PROPERTIES
 if(UIPC_MUDA_USE_COREX)
     target_link_libraries(cuda PUBLIC dl)
     target_compile_definitions(cuda PUBLIC UIPC_COREX_CUDA10_COMPAT=1)
+    # Corex 4.4+ exposes cudaMallocAsync/cudaFreeAsync even though CUDART_VERSION
+    # still reports 10020. When enabled, propagate UIPC_COREX_ASYNC_MEMORY=1 so
+    # the muda headers and the cuda backend swap the sync compat path for the
+    # native async APIs (see external/muda/src/muda/launch/details/memory.inl
+    # and external/muda/src/muda/buffer/details/device_var.inl).
+    if(UIPC_COREX_USE_ASYNC_MEMORY)
+        target_compile_definitions(cuda PUBLIC UIPC_COREX_ASYNC_MEMORY=1)
+    endif()
     # Clang/Corex may not define __CUDA_ARCH__ during device compilation; force
     # MUDA_GENERIC to __host__ __device__ so device kernels can call shared helpers.
     target_compile_definitions(cuda PRIVATE MUDA_FORCE_HD_GENERIC=1)
@@ -93,6 +119,38 @@ endif()
 
 # all files in this directory
 file(GLOB_RECURSE SOURCES "*.cu" "*.h" "*.hpp" "*.cpp" "*.inl")
+
+# ------------------------------------------------------------------------------
+# Source filter for two-environment build
+#   - Always: drop *_corex.{cu,h,cpp,hpp,inl} overlay files from the direct
+#     compile list — those are include-only sidecars used by the switcher headers
+#     /sources to pull in corex-specific implementations under
+#     #if UIPC_COREX_CUDA10_COMPAT.
+#   - NVIDIA path (UIPC_MUDA_USE_COREX=OFF):
+#       drop corex-only sources (corex_matrix_converter_kernels, backends/cuda/details/)
+#       so this build is byte-equivalent to building /root/src verbatim.
+#   - Corex path (UIPC_MUDA_USE_COREX=ON):
+#       drop sources that depend on NVCC-only features the Corex toolchain cannot compile
+#       (FEM external force module + backends/cuda/sanity_check kernels).
+# ------------------------------------------------------------------------------
+list(FILTER SOURCES EXCLUDE REGEX "_corex\\.(cu|h|hpp|cpp|inl)$")
+
+if(NOT UIPC_MUDA_USE_COREX)
+    list(FILTER SOURCES EXCLUDE REGEX "/algorithm/corex_matrix_converter_kernels\\.(cu|h)$")
+    list(FILTER SOURCES EXCLUDE REGEX "/backends/cuda/details/")
+endif()
+
+if(UIPC_MUDA_USE_COREX)
+    list(FILTER SOURCES EXCLUDE REGEX "/backends/cuda/sanity_check/")
+endif()
+
+# Note: the previously-needed exclusion rules for
+# finite_element/finite_element_external_force_{manager,reporter}.{cu,h},
+# finite_element/finite_element_external_vertex_force.cu, and
+# finite_element/constraints/finite_element_external_vertex_force_constraint.{cu,h}
+# have been removed: those files were dead code (referenced nonexistent fields
+# on FiniteElementMethod::Impl, used nowhere) and the source files themselves
+# have been deleted from the tree.
 
 target_sources(cuda PRIVATE ${SOURCES})
 uipc_target_set_relative_source_file(cuda)

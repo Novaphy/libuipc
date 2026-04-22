@@ -825,10 +825,10 @@ inline void StacklessBVH::Impl::build(muda::CBufferView<AABB> aabbs)
 
 
     // Initialize flags to 0
-    thrust::fill(flags.begin(), flags.end(), 0);
-    thrust::fill(thrust::device, ext_mark.begin(), ext_mark.end(), 7);
-    thrust::fill(thrust::device, ext_lca.begin(), ext_lca.end(), 0);
-    thrust::fill(thrust::device, ext_par.begin(), ext_par.end(), 0);
+    thrust::fill(thrust::device, flags.data(), flags.data() + flags.size(), 0);
+    thrust::fill(thrust::device, ext_mark.data(), ext_mark.data() + ext_mark.size(), 7);
+    thrust::fill(thrust::device, ext_lca.data(), ext_lca.data() + ext_lca.size(), 0);
+    thrust::fill(thrust::device, ext_par.data(), ext_par.data() + ext_par.size(), 0);
 
     calcMaxBVFromBox(aabbs, scene_box.view());
 
@@ -836,8 +836,9 @@ inline void StacklessBVH::Impl::build(muda::CBufferView<AABB> aabbs)
 
     auto null_stream = thrust::cuda::par.on(nullptr);
 
-    thrust::sequence(null_stream, sorted_id.begin(), sorted_id.end());
-    thrust::sort_by_key(null_stream, mtcode.begin(), mtcode.end(), sorted_id.begin());
+    thrust::sequence(null_stream, sorted_id.data(), sorted_id.data() + sorted_id.size());
+    thrust::sort_by_key(
+        null_stream, mtcode.data(), mtcode.data() + mtcode.size(), sorted_id.data());
 
     calcInverseMapping();
 
@@ -847,12 +848,13 @@ inline void StacklessBVH::Impl::build(muda::CBufferView<AABB> aabbs)
 
     buildIntNodes(numObjs);
 
-    thrust::exclusive_scan(null_stream, count.begin(), count.end(), offsetTable.begin());
+    thrust::exclusive_scan(
+        null_stream, count.data(), count.data() + count.size(), offsetTable.data());
 
     calcIntNodeOrders(numObjs);
 
     // fill the last ext_lca to -1
-    thrust::fill(null_stream, ext_lca.begin() + numObjs, ext_lca.begin() + numObjs + 1, -1);
+    thrust::fill(null_stream, ext_lca.data() + numObjs, ext_lca.data() + numObjs + 1, -1);
 
     updateBvhExtNodeLinks(numObjs);
 
@@ -1139,7 +1141,11 @@ inline void StacklessBVH::build(muda::CBufferView<AABB> aabbs)
     m_impl.build(aabbs);
 }
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 template <typename Pred>
+#else
+template <std::invocable<IndexT, IndexT> Pred>
+#endif
 void StacklessBVH::detect(Pred callback, QueryBuffer& qbuffer)
 {
     using namespace muda;
@@ -1150,6 +1156,9 @@ void StacklessBVH::detect(Pred callback, QueryBuffer& qbuffer)
         qbuffer.m_size = 0;
         return;
     }
+
+    if(qbuffer.m_pairs.size() == 0)
+        qbuffer.m_pairs.resize(50 * 1024);
 
     auto do_query = [&]
     {
@@ -1199,7 +1208,11 @@ inline void StacklessBVH::QueryBuffer::build(muda::CBufferView<AABB> aabbs)
     thrust::sort_by_key(null_stream, d_queryMtCode, d_queryMtCode + numQuery, d_querySortedId);
 }
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 template <typename Pred>
+#else
+template <std::invocable<IndexT, IndexT> Pred>
+#endif
 void StacklessBVH::query(muda::CBufferView<AABB> aabbs, Pred callback, QueryBuffer& qbuffer)
 {
     if(aabbs.size() == 0 || m_impl.objs.size() == 0)
@@ -1209,6 +1222,8 @@ void StacklessBVH::query(muda::CBufferView<AABB> aabbs, Pred callback, QueryBuff
     }
 
     using namespace muda;
+    if(qbuffer.m_pairs.size() == 0)
+        qbuffer.m_pairs.resize(50 * 1024);
     qbuffer.build(aabbs);
 
     auto do_query = [&]

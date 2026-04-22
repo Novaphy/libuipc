@@ -5,11 +5,13 @@
 #include <cub/warp/warp_reduce.cuh>
 #include <muda/ext/eigen/atomic.h>
 #include <uipc/common/timer.h>
+#include <uipc/common/type_define.h>
 #include <algorithm/fast_segmental_reduce.h>
 #include <muda/cub/device/device_partition.h>
 #include <muda/cub/device/device_run_length_encode.h>
 #include <fmt/core.h>
 #include <cstdio>
+#include <vector>
 
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #include <thrust/device_ptr.h>
@@ -22,38 +24,15 @@ template <typename T, int N>
 void MatrixConverter<T, N>::convert(const muda::DeviceTripletMatrix<T, N>& from,
                                     muda::DeviceBCOOMatrix<T, N>&          to)
 {
-    fmt::println(stderr, "[matconv_dbg] triplet->bcoo: enter (rows={}, cols={}, triplets={})",
-                 from.rows(), from.cols(), from.triplet_count());
-    std::fflush(stderr);
-    fmt::println(stderr, "[matconv_dbg] triplet->bcoo: pre-sync check ...");
-    std::fflush(stderr);
-    cudaError_t entry_sync = cudaDeviceSynchronize();
-    fmt::println(stderr, "[matconv_dbg] triplet->bcoo: pre-sync={}", cudaGetErrorString(entry_sync));
-    std::fflush(stderr);
     to.reshape(from.rows(), from.cols());
-    fmt::println(stderr, "[matconv_dbg] triplet->bcoo: reshape done");
-    std::fflush(stderr);
     to.resize_triplets(from.triplet_count());
-    fmt::println(stderr, "[matconv_dbg] triplet->bcoo: resize_triplets done");
-    std::fflush(stderr);
 
     if(to.triplet_count() == 0)
         return;
 
-    fmt::println(stderr, "[matconv_dbg] triplet->bcoo: radix_sort (n={}) ...", from.triplet_count());
-    std::fflush(stderr);
     _radix_sort_indices_and_blocks(from, to);
-    cudaDeviceSynchronize();
-    fmt::println(stderr, "[matconv_dbg] triplet->bcoo: make_unique_indices ...");
-    std::fflush(stderr);
     _make_unique_indices(from, to);
-    cudaDeviceSynchronize();
-    fmt::println(stderr, "[matconv_dbg] triplet->bcoo: warp_reduction ...");
-    std::fflush(stderr);
     _make_unique_block_warp_reduction(from, to);
-    cudaDeviceSynchronize();
-    fmt::println(stderr, "[matconv_dbg] triplet->bcoo: done (unique={})", to.non_zeros());
-    std::fflush(stderr);
 }
 
 template <typename T, int N>
@@ -66,29 +45,16 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(
     auto src_col_indices = from.col_indices();
     auto src_blocks      = from.values();
 
-    fmt::println(stderr, "[matconv_dbg] _radix_sort: loose_resize ij_hash_input ...");
-    std::fflush(stderr);
     loose_resize(ij_hash_input, src_row_indices.size());
     loose_resize(sort_index_input, src_row_indices.size());
 
     loose_resize(ij_hash, src_row_indices.size());
     loose_resize(sort_index, src_row_indices.size());
-    fmt::println(stderr, "[matconv_dbg] _radix_sort: ij_pairs.resize({}) ...", src_row_indices.size());
-    std::fflush(stderr);
     ij_pairs.resize(src_row_indices.size());
-
-    fmt::println(stderr, "[matconv_dbg] _radix_sort: resize done, preparing call ...");
-    std::fflush(stderr);
 
     auto dst_row_indices = to.row_indices();
     auto dst_col_indices = to.col_indices();
     int n = static_cast<int>(src_row_indices.size());
-
-    cudaDeviceSynchronize();
-    cudaError_t pre_err = cudaGetLastError();
-    fmt::println(stderr, "[matconv_dbg] _radix_sort: pre-sync done, err={}, calling launch_hash_ij (n={}) ...",
-                 cudaGetErrorString(pre_err), n);
-    std::fflush(stderr);
 
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
     corex_matconv::launch_hash_ij(
@@ -325,9 +291,6 @@ void MatrixConverter<T, N>::_make_unique_block_warp_reduction(
 {
     using namespace muda;
 
-    fmt::println(stderr, "[matconv_dbg] warp_reduce: enter");
-    std::fflush(stderr);
-
     loose_resize(sorted_partition_input, ij_pairs.size());
     loose_resize(sorted_partition_output, ij_pairs.size());
 
@@ -356,30 +319,24 @@ void MatrixConverter<T, N>::_make_unique_block_warp_reduction(
                });
 #endif
 
-    fmt::println(stderr, "[matconv_dbg] warp_reduce: mark_partition done, ExclusiveSum ...");
-    std::fflush(stderr);
-
     // scatter
     DeviceScan().ExclusiveSum(sorted_partition_input.data(),
                               sorted_partition_output.data(),
                               sorted_partition_input.size());
 
-    fmt::println(stderr, "[matconv_dbg] warp_reduce: ExclusiveSum done, FastSegmentalReduce ...");
-    std::fflush(stderr);
-
     auto blocks = to.values();
 
-    fmt::println(stderr, "[matconv_dbg] blocks_sorted.size()={}, blocks.size()={}", blocks_sorted.size(), blocks.size());
-    std::fflush(stderr);
-
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    fmt::println(stderr, "[matconv_dbg] COREX path: calling launch_segmental_reduce_3x3 ...");
-    std::fflush(stderr);
+    static_assert(N == 3, "CoreX matrix segmental reduce only supports 3x3 blocks");
+    static_assert(std::is_same_v<T, Float>,
+                  "CoreX matrix segmental reduce block type must match uipc::Float");
     corex_matconv::launch_segmental_reduce_3x3(
         static_cast<int>(blocks_sorted.size()),
         thrust::raw_pointer_cast(sorted_partition_output.data()),
-        reinterpret_cast<const corex_matconv::BlockT3*>(thrust::raw_pointer_cast(blocks_sorted.data())),
-        reinterpret_cast<corex_matconv::BlockT3*>(thrust::raw_pointer_cast(blocks.data())),
+        reinterpret_cast<const corex_matconv::BlockT3*>(
+            thrust::raw_pointer_cast(blocks_sorted.data())),
+        reinterpret_cast<corex_matconv::BlockT3*>(
+            thrust::raw_pointer_cast(blocks.data())),
         static_cast<int>(blocks.size()));
 #else
     FastSegmentalReduce<>()
@@ -388,9 +345,6 @@ void MatrixConverter<T, N>::_make_unique_block_warp_reduction(
                 std::as_const(blocks_sorted).view(),
                 blocks);
 #endif
-
-    fmt::println(stderr, "[matconv_dbg] warp_reduce: done");
-    std::fflush(stderr);
 }
 
 template <typename T, int N>
@@ -413,8 +367,6 @@ template <typename T, int N>
 void MatrixConverter<T, N>::_calculate_block_offsets(const muda::DeviceBCOOMatrix<T, N>& from,
                                                      muda::DeviceBSRMatrix<T, N>& to)
 {
-    //Timer timer{__FUNCTION__};
-
     using namespace muda;
     to.reshape(from.rows(), from.cols());
 
@@ -464,9 +416,6 @@ void MatrixConverter<T, N>::_calculate_block_offsets(const muda::DeviceBCOOMatri
                               dst_row_offsets.data(),
                               col_counts_per_row.size());
 }
-
-//using T         = Float;
-//constexpr int N = 3;
 
 template <typename T, int N>
 void MatrixConverter<T, N>::convert(const muda::DeviceDoubletVector<T, N>& from,
@@ -588,11 +537,16 @@ void MatrixConverter<T, N>::_make_unique_segment_warp_reduction(
     auto segments = to.values();
 
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    static_assert(N == 3, "CoreX vector segmental reduce only supports 3x1 blocks");
+    static_assert(std::is_same_v<T, Float>,
+                  "CoreX vector segmental reduce vector type must match uipc::Float");
     corex_matconv::launch_segmental_reduce_3x1(
         static_cast<int>(segments_sorted.size()),
         thrust::raw_pointer_cast(sorted_partition_output.data()),
-        reinterpret_cast<const corex_matconv::VecT3*>(thrust::raw_pointer_cast(segments_sorted.data())),
-        reinterpret_cast<corex_matconv::VecT3*>(thrust::raw_pointer_cast(segments.data())),
+        reinterpret_cast<const corex_matconv::VecT3*>(
+            thrust::raw_pointer_cast(segments_sorted.data())),
+        reinterpret_cast<corex_matconv::VecT3*>(
+            thrust::raw_pointer_cast(segments.data())),
         static_cast<int>(segments.size()));
 #else
     FastSegmentalReduce<64, 32>()

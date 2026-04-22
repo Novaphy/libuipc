@@ -36,6 +36,9 @@ bin/
 cmake-build-*/
 cmakebuild/
 
+# Corex / adaptation build trees
+build_*/
+
 # vsxmake
 vsxmake*/
 
@@ -47,3 +50,7 @@ vsxmake*/
 
 # Generated CUDA API inventory (see scripts/cuda_api_inventory.py)
 tools/cuda_api_inventory_out/
+
+# Tool-internal build artifacts
+tools/*/build_*/
+tools/*/logs/

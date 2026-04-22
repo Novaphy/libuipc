@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REAL_COMPILER="/usr/local/corex/bin/clang++"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REAL_COMPILER_DEFAULT="/usr/local/corex/bin/clang++"
+REAL_COMPILER="${REAL_COMPILER:-$REAL_COMPILER_DEFAULT}"
 PRIVATE_GCC_ROOT_DEFAULT="/usr"
+COREX_COMPAT_DIR_DEFAULT="$SCRIPT_DIR/corex-compat"
 
 #
 # CMake "compiler launcher" convention:
@@ -68,7 +71,13 @@ if [[ "$is_cuda_input" -eq 1 && "$has_ivcore_lang" -eq 0 ]]; then
 fi
 
 # Prefer compat CRT header shim before Corex's own include path.
-args=("-I" "/private/libuipc/cmake/corex-compat" "${args[@]}")
+COREX_COMPAT_DIR="${COREX_COMPAT_DIR:-$COREX_COMPAT_DIR_DEFAULT}"
+if [[ -d "$COREX_COMPAT_DIR" ]]; then
+    args=("-I" "$COREX_COMPAT_DIR" "${args[@]}")
+    if [[ -f "$COREX_COMPAT_DIR/crt/host_defines.h" ]]; then
+        args=("-include" "$COREX_COMPAT_DIR/crt/host_defines.h" "${args[@]}")
+    fi
+fi
 
 # Ensure Corex clang can find a C++20-capable libstdc++ (e.g. <span>, <ranges>).
 # Prefer an explicit env var, otherwise use the system GCC toolchain.

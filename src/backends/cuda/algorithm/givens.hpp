@@ -91,9 +91,7 @@ namespace math
         template <typename Mat>
         UIPC_GENERIC constexpr void rowRotation(Eigen::MatrixBase<Mat>& A) const
         {
-            //using std::swap;
             const int ncols = int(A.cols());
-            //printf("%d\n", ncols);
             for(int j = 0; j < ncols; ++j)
             {
                 const T tau1 = A(rowi, j);
@@ -202,7 +200,6 @@ namespace math
     {
         U.derived().setIdentity();
         V.derived().setIdentity();
-        //printf("U:  %f, %f, %f\n", U(0, 1), U(2, 1), U(1, 2));
         // First, zero H(2,0) by rotating rows (1,2)
         using T = typename MatH::Scalar;
         GivensRotation<T> r{H(1, 0), H(2, 0), 1, 2};

@@ -26,6 +26,9 @@ option(UIPC_BUILD_BENCHMARKS "Build benchmarks" ON)
 option(UIPC_DEV_MODE "Enable developer mode" OFF)
 option(UIPC_WITH_USD_SUPPORT "Build with Universal Scene Description (USD) support" OFF)
 option(UIPC_WITH_VDB_SUPPORT "Build with Volumetric DataBase (VDB) support" OFF)
+# Use float as uipc::Float everywhere (Eigen, CUDA, IPC). Recommended on Iluvatar/CoreX
+# where device double arithmetic is unreliable; default remains double for NVIDIA parity.
+option(UIPC_USE_FLOAT "Build libuipc with Float=float (single precision)" OFF)
 
 set(UIPC_PYTHON_EXECUTABLE_PATH "" CACHE PATH "Python executable path")
 set(UIPC_USD_INSTALL_DIR "" CACHE PATH
@@ -46,6 +49,11 @@ option(UIPC_MUDA_USE_COREX "Enable Corex-specific CUDA build compatibility mode"
 set(UIPC_COREX_CUDA_STANDARD "20" CACHE STRING "CUDA C++ standard used when UIPC_MUDA_USE_COREX=ON (20 required for std::span/ranges in headers)")
 set(UIPC_COREX_CUDA_ARCHITECTURES "ivcore11" CACHE STRING "CUDA architectures used when UIPC_MUDA_USE_COREX=ON")
 set(UIPC_COREX_CUDA_COMPILER "" CACHE FILEPATH "Path to Corex CUDA compiler (optional)")
+# Iluvatar Corex 4.4 ships cudaMallocAsync / cudaFreeAsync (verified at runtime on
+# Iluvatar MR-V100). Enable the async-memory path under the Corex compat branch
+# instead of falling back to synchronous cudaMalloc + multi-step fallbacks.
+# Set to OFF to restore the legacy synchronous path used on Corex 3.x / pre-4.4.
+option(UIPC_COREX_USE_ASYNC_MEMORY "Use cudaMallocAsync/cudaFreeAsync on Corex (>= 4.4)" ON)
 
 if(UIPC_MUDA_USE_COREX)
     if(UIPC_COREX_CUDA_ARCHITECTURES)
