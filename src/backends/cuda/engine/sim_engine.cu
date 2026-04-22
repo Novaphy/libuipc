@@ -1,9 +1,8 @@
 #include <sim_engine.h>
 #include <uipc/common/log.h>
 #include <muda/muda.h>
+#include <kernel_cout.h>
 #include <backends/common/module.h>
-#include <cstdlib>
-#include <string_view>
 #include <global_geometry/global_vertex_manager.h>
 #include <global_geometry/global_simplicial_surface_manager.h>
 #include <uipc/common/timer.h>
@@ -12,160 +11,18 @@
 
 namespace uipc::backend::cuda
 {
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-// Corex / 天数等栈上，经 muda::Launch 包一层后的首个 kernel + 默认流 sync 可能长时间阻塞；
-// 使用编译器直接发射的裸 kernel + cudaDeviceSynchronize 更稳。
-__global__ void uipc_cuda_engine_nop_kernel() {}
-
-static bool corex_probe_step_enabled(std::string_view step)
-{
-    if(const char* raw = std::getenv("UIPC_COREX_PROBE_STEPS"))
-    {
-        std::string_view steps = raw;
-        if(steps.empty())
-            return false;
-        if(steps == "all")
-            return true;
-
-        size_t begin = 0;
-        while(begin < steps.size())
-        {
-            size_t end   = steps.find(',', begin);
-            auto   token = steps.substr(begin, end == std::string_view::npos
-                                                   ? std::string_view::npos
-                                                   : end - begin);
-            while(!token.empty() && token.front() == ' ')
-                token.remove_prefix(1);
-            while(!token.empty() && token.back() == ' ')
-                token.remove_suffix(1);
-            if(token == step)
-                return true;
-            if(end == std::string_view::npos)
-                break;
-            begin = end + 1;
-        }
-        return false;
-    }
-
-    // Default to the safest subset. Other probes are opt-in because they may
-    // hang on problematic Corex runtime states.
-    return step == "get_device";
-}
-
-static void corex_probe_marker(const char* stage, const char* marker)
-{
-    logger::info("[cuda] Corex probe {} {}", stage, marker);
-}
-
-static void corex_runtime_probe(const char* stage)
-{
-    corex_probe_marker(stage, "enter");
-
-    if(corex_probe_step_enabled("get_device"))
-    {
-        corex_probe_marker(stage, "before cudaGetDevice");
-        int  current_device = -1;
-        auto get_device_err = cudaGetDevice(&current_device);
-        logger::info("[cuda] Corex probe {} cudaGetDevice: {} (device={})",
-                     stage,
-                     cudaGetErrorString(get_device_err),
-                     current_device);
-        if(get_device_err != cudaSuccess)
-            (void)cudaGetLastError();
-    }
-
-    if(corex_probe_step_enabled("flags"))
-    {
-        corex_probe_marker(stage, "before cudaGetDeviceFlags");
-        unsigned int device_flags = 0;
-        auto         flags_err    = cudaGetDeviceFlags(&device_flags);
-        logger::info("[cuda] Corex probe {} cudaGetDeviceFlags: {} (flags={})",
-                     stage,
-                     cudaGetErrorString(flags_err),
-                     device_flags);
-        if(flags_err != cudaSuccess)
-            (void)cudaGetLastError();
-    }
-
-    if(corex_probe_step_enabled("stream"))
-    {
-        cudaStream_t probe_stream = nullptr;
-        corex_probe_marker(stage, "before cudaStreamCreateWithFlags");
-        auto stream_err =
-            cudaStreamCreateWithFlags(&probe_stream, cudaStreamNonBlocking);
-        logger::info("[cuda] Corex probe {} cudaStreamCreateWithFlags: {}",
-                     stage,
-                     cudaGetErrorString(stream_err));
-        if(stream_err == cudaSuccess)
-        {
-            corex_probe_marker(stage, "before cudaStreamDestroy");
-            checkCudaErrors(cudaStreamDestroy(probe_stream));
-        }
-        else
-            (void)cudaGetLastError();
-    }
-
-    if(corex_probe_step_enabled("event"))
-    {
-        cudaEvent_t probe_event = nullptr;
-        corex_probe_marker(stage, "before cudaEventCreateWithFlags");
-        auto event_err =
-            cudaEventCreateWithFlags(&probe_event, cudaEventDisableTiming);
-        logger::info("[cuda] Corex probe {} cudaEventCreateWithFlags: {}",
-                     stage,
-                     cudaGetErrorString(event_err));
-        if(event_err == cudaSuccess)
-        {
-            corex_probe_marker(stage, "before cudaEventDestroy");
-            checkCudaErrors(cudaEventDestroy(probe_event));
-        }
-        else
-            (void)cudaGetLastError();
-    }
-
-    if(corex_probe_step_enabled("sync"))
-    {
-        corex_probe_marker(stage, "before cudaDeviceSynchronize");
-        auto sync_err = cudaDeviceSynchronize();
-        logger::info("[cuda] Corex probe {} cudaDeviceSynchronize: {}",
-                     stage,
-                     cudaGetErrorString(sync_err));
-        (void)cudaGetLastError();
-    }
-
-    corex_probe_marker(stage, "leave");
-}
-#endif
-
 void say_hello_from_cuda()
 {
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    uipc_cuda_engine_nop_kernel<<<1, 1>>>();
-    auto launch_err = cudaGetLastError();
-    if(launch_err != cudaSuccess)
-    {
-        logger::warn("[cuda] Corex hello kernel launch failed: {}", cudaGetErrorString(launch_err));
-        (void)cudaGetLastError();
-        return;
-    }
-
-    auto sync_err = cudaDeviceSynchronize();
-    if(sync_err != cudaSuccess)
-    {
-        logger::warn("[cuda] Corex hello kernel sync failed: {}", cudaGetErrorString(sync_err));
-        (void)cudaGetLastError();
-    }
-#else
     using namespace muda;
-    // Avoid KernelCout: Logger ctor cudaMalloc 大块显存，易与「首个 GPU 操作」问题混淆。
-    Launch().apply([] __device__() {}).wait();
-#endif
+    Launch()
+        .apply([cout = KernelCout::viewer()] __device__() mutable
+               { cout << "CUDA Backend Kernel Console Init Success!\n"; })
+        .wait();
 }
 
 SimEngine::SimEngine(EngineCreateInfo* info)
     : backend::SimEngine(info)
 {
-    logger::info("[cuda] SimEngine derived ctor enter");
     try
     {
         using namespace muda;
@@ -176,9 +33,7 @@ SimEngine::SimEngine(EngineCreateInfo* info)
 
         // get gpu device count
         int device_count;
-        logger::info("[cuda] Corex ctor: before cudaGetDeviceCount");
         checkCudaErrors(cudaGetDeviceCount(&device_count));
-        logger::info("[cuda] Corex ctor: cudaGetDeviceCount -> {}", device_count);
         if(device_id >= device_count)
         {
             UIPC_WARN_WITH_LOCATION("Cannot find device with id {}. Using device 0 instead.",
@@ -188,91 +43,14 @@ SimEngine::SimEngine(EngineCreateInfo* info)
         }
 
         cudaDeviceProp prop;
-        logger::info("[cuda] Corex ctor: before cudaGetDeviceProperties({})", device_id);
         checkCudaErrors(cudaGetDeviceProperties(&prop, device_id));
-        logger::info("[cuda] Corex ctor: cudaGetDeviceProperties({}) done", device_id);
         logger::info("Device: [{}] {}", device_id, prop.name);
         logger::info("Compute Capability: {}.{}", prop.major, prop.minor);
         logger::info("Total Global Memory: {} MB", prop.totalGlobalMem / 1024 / 1024);
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-        corex_runtime_probe("before cudaSetDevice");
-#endif
-
-        // Required: cudaGetDevice* does not set the active device. Without this,
-        // kernels / allocations may not run on the configured GPU (multi-GPU) or
-        // may hit an inconsistent context on some runtimes.
-        bool skip_set_device = false;
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-        if(const char* skip = std::getenv("UIPC_SKIP_CUDA_SET_DEVICE");
-           skip && skip[0] != '\0' && skip[0] != '0')
-        {
-            skip_set_device = true;
-            logger::info("[cuda] Corex: skipping cudaSetDevice (UIPC_SKIP_CUDA_SET_DEVICE set).");
-        }
-#endif
-        if(!skip_set_device)
-        {
-            logger::info("[cuda] Corex ctor: before cudaSetDevice({})", device_id);
-            checkCudaErrors(cudaSetDevice(static_cast<int>(device_id)));
-            logger::info("[cuda] Corex ctor: cudaSetDevice({}) done", device_id);
-        }
-
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-        corex_runtime_probe("after cudaSetDevice");
-#endif
-
-        logger::info("[cuda] Corex ctor: before Timer::set_sync_func");
         Timer::set_sync_func([] { muda::wait_device(); });
-        logger::info("[cuda] Corex ctor: Timer::set_sync_func done");
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-        // Corex/天数：默认跳过 ctor 期预热，把首次 GPU 工作留到 world.init 的真实路径。
-        // 如需显式探测 hello kernel，可手工设置 UIPC_FORCE_CUDA_HELLO_KERNEL=1。
-        logger::info("[cuda] Corex ctor: before hello decision");
-        if(const char* force = std::getenv("UIPC_FORCE_CUDA_HELLO_KERNEL");
-           force && force[0] != '\0' && force[0] != '0')
-        {
-            say_hello_from_cuda();
-        }
-        else
-        {
-            logger::info("[cuda] Corex: skipping ctor hello kernel (UIPC_FORCE_CUDA_HELLO_KERNEL=1 to run it).");
-        }
-        logger::info("[cuda] Corex ctor: after hello decision");
-
-        corex_runtime_probe("after ctor hello decision");
-
-        if(const char* warmup = std::getenv("UIPC_COREX_WARMUP_ALLOC");
-           warmup && warmup[0] != '\0' && warmup[0] != '0')
-        {
-            logger::info("[cuda] Corex ctor: warmup alloc begin");
-            void* warmup_ptr = nullptr;
-            auto  alloc_err  = cudaMalloc(&warmup_ptr, 256);
-            logger::info("[cuda] Corex ctor: warmup cudaMalloc -> {} ptr={}",
-                         cudaGetErrorString(alloc_err),
-                         warmup_ptr);
-            if(alloc_err == cudaSuccess)
-            {
-                auto free_err = cudaFree(warmup_ptr);
-                logger::info("[cuda] Corex ctor: warmup cudaFree -> {}",
-                             cudaGetErrorString(free_err));
-            }
-            else
-                (void)cudaGetLastError();
-            logger::info("[cuda] Corex ctor: warmup alloc end");
-        }
-#else
-        if(const char* skip = std::getenv("UIPC_SKIP_CUDA_HELLO_KERNEL");
-           skip && skip[0] != '\0' && skip[0] != '0')
-        {
-            logger::warn("[cuda] UIPC_SKIP_CUDA_HELLO_KERNEL set — skipping hello kernel.");
-        }
-        else
-        {
-            say_hello_from_cuda();
-        }
-#endif
+        say_hello_from_cuda();
 
 #ifndef NDEBUG
         // if in debug mode, sync all the time to check for errors

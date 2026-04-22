@@ -174,7 +174,7 @@ bool obj_read_linemesh_(const std::string&                str,
         }
         else if(type == "f")
         {
-            UIPC_ASSERT(false,
+            UIPC_ASSERT_THROW(false,
                         "Found face in line mesh .obj file at line {}. "
                         "This is not a pure line mesh.",
                         line_number);
@@ -325,18 +325,16 @@ SimplicialComplex SimplicialComplexIO::read_stl(std::string_view file_name)
         F.row(i) = f;
     }
 
-    Eigen::MatrixXd V_d = V.template cast<double>();
-    Eigen::MatrixXi F_i   = F;
     Eigen::MatrixXd V_new;
     Eigen::MatrixXi F_new;
     Eigen::VectorXi SVI, SVJ;
-    igl::remove_duplicate_vertices(V_d, F_i, 1e-7, V_new, SVI, SVJ, F_new);
+    igl::remove_duplicate_vertices(V, F, 1e-7, V_new, SVI, SVJ, F_new);
 
     vector<Vector3> Vs_new;
     Vs_new.resize(V_new.rows());
     for(auto&& [i, v] : enumerate(Vs_new))
     {
-        v = V_new.row(i).transpose().cast<Float>();
+        v = V_new.row(i);
         apply_pre_transform(v);
     }
 

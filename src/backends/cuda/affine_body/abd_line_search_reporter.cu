@@ -8,23 +8,6 @@
 
 namespace uipc::backend::cuda
 {
-
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-__global__ void kernel_step_forward(int            n,
-                                    Float          alpha,
-                                    const IndexT*  is_fixed,
-                                    const Float*   q_temps,
-                                    Float*         qs,
-                                    const Float*   dqs)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if(i >= n) return;
-    if(is_fixed[i]) return;
-    for(int k = 0; k < 12; ++k)
-        qs[i * 12 + k] = q_temps[i * 12 + k] + alpha * dqs[i * 12 + k];
-}
-#endif
-
 REGISTER_SIM_SYSTEM(ABDLineSearchReporter);
 
 void ABDLineSearchReporter::do_build(LineSearchReporter::BuildInfo& info)
@@ -41,55 +24,19 @@ void ABDLineSearchReporter::Impl::init(LineSearchReporter::InitInfo& info)
         R->init();
 
     reporter_energy_offsets_counts.resize(reporter_view.size());
-
-    // Single-scalar device buffers (was muda::DeviceVar): avoid cudaMalloc in SimSystem ctor;
-    // Iluvatar/Corex has been observed to block there during build_systems().
-    abd_kinetic_energy.resize(1);
-    abd_shape_energy.resize(1);
-    total_reporter_energy.resize(1);
 }
 
 void ABDLineSearchReporter::Impl::record_start_point(LineSearcher::RecordInfo& info)
 {
     using namespace muda;
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    checkCudaErrors(cudaMemcpy(abd().body_id_to_q_temp.data(),
-                               abd().body_id_to_q.data(),
-                               sizeof(Vector12) * abd().body_count(),
-                               cudaMemcpyDeviceToDevice));
-#else
     BufferLaunch().template copy<Vector12>(abd().body_id_to_q_temp.view(),
                                            abd().body_id_to_q.view());
-#endif
 }
 
 void ABDLineSearchReporter::Impl::step_forward(LineSearcher::StepInfo& info)
 {
     using namespace muda;
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    {
-        int n = static_cast<int>(abd().abd_body_count);
-        if(n > 0)
-        {
-            std::vector<IndexT> h_fixed(n);
-            std::vector<Float> h_qt(n*12), h_dq(n*12);
-            cudaMemcpy(h_fixed.data(), abd().body_id_to_is_fixed.data(), n*sizeof(IndexT), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_qt.data(), abd().body_id_to_q_temp.data(), n*12*sizeof(Float), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_dq.data(), abd().body_id_to_dq.data(), n*12*sizeof(Float), cudaMemcpyDeviceToHost);
-
-            std::vector<Float> h_q(h_qt);
-            for(int i = 0; i < n; ++i)
-            {
-                if(h_fixed[i]) continue;
-                for(int k = 0; k < 12; ++k)
-                    h_q[i*12+k] = h_qt[i*12+k] + info.alpha * h_dq[i*12+k];
-            }
-
-            cudaMemcpy((void*)abd().body_id_to_q.data(), h_q.data(), n*12*sizeof(Float), cudaMemcpyHostToDevice);
-        }
-    }
-#else
     ParallelFor()
         .file_line(__FILE__, __LINE__)
         .apply(abd().abd_body_count,
@@ -103,7 +50,6 @@ void ABDLineSearchReporter::Impl::step_forward(LineSearcher::StepInfo& info)
                        return;
                    qs(i) = q_temps(i) + alpha * dqs(i);
                });
-#endif
 }
 
 void ABDLineSearchReporter::Impl::compute_energy(LineSearcher::ComputeEnergyInfo& info)
@@ -122,11 +68,9 @@ void ABDLineSearchReporter::Impl::compute_energy(LineSearcher::ComputeEnergyInfo
 
         abd().kinetic->compute_energy(this_info);
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-        // Skip zeroing kernel on CoreX: bdf1_kinetic_energy_kernel already handles is_fixed/ext_kinetic
-#else
         using namespace muda;
 
+        // Zero out the kinetic energy of fixed bodies and bodies with external kinetic
         ParallelFor()
             .file_line(__FILE__, __LINE__)
             .apply(abd().abd_body_count,
@@ -141,29 +85,18 @@ void ABDLineSearchReporter::Impl::compute_energy(LineSearcher::ComputeEnergyInfo
                            kinetic_energy(i) = 0.0;
                        }
                    });
-#endif
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-        {
-            int nk = static_cast<int>(body_id_to_kinetic_energy.size());
-            std::vector<Float> hke(nk);
-            checkCudaErrors(cudaMemcpy(hke.data(), body_id_to_kinetic_energy.data(),
-                                       sizeof(Float) * nk, cudaMemcpyDeviceToHost));
-            Float sum = 0;
-            for(int i = 0; i < nk; ++i) sum += hke[i];
-            checkCudaErrors(cudaMemcpy(abd_kinetic_energy.data(), &sum, sizeof(Float), cudaMemcpyHostToDevice));
-        }
-#else
+        // Sum up the kinetic energy
         DeviceReduce().Sum(body_id_to_kinetic_energy.data(),
                            abd_kinetic_energy.data(),
                            body_id_to_kinetic_energy.size());
-#endif
     }
 
     // Compute shape energy
     {
         body_id_to_shape_energy.resize(body_count);
 
+        // Distribute the computation of shape energy to each constitution
         for(auto&& [i, cst] : enumerate(abd().constitutions.view()))
         {
             auto shape_energy = abd().subview(body_id_to_shape_energy, cst->m_index);
@@ -174,21 +107,10 @@ void ABDLineSearchReporter::Impl::compute_energy(LineSearcher::ComputeEnergyInfo
             cst->compute_energy(this_info);
         }
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-        {
-            int ns = static_cast<int>(body_id_to_shape_energy.size());
-            std::vector<Float> hse(ns);
-            checkCudaErrors(cudaMemcpy(hse.data(), body_id_to_shape_energy.data(),
-                                       sizeof(Float) * ns, cudaMemcpyDeviceToHost));
-            Float sum = 0;
-            for(int i = 0; i < ns; ++i) sum += hse[i];
-            checkCudaErrors(cudaMemcpy(abd_shape_energy.data(), &sum, sizeof(Float), cudaMemcpyHostToDevice));
-        }
-#else
+        // Sum up the shape energy
         DeviceReduce().Sum(body_id_to_shape_energy.data(),
                            abd_shape_energy.data(),
                            body_id_to_shape_energy.size());
-#endif
     }
 
     // Collect the energy from other reporters
@@ -215,36 +137,17 @@ void ABDLineSearchReporter::Impl::compute_energy(LineSearcher::ComputeEnergyInfo
         }
 
         // Compute the total energy from all reporters
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-        {
-            int nr = static_cast<int>(reporter_energies.size());
-            Float sum = 0;
-            if(nr > 0)
-            {
-                std::vector<Float> hre(nr);
-                checkCudaErrors(cudaMemcpy(hre.data(), reporter_energies.data(),
-                                           sizeof(Float) * nr, cudaMemcpyDeviceToHost));
-                for(int i = 0; i < nr; ++i) sum += hre[i];
-            }
-            checkCudaErrors(cudaMemcpy(total_reporter_energy.data(), &sum, sizeof(Float), cudaMemcpyHostToDevice));
-        }
-#else
         DeviceReduce().Sum(reporter_energies.data(),
                            total_reporter_energy.data(),
                            reporter_energies.size());
-#endif
     }
 
     // Copy from device to host
-    Float K, shape_E, other_E;
-    abd_kinetic_energy.view().copy_to(&K);
-    abd_shape_energy.view().copy_to(&shape_E);
-    total_reporter_energy.view().copy_to(&other_E);
+    Float K       = abd_kinetic_energy;
+    Float shape_E = abd_shape_energy;
+    Float other_E = total_reporter_energy;
 
     Float E = K + shape_E + other_E;
-
-    if(std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM"))
-        logger::info("[corex_trace][energy] K={}, shape={}, other={}, total={}", K, shape_E, other_E, E);
 
     info.energy(E);
 }

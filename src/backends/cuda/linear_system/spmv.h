@@ -50,8 +50,5 @@ class Spmv
                       muda::CDenseVectorView<Float>   x,
                       Float                           b,
                       muda::DenseVectorView<Float>    y);
-
-  private:
-    muda::DeviceBuffer<Float> dot_buffer;
 };
 }  // namespace uipc::backend::cuda

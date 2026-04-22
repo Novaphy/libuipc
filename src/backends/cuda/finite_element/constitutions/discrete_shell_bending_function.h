@@ -8,18 +8,18 @@ namespace sym::discrete_shell_bending
 {
 #include "sym/discrete_shell_bending.inl"
 
-    inline UIPC_HOST UIPC_DEVICE void compute_constants(Float&         L0,
-                                                        Float&         h_bar,
-                                                        Float&         theta_bar,
-                                                        Float&         V_bar,
-                                                        const Vector3& x0_bar,
-                                                        const Vector3& x1_bar,
-                                                        const Vector3& x2_bar,
-                                                        const Vector3& x3_bar,
-                                                        Float          thickness0,
-                                                        Float          thickness1,
-                                                        Float          thickness2,
-                                                        Float          thickness3)
+    inline UIPC_GENERIC void compute_constants(Float&         L0,
+                                               Float&         h_bar,
+                                               Float&         theta_bar,
+                                               Float&         V_bar,
+                                               const Vector3& x0_bar,
+                                               const Vector3& x1_bar,
+                                               const Vector3& x2_bar,
+                                               const Vector3& x3_bar,
+                                               Float          thickness0,
+                                               Float          thickness1,
+                                               Float          thickness2,
+                                               Float          thickness3)
 
     {
         L0         = (x2_bar - x1_bar).norm();
@@ -33,14 +33,14 @@ namespace sym::discrete_shell_bending
         V_bar = A * thickness;
     }
 
-    inline UIPC_HOST UIPC_DEVICE Float E(const Vector3& x0,
-                                         const Vector3& x1,
-                                         const Vector3& x2,
-                                         const Vector3& x3,
-                                         Float          L0,
-                                         Float          h_bar,
-                                         Float          theta_bar,
-                                         Float          kappa)
+    inline UIPC_GENERIC Float E(const Vector3& x0,
+                                const Vector3& x1,
+                                const Vector3& x2,
+                                const Vector3& x3,
+                                Float          L0,
+                                Float          h_bar,
+                                Float          theta_bar,
+                                Float          kappa)
     {
 
         namespace DSB = sym::discrete_shell_bending;
@@ -53,15 +53,15 @@ namespace sym::discrete_shell_bending
         return R;
     }
 
-    inline UIPC_HOST UIPC_DEVICE void dEdx(Vector12&      G,
-                                           const Vector3& x0,
-                                           const Vector3& x1,
-                                           const Vector3& x2,
-                                           const Vector3& x3,
-                                           Float          L0,
-                                           Float          h_bar,
-                                           Float          theta_bar,
-                                           Float          kappa)
+    inline UIPC_GENERIC void dEdx(Vector12&      G,
+                                  const Vector3& x0,
+                                  const Vector3& x1,
+                                  const Vector3& x2,
+                                  const Vector3& x3,
+                                  Float          L0,
+                                  Float          h_bar,
+                                  Float          theta_bar,
+                                  Float          kappa)
     {
         namespace DSB = sym::discrete_shell_bending;
         Float theta;
@@ -76,15 +76,15 @@ namespace sym::discrete_shell_bending
         G = dEdtheta * dthetadx;
     }
 
-    inline UIPC_HOST UIPC_DEVICE void ddEddx(Matrix12x12&   H,
-                                             const Vector3& x0,
-                                             const Vector3& x1,
-                                             const Vector3& x2,
-                                             const Vector3& x3,
-                                             Float          L0,
-                                             Float          h_bar,
-                                             Float          theta_bar,
-                                             Float          kappa)
+    inline UIPC_GENERIC void ddEddx(Matrix12x12&   H,
+                                    const Vector3& x0,
+                                    const Vector3& x1,
+                                    const Vector3& x2,
+                                    const Vector3& x3,
+                                    Float          L0,
+                                    Float          h_bar,
+                                    Float          theta_bar,
+                                    Float          kappa)
     {
         namespace DSB = sym::discrete_shell_bending;
         Float theta;

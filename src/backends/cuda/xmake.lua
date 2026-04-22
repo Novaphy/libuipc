@@ -25,17 +25,6 @@ target("cuda")
         "cusolver"
     )
 
-    -- See src/backends/cuda/CMakeLists.txt for the long rationale; in
-    -- short: src/backends/cuda/sanity_check/*_check.cu calls
-    -- uipc::geometry::SimplicialComplexIO{}.write(path, mesh) to dump
-    -- debug meshes when a sanity check fails. Those symbols live in
-    -- uipc_io, not uipc_geometry. Linux/ELF tolerates the missing link
-    -- edge (resolved at runtime), but Windows MSVC does not, so without
-    -- this dep the xmake Windows build fails with
-    --   uipc_backend_cuda.dll : fatal error LNK1120: 2 unresolved externals
-    --     __imp_??0SimplicialComplexIO@geometry@uipc@@QEAA@XZ
-    --     __imp_?write@SimplicialComplexIO@geometry@uipc@@QEAAX...
-    -- Keep this list in lock-step with src/backends/cuda/CMakeLists.txt.
     add_deps("uipc_geometry", "uipc_io")
     on_load(function(target)
         if target:is_plat('windows') then

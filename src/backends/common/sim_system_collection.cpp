@@ -4,9 +4,6 @@
 #include <uipc/common/set.h>
 #include <uipc/common/enumerate.h>
 #include <uipc/common/stack.h>
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-#include <cstdio>
-#endif
 namespace uipc::backend
 {
 void SimSystemCollection::create(U<ISimSystem> system)
@@ -90,19 +87,7 @@ void SimSystemCollection::build_systems()
     {
         try
         {
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-            std::fprintf(stderr,
-                         "[corex_demo] build_systems: building %s\n",
-                         std::string{s->name()}.c_str());
-            std::fflush(stderr);
-#endif
             s->build();
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-            std::fprintf(stderr,
-                         "[corex_demo] build_systems: built %s\n",
-                         std::string{s->name()}.c_str());
-            std::fflush(stderr);
-#endif
         }
         catch(SimSystemException& e)
         {

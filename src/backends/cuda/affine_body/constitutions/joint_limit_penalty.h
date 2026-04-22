@@ -8,13 +8,13 @@ namespace uipc::backend::cuda::joint_limit
 namespace detail
 {
 template <bool ComputeE, bool ComputeDerivatives, typename T>
-UIPC_HOST UIPC_DEVICE void eval_penalty_impl(const T& x,
-                                             const T& lower,
-                                             const T& upper,
-                                             const T& strength,
-                                             T&       E,
-                                             T&       dE_dx,
-                                             T&       d2E_dx2)
+UIPC_GENERIC void eval_penalty_impl(const T& x,
+                                    const T& lower,
+                                    const T& upper,
+                                    const T& strength,
+                                    T&       E,
+                                    T&       dE_dx,
+                                    T&       d2E_dx2)
 {
     const T zero = static_cast<T>(0);
     const T one  = static_cast<T>(1);
@@ -95,23 +95,23 @@ UIPC_HOST UIPC_DEVICE void eval_penalty_impl(const T& x,
 }  // namespace detail
 
 template <typename T>
-UIPC_HOST UIPC_DEVICE void eval_penalty(const T& x,
-                                        const T& lower,
-                                        const T& upper,
-                                        const T& strength,
-                                        T&       E,
-                                        T&       dE_dx,
-                                        T&       d2E_dx2)
+UIPC_GENERIC void eval_penalty(const T& x,
+                               const T& lower,
+                               const T& upper,
+                               const T& strength,
+                               T&       E,
+                               T&       dE_dx,
+                               T&       d2E_dx2)
 {
     detail::eval_penalty_impl<true, true>(
         x, lower, upper, strength, E, dE_dx, d2E_dx2);
 }
 
 template <typename T>
-UIPC_HOST UIPC_DEVICE T eval_penalty_energy(const T& x,
-                                            const T& lower,
-                                            const T& upper,
-                                            const T& strength)
+UIPC_GENERIC T eval_penalty_energy(const T& x,
+                                   const T& lower,
+                                   const T& upper,
+                                   const T& strength)
 {
     T E       = static_cast<T>(0);
     T dE_dx   = static_cast<T>(0);
@@ -122,12 +122,12 @@ UIPC_HOST UIPC_DEVICE T eval_penalty_energy(const T& x,
 }
 
 template <typename T>
-UIPC_HOST UIPC_DEVICE void eval_penalty_derivatives(const T& x,
-                                                    const T& lower,
-                                                    const T& upper,
-                                                    const T& strength,
-                                                    T&       dE_dx,
-                                                    T&       d2E_dx2)
+UIPC_GENERIC void eval_penalty_derivatives(const T& x,
+                                           const T& lower,
+                                           const T& upper,
+                                           const T& strength,
+                                           T&       dE_dx,
+                                           T&       d2E_dx2)
 {
     T E = static_cast<T>(0);
     detail::eval_penalty_impl<false, true>(

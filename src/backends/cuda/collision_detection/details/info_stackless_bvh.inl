@@ -542,27 +542,25 @@ inline void InfoStacklessBVH::Impl::build(muda::CBufferView<AABB>   aabbs,
     int_cid.resize(num_internal);
     nodes.resize(num_nodes);
 
-    thrust::fill(thrust::device, flags.data(), flags.data() + flags.size(), 0);
-    thrust::fill(thrust::device, ext_mark.data(), ext_mark.data() + ext_mark.size(), 7);
-    thrust::fill(thrust::device, ext_lca.data(), ext_lca.data() + ext_lca.size(), 0);
-    thrust::fill(thrust::device, ext_par.data(), ext_par.data() + ext_par.size(), 0);
-    thrust::fill(thrust::device, int_bid.data(), int_bid.data() + int_bid.size(), static_cast<IndexT>(-1));
-    thrust::fill(thrust::device, int_cid.data(), int_cid.data() + int_cid.size(), static_cast<IndexT>(-1));
+    thrust::fill(flags.begin(), flags.end(), 0);
+    thrust::fill(thrust::device, ext_mark.begin(), ext_mark.end(), 7);
+    thrust::fill(thrust::device, ext_lca.begin(), ext_lca.end(), 0);
+    thrust::fill(thrust::device, ext_par.begin(), ext_par.end(), 0);
+    thrust::fill(thrust::device, int_bid.begin(), int_bid.end(), static_cast<IndexT>(-1));
+    thrust::fill(thrust::device, int_cid.begin(), int_cid.end(), static_cast<IndexT>(-1));
 
     calcMaxBVFromBox(aabbs, scene_box.view());
     calcMCsFromBox(aabbs, scene_box.view(), mtcode.view());
-    auto null_stream = thrust::cuda::par.on(nullptr);
-    thrust::sequence(null_stream, sorted_id.data(), sorted_id.data() + sorted_id.size());
-    thrust::sort_by_key(
-        null_stream, mtcode.data(), mtcode.data() + mtcode.size(), sorted_id.data());
+    auto null_stream = thrust::cuda::par_nosync.on(nullptr);
+    thrust::sequence(null_stream, sorted_id.begin(), sorted_id.end());
+    thrust::sort_by_key(null_stream, mtcode.begin(), mtcode.end(), sorted_id.begin());
     calcInverseMapping();
     buildPrimitivesFromBox(aabbs);
     calcExtNodeSplitMetrics();
     buildIntNodes(num_objs);
-    thrust::exclusive_scan(
-        null_stream, count.data(), count.data() + count.size(), offsetTable.data());
+    thrust::exclusive_scan(null_stream, count.begin(), count.end(), offsetTable.begin());
     calcIntNodeOrders(num_objs);
-    thrust::fill(null_stream, ext_lca.data() + num_objs, ext_lca.data() + num_objs + 1, -1);
+    thrust::fill(null_stream, ext_lca.begin() + num_objs, ext_lca.begin() + num_objs + 1, -1);
     updateBvhExtNodeLinks(num_objs);
     reorderNode(num_internal);
 }
@@ -863,7 +861,7 @@ inline void InfoStacklessBVH::QueryBuffer::build(muda::CBufferView<AABB> aabbs)
     m_querySortedId.resize(aabbs.size());
     Impl::calcMaxBVFromBox(aabbs, m_querySceneBox);
     Impl::calcMCsFromBox(aabbs, m_querySceneBox, m_queryMtCode.view());
-    auto null_stream = thrust::cuda::par.on(nullptr);
+    auto null_stream = thrust::cuda::par_nosync.on(nullptr);
     auto n           = static_cast<int>(aabbs.size());
     auto d_codes     = m_queryMtCode.data();
     auto d_ids       = m_querySortedId.data();
@@ -919,8 +917,6 @@ inline void InfoStacklessBVH::detect(muda::CBuffer2DView<IndexT> cmts,
                 m_CIDs.size());
 
     using namespace muda;
-    if(qbuffer.m_pairs.size() == 0)
-        qbuffer.m_pairs.resize(50 * 1024);
     auto do_query = [&]
     {
         BufferLaunch().fill(qbuffer.m_cpNum.view(), 0);
@@ -963,8 +959,6 @@ inline void InfoStacklessBVH::query(muda::CBufferView<AABB>     query_aabbs,
                 query_CIDs.size());
 
     using namespace muda;
-    if(qbuffer.m_pairs.size() == 0)
-        qbuffer.m_pairs.resize(50 * 1024);
     qbuffer.build(query_aabbs);
     auto do_query = [&]
     {

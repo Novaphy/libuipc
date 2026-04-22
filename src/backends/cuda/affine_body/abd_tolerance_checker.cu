@@ -10,8 +10,7 @@ class ABDToleranceChecker final : public NewtonToleranceChecker
 
     SimSystemSlot<AffineBodyDynamics> affine_body_dynamics;
     Float                             abs_tol = 0.0;
-    // DeviceBuffer: avoid DeviceVar ctor cudaMalloc during SimEngine::build_systems (Corex/Iluvatar).
-    muda::DeviceBuffer<IndexT>        success;
+    muda::DeviceVar<IndexT>           success;
     IndexT h_success = 1;  // 1 means success, 0 means failure
 
     // Inherited via NewtonToleranceChecker
@@ -24,9 +23,6 @@ class ABDToleranceChecker final : public NewtonToleranceChecker
         auto  transrate_tol_attr = config.find<Float>("newton/transrate_tol");
         Float transrate_tol      = transrate_tol_attr->view()[0];
         abs_tol                  = transrate_tol * dt;
-#if !defined(UIPC_COREX_CUDA10_COMPAT) || !UIPC_COREX_CUDA10_COMPAT
-        success.resize(1);
-#endif
     }
 
     void do_init(InitInfo& info) override {}
@@ -37,29 +33,7 @@ class ABDToleranceChecker final : public NewtonToleranceChecker
     {
         auto dqs = affine_body_dynamics->dqs();
         using namespace muda;
-
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-        {
-            int n = static_cast<int>(dqs.size());
-            std::vector<Vector12> h_dq(n);
-            cudaMemcpy(h_dq.data(), dqs.data(), n*sizeof(Vector12), cudaMemcpyDeviceToHost);
-            bool converged = true;
-            for(int I = 0; I < n && converged; ++I)
-            {
-                for(int i = 3; i < 12; ++i)
-                {
-                    if(std::abs(h_dq[I](i)) > abs_tol)
-                    {
-                        converged = false;
-                        break;
-                    }
-                }
-            }
-            h_success = converged ? 1 : 0;
-            info.converged(converged);
-        }
-#else
-        BufferLaunch().fill(success.view(), 1);
+        BufferLaunch().fill(success.view(), 1);  // reset success flag
 
         ParallelFor()
             .file_line(__FILE__, __LINE__)
@@ -69,25 +43,27 @@ class ABDToleranceChecker final : public NewtonToleranceChecker
                     abs_tol = abs_tol] __device__(int I)
                    {
                        const Vector12& dq            = dqs(I);
-                       IndexT          success_value = success(0);
+                       IndexT          success_value = *success;
 
+                       // if success is already marked as failed, skip
                        if(success_value == 0)
                            return;
 
+                       // the first 3 components are translation, ignore
+                       // the rest 9 components are rotation/scaling/shear, take
                        for(IndexT i = 3; i < 12; ++i)
                        {
                            if(abs(dq[i]) > abs_tol)
                            {
-                               atomicExch(success.data(), 0);
-                               break;
+                               muda::atomic_exch(success.data(), 0);
+                               break;  // no need to check further
                            }
                        }
                    });
 
-        IndexT dflag = 1;
-        success.view().copy_to(&dflag);
-        info.converged(dflag != 0);
-#endif
+        // copy from device to host
+        bool h_success = success;
+        info.converged(h_success);
     }
 
     std::string do_report() override

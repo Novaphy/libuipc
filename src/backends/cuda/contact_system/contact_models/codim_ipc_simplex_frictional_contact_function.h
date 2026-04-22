@@ -1,5 +1,5 @@
 #pragma once
-#include <uipc/common/type_define.h>
+#include <type_define.h>
 #include <contact_system/contact_coeff.h>
 #include <contact_system/contact_models/codim_ipc_contact_function.h>
 
@@ -19,7 +19,7 @@ namespace sym::codim_ipc_contact
             kappa += coeff.kappa;
             mu += coeff.mu;
         }
-        return {kappa / Float(3), mu / Float(3)};
+        return {kappa / 3.0, mu / 3.0};
     }
 
     inline __device__ ContactCoeff EE_contact_coeff(const muda::CDense2D<ContactCoeff>& table,
@@ -36,7 +36,7 @@ namespace sym::codim_ipc_contact
                 mu += coeff.mu;
             }
         }
-        return {kappa / Float(4), mu / Float(4)};
+        return {kappa / 4.0, mu / 4.0};
     }
 
     inline __device__ ContactCoeff PE_contact_coeff(const muda::CDense2D<ContactCoeff>& table,
@@ -50,7 +50,7 @@ namespace sym::codim_ipc_contact
             kappa += coeff.kappa;
             mu += coeff.mu;
         }
-        return {kappa / Float(2), mu / Float(2)};
+        return {kappa / 2.0, mu / 2.0};
     }
 
     inline __device__ ContactCoeff PP_contact_coeff(const muda::CDense2D<ContactCoeff>& table,

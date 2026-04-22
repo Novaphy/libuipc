@@ -5,18 +5,9 @@
 #include <cub/warp/warp_reduce.cuh>
 #include <muda/ext/eigen/atomic.h>
 #include <uipc/common/timer.h>
-#include <uipc/common/type_define.h>
 #include <algorithm/fast_segmental_reduce.h>
 #include <muda/cub/device/device_partition.h>
 #include <muda/cub/device/device_run_length_encode.h>
-#include <fmt/core.h>
-#include <cstdio>
-#include <vector>
-
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-#include <thrust/device_ptr.h>
-#include <algorithm/corex_matrix_converter_kernels.h>
-#endif
 
 namespace uipc::backend::cuda
 {
@@ -27,10 +18,12 @@ void MatrixConverter<T, N>::convert(const muda::DeviceTripletMatrix<T, N>& from,
     to.reshape(from.rows(), from.cols());
     to.resize_triplets(from.triplet_count());
 
+
     if(to.triplet_count() == 0)
         return;
 
     _radix_sort_indices_and_blocks(from, to);
+
     _make_unique_indices(from, to);
     _make_unique_block_warp_reduction(from, to);
 }
@@ -52,18 +45,7 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(
     loose_resize(sort_index, src_row_indices.size());
     ij_pairs.resize(src_row_indices.size());
 
-    auto dst_row_indices = to.row_indices();
-    auto dst_col_indices = to.col_indices();
-    int n = static_cast<int>(src_row_indices.size());
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    corex_matconv::launch_hash_ij(
-        n,
-        thrust::raw_pointer_cast(src_row_indices.data()),
-        thrust::raw_pointer_cast(src_col_indices.data()),
-        thrust::raw_pointer_cast(ij_hash_input.data()),
-        thrust::raw_pointer_cast(sort_index_input.data()));
-#else
     // hash ij
     ParallelFor(256)
         .file_line(__FILE__, __LINE__)
@@ -77,7 +59,6 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(
                                 + static_cast<uint64_t>(col_indices(i));
                    sort_index(i) = i;
                });
-#endif
 
     DeviceRadixSort().SortPairs(ij_hash_input.data(),
                                 ij_hash.data(),
@@ -85,12 +66,11 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(
                                 sort_index.data(),
                                 ij_hash.size());
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    corex_matconv::launch_decode_hash(
-        n,
-        thrust::raw_pointer_cast(ij_hash.data()),
-        reinterpret_cast<int*>(thrust::raw_pointer_cast(ij_pairs.data())));
-#else
+    // set ij_hash back to row_indices and col_indices
+
+    auto dst_row_indices = to.row_indices();
+    auto dst_col_indices = to.col_indices();
+
     ParallelFor(256)
         .file_line(__FILE__, __LINE__)
         .apply(dst_row_indices.size(),
@@ -103,19 +83,11 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(
                    ij_pairs(i).x  = row_index;
                    ij_pairs(i).y  = col_index;
                });
-#endif
 
     // sort the block values
+
     {
-        using BlockT = Eigen::Matrix<T, N, N>;
         loose_resize(blocks_sorted, from.values().size());
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-        corex_matconv::launch_copy_sorted_blocks_3x3(
-            n,
-            reinterpret_cast<const corex_matconv::BlockT3*>(thrust::raw_pointer_cast(src_blocks.data())),
-            thrust::raw_pointer_cast(sort_index.data()),
-            reinterpret_cast<corex_matconv::BlockT3*>(thrust::raw_pointer_cast(blocks_sorted.data())));
-#else
         ParallelFor(256)
             .file_line(__FILE__, __LINE__)
             .apply(src_blocks.size(),
@@ -123,7 +95,6 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(
                     sort_index = sort_index.cviewer().name("sort_index"),
                     dst_blocks = blocks_sorted.viewer().name("values")] __device__(int i) mutable
                    { dst_blocks(i) = src_blocks(sort_index(i)); });
-#endif
     }
 }
 
@@ -144,16 +115,6 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(muda::DeviceBCOOMatri
     ij_pairs.resize(src_row_indices.size());
 
 
-    int n = static_cast<int>(src_row_indices.size());
-
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    corex_matconv::launch_hash_ij(
-        n,
-        thrust::raw_pointer_cast(src_row_indices.data()),
-        thrust::raw_pointer_cast(src_col_indices.data()),
-        thrust::raw_pointer_cast(ij_hash_input.data()),
-        thrust::raw_pointer_cast(sort_index_input.data()));
-#else
     // hash ij
     ParallelFor(256)
         .file_line(__FILE__, __LINE__)
@@ -167,7 +128,6 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(muda::DeviceBCOOMatri
                        (uint64_t{row_indices(i)} << 32) + uint64_t{col_indices(i)};
                    sort_index(i) = i;
                });
-#endif
 
     DeviceRadixSort().SortPairs(ij_hash_input.data(),
                                 ij_hash.data(),
@@ -175,15 +135,11 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(muda::DeviceBCOOMatri
                                 sort_index.data(),
                                 ij_hash.size());
 
+    // set ij_hash back to row_indices and col_indices
+
     auto dst_row_indices = to.row_indices();
     auto dst_col_indices = to.col_indices();
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    corex_matconv::launch_decode_hash(
-        n,
-        thrust::raw_pointer_cast(ij_hash.data()),
-        reinterpret_cast<int*>(thrust::raw_pointer_cast(ij_pairs.data())));
-#else
     ParallelFor(256)
         .file_line(__FILE__, __LINE__)
         .apply(dst_row_indices.size(),
@@ -191,27 +147,16 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(muda::DeviceBCOOMatri
                 ij_pairs = ij_pairs.viewer().name("ij_pairs")] __device__(int i) mutable
                {
                    auto hash      = ij_hash(i);
-                   auto row_index = static_cast<int>(hash >> 32);
-                   auto col_index = static_cast<int>(hash & 0xFFFFFFFF);
+                   auto row_index = int{hash >> 32};
+                   auto col_index = int{hash & 0xFFFFFFFF};
                    ij_pairs(i).x  = row_index;
                    ij_pairs(i).y  = col_index;
                });
-#endif
 
     // sort the block values
+
     {
-        using BlockT = Eigen::Matrix<T, N, N>;
         loose_resize(blocks_sorted, to.values().size());
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-        corex_matconv::launch_copy_sorted_blocks_with_ij_3x3(
-            n,
-            reinterpret_cast<const corex_matconv::BlockT3*>(thrust::raw_pointer_cast(src_blocks.data())),
-            thrust::raw_pointer_cast(sort_index.data()),
-            reinterpret_cast<const int*>(thrust::raw_pointer_cast(ij_pairs.data())),
-            reinterpret_cast<corex_matconv::BlockT3*>(thrust::raw_pointer_cast(blocks_sorted.data())),
-            thrust::raw_pointer_cast(to.row_indices().data()),
-            thrust::raw_pointer_cast(to.col_indices().data()));
-#else
         ParallelFor(256)
             .file_line(__FILE__, __LINE__)
             .apply(src_blocks.size(),
@@ -227,7 +172,6 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(muda::DeviceBCOOMatri
                        dst_row(i)    = ij_pairs(i).x;
                        dst_col(i)    = ij_pairs(i).y;
                    });
-#endif
 
         to.values().copy_from(blocks_sorted);
     }
@@ -263,13 +207,6 @@ void MatrixConverter<T, N>::_make_unique_indices(const muda::DeviceTripletMatrix
         unique_counts.data(), offsets.data(), unique_counts.size());
 
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    corex_matconv::launch_write_unique_ij(
-        static_cast<int>(unique_counts.size()),
-        reinterpret_cast<const int*>(thrust::raw_pointer_cast(unique_ij_pairs.data())),
-        thrust::raw_pointer_cast(row_indices.data()),
-        thrust::raw_pointer_cast(col_indices.data()));
-#else
     muda::ParallelFor(256)
         .file_line(__FILE__, __LINE__)
         .apply(unique_counts.size(),
@@ -280,7 +217,6 @@ void MatrixConverter<T, N>::_make_unique_indices(const muda::DeviceTripletMatrix
                    row_indices(i) = unique_ij_pairs(i).x;
                    col_indices(i) = unique_ij_pairs(i).y;
                });
-#endif
 
     to.resize_triplets(h_count);
 }
@@ -294,15 +230,7 @@ void MatrixConverter<T, N>::_make_unique_block_warp_reduction(
     loose_resize(sorted_partition_input, ij_pairs.size());
     loose_resize(sorted_partition_output, ij_pairs.size());
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    cudaMemset(thrust::raw_pointer_cast(sorted_partition_input.data()), 0,
-               sorted_partition_input.size() * sizeof(int));
-    corex_matconv::launch_mark_partition(
-        static_cast<int>(unique_counts.size()),
-        thrust::raw_pointer_cast(unique_counts.data()),
-        thrust::raw_pointer_cast(offsets.data()),
-        thrust::raw_pointer_cast(sorted_partition_input.data()));
-#else
+
     BufferLaunch().fill<int>(sorted_partition_input, 0);
 
     ParallelFor()
@@ -317,7 +245,6 @@ void MatrixConverter<T, N>::_make_unique_block_warp_reduction(
 
                    sorted_partition(offset + count - 1) = 1;
                });
-#endif
 
     // scatter
     DeviceScan().ExclusiveSum(sorted_partition_input.data(),
@@ -326,25 +253,11 @@ void MatrixConverter<T, N>::_make_unique_block_warp_reduction(
 
     auto blocks = to.values();
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    static_assert(N == 3, "CoreX matrix segmental reduce only supports 3x3 blocks");
-    static_assert(std::is_same_v<T, Float>,
-                  "CoreX matrix segmental reduce block type must match uipc::Float");
-    corex_matconv::launch_segmental_reduce_3x3(
-        static_cast<int>(blocks_sorted.size()),
-        thrust::raw_pointer_cast(sorted_partition_output.data()),
-        reinterpret_cast<const corex_matconv::BlockT3*>(
-            thrust::raw_pointer_cast(blocks_sorted.data())),
-        reinterpret_cast<corex_matconv::BlockT3*>(
-            thrust::raw_pointer_cast(blocks.data())),
-        static_cast<int>(blocks.size()));
-#else
     FastSegmentalReduce<>()
         .file_line(__FILE__, __LINE__)
         .reduce(std::as_const(sorted_partition_output).view(),
                 std::as_const(blocks_sorted).view(),
                 blocks);
-#endif
 }
 
 template <typename T, int N>
@@ -367,6 +280,8 @@ template <typename T, int N>
 void MatrixConverter<T, N>::_calculate_block_offsets(const muda::DeviceBCOOMatrix<T, N>& from,
                                                      muda::DeviceBSRMatrix<T, N>& to)
 {
+    //Timer timer{__FUNCTION__};
+
     using namespace muda;
     to.reshape(from.rows(), from.cols());
 
@@ -391,13 +306,6 @@ void MatrixConverter<T, N>::_calculate_block_offsets(const muda::DeviceBCOOMatri
     unique_indices.resize(h_count);
     unique_counts.resize(h_count);
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    corex_matconv::launch_scatter_col_counts(
-        static_cast<int>(unique_counts.size()),
-        thrust::raw_pointer_cast(unique_indices.data()),
-        thrust::raw_pointer_cast(unique_counts.data()),
-        thrust::raw_pointer_cast(col_counts_per_row.data()));
-#else
     ParallelFor(256)
         .file_line(__FILE__, __LINE__)
         .apply(unique_counts.size(),
@@ -409,13 +317,15 @@ void MatrixConverter<T, N>::_calculate_block_offsets(const muda::DeviceBCOOMatri
                    auto row                = unique_indices(i);
                    col_counts_per_row(row) = counts(i);
                });
-#endif
 
     // calculate the offsets
     DeviceScan().ExclusiveSum(col_counts_per_row.data(),
                               dst_row_offsets.data(),
                               col_counts_per_row.size());
 }
+
+//using T         = Float;
+//constexpr int N = 3;
 
 template <typename T, int N>
 void MatrixConverter<T, N>::convert(const muda::DeviceDoubletVector<T, N>& from,
@@ -478,19 +388,12 @@ void MatrixConverter<T, N>::_make_unique_indices(const muda::DeviceDoubletVector
     DeviceScan().ExclusiveSum(
         unique_counts.data(), offsets.data(), unique_counts.size());
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    corex_matconv::launch_write_unique_indices(
-        static_cast<int>(unique_counts.size()),
-        thrust::raw_pointer_cast(unique_indices.data()),
-        thrust::raw_pointer_cast(dst_indices.data()));
-#else
     muda::ParallelFor(256)
         .file_line(__FILE__, __LINE__)
         .apply(unique_counts.size(),
                [unique_indices = unique_indices.viewer().name("unique_indices"),
                 dst_indices = dst_indices.viewer().name("indices_sorted")] __device__(int i) mutable
                { dst_indices(i) = unique_indices(i); });
-#endif
 
     to.resize_doublets(h_count);
 }
@@ -504,15 +407,6 @@ void MatrixConverter<T, N>::_make_unique_segment_warp_reduction(
     loose_resize(sorted_partition_input, indices_sorted.size());
     loose_resize(sorted_partition_output, indices_sorted.size());
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    cudaMemset(thrust::raw_pointer_cast(sorted_partition_input.data()), 0,
-               sorted_partition_input.size() * sizeof(int));
-    corex_matconv::launch_mark_partition(
-        static_cast<int>(unique_counts.size()),
-        thrust::raw_pointer_cast(unique_counts.data()),
-        thrust::raw_pointer_cast(offsets.data()),
-        thrust::raw_pointer_cast(sorted_partition_input.data()));
-#else
     BufferLaunch().fill<int>(sorted_partition_input, 0);
 
     ParallelFor()
@@ -527,7 +421,6 @@ void MatrixConverter<T, N>::_make_unique_segment_warp_reduction(
 
                    sorted_partition(offset + count - 1) = 1;
                });
-#endif
 
     // scatter
     DeviceScan().ExclusiveSum(sorted_partition_input.data(),
@@ -536,25 +429,11 @@ void MatrixConverter<T, N>::_make_unique_segment_warp_reduction(
 
     auto segments = to.values();
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    static_assert(N == 3, "CoreX vector segmental reduce only supports 3x1 blocks");
-    static_assert(std::is_same_v<T, Float>,
-                  "CoreX vector segmental reduce vector type must match uipc::Float");
-    corex_matconv::launch_segmental_reduce_3x1(
-        static_cast<int>(segments_sorted.size()),
-        thrust::raw_pointer_cast(sorted_partition_output.data()),
-        reinterpret_cast<const corex_matconv::VecT3*>(
-            thrust::raw_pointer_cast(segments_sorted.data())),
-        reinterpret_cast<corex_matconv::VecT3*>(
-            thrust::raw_pointer_cast(segments.data())),
-        static_cast<int>(segments.size()));
-#else
     FastSegmentalReduce<64, 32>()
         .file_line(__FILE__, __LINE__)
         .reduce(std::as_const(sorted_partition_output).view(),
                 std::as_const(segments_sorted).view(),
                 segments);
-#endif
 }
 
 template <typename T, int N>
@@ -603,7 +482,8 @@ void MatrixConverter<T, N>::ge2sym(muda::DeviceBCOOMatrix<T, N>& to)
                 row_indices = to.row_indices().viewer().name("row_indices"),
                 col_indices = to.col_indices().viewer().name("col_indices"),
                 counts      = counts.cviewer().name("counts"),
-                offsets     = offsets.cviewer().name("offsets")] __device__(int i) mutable
+                offsets     = offsets.cviewer().name("offsets"),
+                total_count = count.viewer().name("total_count")] __device__(int i) mutable
                {
                    auto count  = counts(i);
                    auto offset = offsets(i);
@@ -615,25 +495,14 @@ void MatrixConverter<T, N>::ge2sym(muda::DeviceBCOOMatrix<T, N>& to)
                        row_indices(offset) = ij.x;
                        col_indices(offset) = ij.y;
                    }
+
+                   if(i == offsets.total_size() - 1)
+                   {
+                       total_count = offsets(i) + counts(i);
+                   }
                });
 
-    // Compute total_count robustly (avoid relying on "last thread writes" / viewer total_size).
-    count = 0;
-    if(counts.size() > 0)
-    {
-        ParallelFor()
-            .file_line(__FILE__, __LINE__)
-            .apply(1,
-                   [counts = counts.cviewer().name("counts"),
-                    offsets = offsets.cviewer().name("offsets"),
-                    total_count = count.viewer().name("total_count")] __device__(int) mutable
-                   {
-                       int last = (int)counts.total_size() - 1;
-                       total_count = offsets(last) + counts(last);
-                   });
-    }
-
-    int h_total_count = (int)count;
+    int h_total_count = count;
 
     to.resize_triplets(h_total_count);
 }
@@ -684,7 +553,8 @@ void MatrixConverter<T, N>::ge2sym(muda::DeviceTripletMatrix<T, N>& to)
                 row_indices = to.row_indices().viewer().name("row_indices"),
                 col_indices = to.col_indices().viewer().name("col_indices"),
                 counts      = counts.cviewer().name("counts"),
-                offsets     = offsets.cviewer().name("offsets")] __device__(int i) mutable
+                offsets     = offsets.cviewer().name("offsets"),
+                total_count = count.viewer().name("total_count")] __device__(int i) mutable
                {
                    auto count  = counts(i);
                    auto offset = offsets(i);
@@ -696,25 +566,14 @@ void MatrixConverter<T, N>::ge2sym(muda::DeviceTripletMatrix<T, N>& to)
                        row_indices(offset) = ij.x;
                        col_indices(offset) = ij.y;
                    }
+
+                   if(i == offsets.total_size() - 1)
+                   {
+                       total_count = offsets(i) + counts(i);
+                   }
                });
 
-    // Compute total_count robustly (avoid relying on "last thread writes" / viewer total_size).
-    count = 0;
-    if(counts.size() > 0)
-    {
-        ParallelFor()
-            .file_line(__FILE__, __LINE__)
-            .apply(1,
-                   [counts = counts.cviewer().name("counts"),
-                    offsets = offsets.cviewer().name("offsets"),
-                    total_count = count.viewer().name("total_count")] __device__(int) mutable
-                   {
-                       int last = (int)counts.total_size() - 1;
-                       total_count = offsets(last) + counts(last);
-                   });
-    }
-
-    int h_total_count = (int)count;
+    int h_total_count = count;
 
     to.resize_triplets(h_total_count);
 }

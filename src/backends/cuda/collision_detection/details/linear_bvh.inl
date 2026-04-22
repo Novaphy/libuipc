@@ -4,6 +4,7 @@
 #include <muda/cub/device/device_radix_sort.h>
 
 #include <cub/util_ptx.cuh>
+#include <cuda/atomic>
 #include <muda/atomic.h>
 #include <muda/ext/eigen/atomic.h>
 
@@ -86,10 +87,10 @@ MUDA_DEVICE uint32_t LinearBVHViewer::query(const QueryType& Q,
 
 namespace uipc::backend::cuda
 {
-MUDA_INLINE MUDA_GENERIC LinearBVHViewer::LinearBVHViewer(const uint32_t       num_nodes,
-                                                          const uint32_t       num_objects,
-                                                          const LinearBVHNode* nodes,
-                                                          const LinearBVHAABB* aabbs)
+MUDA_INLINE LinearBVHViewer::LinearBVHViewer(const uint32_t       num_nodes,
+                                             const uint32_t       num_objects,
+                                             const LinearBVHNode* nodes,
+                                             const LinearBVHAABB* aabbs)
     : m_num_nodes(num_nodes)
     , m_num_objects(num_objects)
     , m_nodes(nodes, num_nodes)
@@ -113,9 +114,13 @@ MUDA_INLINE MUDA_DEVICE bool LinearBVHViewer::stack_overflow() const noexcept
 MUDA_INLINE MUDA_DEVICE void LinearBVHViewer::check_index(const uint32_t idx) const noexcept
 {
     MUDA_KERNEL_ASSERT(idx < m_num_objects,
-                       "BVHViewer: index out of range, idx=%u, num_objects=%u",
+                       "BVHViewer[%s:%s]: index out of range, idx=%u, num_objects=%u. %s(%d)",
+                       this->name(),
+                       this->kernel_name(),
                        idx,
-                       m_num_objects);
+                       m_num_objects,
+                       this->kernel_file(),
+                       this->kernel_line());
 }
 
 MUDA_INLINE MUDA_DEVICE void LinearBVHViewer::stack_overflow(uint32_t num_found,
@@ -124,26 +129,30 @@ MUDA_INLINE MUDA_DEVICE void LinearBVHViewer::stack_overflow(uint32_t num_found,
     if constexpr(muda::RUNTIME_CHECK_ON)
     {
         MUDA_KERNEL_WARN_WITH_LOCATION(
-            "BVHViewer: stack overflow, num_found=%u, stack_num=%u,"
-            "intersection count may be smaller than ground truth.",
+            "BVHViewer[%s:%s]: stack overflow, num_found=%u, stack_num=%u,"
+            "the intersection count may be smaller than the ground truth, try enlarge the stack please. %s(%d)",
+            this->name(),
+            this->kernel_name(),
             num_found,
-            stack_num);
+            stack_num,
+            this->kernel_file(),
+            this->kernel_line());
     }
 
     m_stack_overflow = 1;
 }
 
-MUDA_INLINE MUDA_GENERIC bool LinearBVHNode::is_leaf() const noexcept
+MUDA_INLINE bool LinearBVHNode::is_leaf() const noexcept
 {
     return object_idx != 0xFFFFFFFF;
 }
 
-MUDA_INLINE MUDA_GENERIC bool LinearBVHNode::is_top() const noexcept
+MUDA_INLINE bool LinearBVHNode::is_top() const noexcept
 {
     return parent_idx == 0xFFFFFFFF;
 }
 
-MUDA_INLINE MUDA_GENERIC bool LinearBVHNode::is_internal() const noexcept
+MUDA_INLINE bool LinearBVHNode::is_internal() const noexcept
 {
     return object_idx == 0xFFFFFFFF;
 }
@@ -315,7 +324,8 @@ MUDA_INLINE void build_internal_aabbs(size_t num_objects,
 
                        // the memory fence is necessary to disable reordering of the memory access.
                        // we need to ensure that this thread can get the updated value of AABB.
-                       __threadfence();
+                       ::cuda::atomic_thread_fence(::cuda::memory_order_acquire,
+                                                   ::cuda::thread_scope_system);
 
                        if(old == 0)
                        {
@@ -552,20 +562,20 @@ MUDA_INLINE void LinearBVH::build_internal_aabbs(muda::Stream& s)
  *****************************************************************************************/
 namespace uipc::backend::cuda::detail
 {
-MUDA_INLINE MUDA_HOST MUDA_DEVICE LinearBVHMortonIndex::LinearBVHMortonIndex(uint32_t m, uint32_t idx) noexcept
+MUDA_INLINE LinearBVHMortonIndex::LinearBVHMortonIndex(uint32_t m, uint32_t idx) noexcept
 {
     m_morton_index = m;
     m_morton_index <<= 32;
     m_morton_index |= idx;
 }
 
-MUDA_INLINE MUDA_HOST MUDA_DEVICE LinearBVHMortonIndex::operator uint64_t() const noexcept
+MUDA_INLINE LinearBVHMortonIndex::operator uint64_t() const noexcept
 {
     return m_morton_index;
 }
 
-MUDA_INLINE MUDA_HOST MUDA_DEVICE bool operator==(const LinearBVHMortonIndex& lhs,
-                                                  const LinearBVHMortonIndex& rhs) noexcept
+MUDA_INLINE bool operator==(const LinearBVHMortonIndex& lhs,
+                            const LinearBVHMortonIndex& rhs) noexcept
 {
     return lhs.m_morton_index == rhs.m_morton_index;
 }

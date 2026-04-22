@@ -84,7 +84,6 @@ class GlobalContactManager final : public SimSystem
 
         muda::DeviceBuffer<IndexT> vert_is_active_contact;
         muda::DeviceBuffer<Float>  vert_disp_norms;
-        muda::DeviceVar<Float>     min_d_hat;
         muda::DeviceVar<Float>     max_disp_norm;
 
         SimSystemSlotCollection<ContactReporter> contact_reporters;

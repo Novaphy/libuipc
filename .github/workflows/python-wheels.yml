@@ -73,19 +73,7 @@ jobs:
 
       - name: Checkout code
         uses: actions/checkout@v5
-
-      - name: Install pkg-config (Windows)
-        # The vcpkg dylib package (both v2.2.1 and v3.x) installs a
-        # dylibConfig.cmake whose first action is `find_package(PkgConfig
-        # REQUIRED)`. The windows-2022 runner image does not ship pkg-config
-        # by default, so install pkgconfiglite via chocolatey to unblock
-        # `find_package(dylib)` in src/core/CMakeLists.txt.
-        if: matrix.os == 'windows-2022'
-        shell: pwsh
-        run: |
-          choco install pkgconfiglite -y --no-progress
-          echo "C:\ProgramData\chocolatey\bin" >> $env:GITHUB_PATH
-
+    
       - name: Set up Python
         uses: actions/setup-python@v5
 
@@ -102,14 +90,12 @@ jobs:
       - name: Setup vcpkg (Windows)
         if: matrix.os == 'windows-2022'
         id: vcpkg
-        # NOTE: revision pinned to vcpkg tag 2025.7.25 to match
-        # VCPKG_BASE_LINE in scripts/gen_vcpkg_json.py. See cmake.yml for why.
         uses: johnwason/vcpkg-action@v6
         with:
           manifest-dir: "${{ env.WORKSPACE }}/build"
           triplet: x64-windows-release
-          cache-key: ${{ matrix.os }}-2025-07-25
-          revision: dd3097e305afa53f7b4312371f62058d2e665320
+          cache-key: ${{ matrix.os }}
+          revision: master
           token: ${{ github.token }}
           github-binarycache: true
           fetch-depth: "0"
@@ -152,17 +138,14 @@ jobs:
           # Use CUDA-enabled manylinux image from https://github.com/ameli/manylinux-cuda
           # Available images: sameli/manylinux_2_34_x86_64_cuda_12.8
           CIBW_MANYLINUX_X86_64_IMAGE: "sameli/manylinux_2_34_x86_64_cuda_${{ env.CUDA_VERSION_MAJOR_MINOR }}"
-          # Set up vcpkg inside the container before any builds.
-          # Pin to vcpkg tag 2025.7.25 (same baseline as
-          # scripts/gen_vcpkg_json.py) so dylib resolves to v2.2.1
-          # (header-only) and stays consistent with the Windows job.
+          # Set up vcpkg inside the container before any builds
+          # Clone vcpkg, bootstrap it, and install dependencies from vcpkg.json
           CIBW_BEFORE_ALL: >
             yum install -y git curl zip unzip tar gzip &&
             cd /project &&
             if [ ! -d vcpkg ]; then
               git clone https://github.com/microsoft/vcpkg.git &&
               cd vcpkg &&
-              git checkout dd3097e305afa53f7b4312371f62058d2e665320 &&
               ./bootstrap-vcpkg.sh -disableMetrics;
             fi
           # Reduce parallelism to avoid OOM (exit code 137)

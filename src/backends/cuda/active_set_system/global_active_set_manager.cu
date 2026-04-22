@@ -12,17 +12,6 @@
 
 namespace uipc::backend::cuda
 {
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-// CoreX: avoid ParallelFor here (device lambda silent-failure risk). Ref: CoreX 适配 §1.2.
-__global__ void kernel_advance_non_penetrate_pos(int N, Vector3* x, const Vector3* x_hat,
-                                                 Float alpha)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if(i >= N) return;
-    x[i] = x[i] + (x_hat[i] - x[i]) * alpha;
-}
-#endif
-
 REGISTER_SIM_SYSTEM(GlobalActiveSetManager);
 
 void GlobalActiveSetManager::do_build()
@@ -160,9 +149,7 @@ void GlobalActiveSetManager::Impl::update_active_set()
         loose_resize(lambda, N);
         loose_resize(cnt, N);
 
-        if(total_count.size() < 1)
-            total_count.resize(1);
-        total_count.fill(0);
+        total_count = 0;
 
         ParallelFor()
             .file_line(__FILE__, __LINE__)
@@ -200,12 +187,11 @@ void GlobalActiveSetManager::Impl::update_active_set()
                        }
                        if(i == N - 1)
                        {
-                           total_count(0) = flag(i) + offset(i);
+                           total_count = flag(i) + offset(i);
                        }
                    });
 
-        int N1 = 0;
-        total_count.view().copy_to(&N1);
+        int N1 = total_count;
         idx.resize(N1);
         lambda.resize(N1);
         cnt.resize(N1);
@@ -444,9 +430,7 @@ void GlobalActiveSetManager::Impl::update_slack()
                        auto PH     = PHs(idx);
                        auto mu     = mu_vertices(PH);
                        auto d_grad = PH_d_grad(idx);
-                       auto  d       = d0(idx);
-                       auto  lambda  = PH_lambda(idx);
-                       decltype(d) d_shift = 0;
+                       auto d = d0(idx), lambda = PH_lambda(idx), d_shift = 0.0;
                        d_shift += d_grad.dot(x_hat(PH));
                        if(d + d_shift - lambda / mu > 0)
                            slack(idx) = d + d_shift - lambda / mu;
@@ -472,9 +456,7 @@ void GlobalActiveSetManager::Impl::update_slack()
                    auto mu = min(min(mu_vertices(PT(0)), mu_vertices(PT(1))),
                                  min(mu_vertices(PT(2)), mu_vertices(PT(3))));
                    auto d_grad = PT_d_grad(idx);
-                   auto        d = d0(idx);
-                   auto        lambda = PT_lambda(idx);
-                   decltype(d) d_shift = 0;
+                   auto d = d0(idx), lambda = PT_lambda(idx), d_shift = 0.0;
                    d_shift += d_grad.segment<3>(0).dot(x_hat(PT(0)));
                    d_shift += d_grad.segment<3>(3).dot(x_hat(PT(1)));
                    d_shift += d_grad.segment<3>(6).dot(x_hat(PT(2)));
@@ -502,9 +484,7 @@ void GlobalActiveSetManager::Impl::update_slack()
                    auto mu = min(min(mu_vertices(EE(0)), mu_vertices(EE(1))),
                                  min(mu_vertices(EE(2)), mu_vertices(EE(3))));
                    auto d_grad = EE_d_grad(idx);
-                   auto        d = d0(idx);
-                   auto        lambda = EE_lambda(idx);
-                   decltype(d) d_shift = 0;
+                   auto d = d0(idx), lambda = EE_lambda(idx), d_shift = 0.0;
                    d_shift += d_grad.segment<3>(0).dot(x_hat(EE(0)));
                    d_shift += d_grad.segment<3>(3).dot(x_hat(EE(1)));
                    d_shift += d_grad.segment<3>(6).dot(x_hat(EE(2)));
@@ -540,9 +520,7 @@ void GlobalActiveSetManager::Impl::update_lambda()
                        auto vI     = PHs(idx);
                        auto mu     = mu_vertices(vI);
                        auto d_grad = PH_d_grad(idx);
-                       auto        d = d0(idx);
-                       auto&       lambda = PH_lambda(idx);
-                       decltype(d) d_shift = 0;
+                       auto d = d0(idx), &lambda = PH_lambda(idx), d_shift = 0.0;
                        auto& cnt = PH_cnt(idx);
                        d_shift += d_grad.dot(x_hat(vI));
                        d += slack(idx) + lambda / mu;
@@ -581,9 +559,7 @@ void GlobalActiveSetManager::Impl::update_lambda()
                    auto  mu = min(min(mu_vertices(PT(0)), mu_vertices(PT(1))),
                                  min(mu_vertices(PT(2)), mu_vertices(PT(3))));
                    auto  d_grad = PT_d_grad(idx);
-                   auto        d = d0(idx);
-                   auto&       lambda = PT_lambda(idx);
-                   decltype(d) d_shift = 0;
+                   auto  d = d0(idx), &lambda = PT_lambda(idx), d_shift = 0.0;
                    auto& cnt = PT_cnt(idx);
                    d_shift += d_grad.segment<3>(0).dot(x_hat(PT(0)));
                    d_shift += d_grad.segment<3>(3).dot(x_hat(PT(1)));
@@ -624,9 +600,7 @@ void GlobalActiveSetManager::Impl::update_lambda()
                    auto  mu = min(min(mu_vertices(EE(0)), mu_vertices(EE(1))),
                                  min(mu_vertices(EE(2)), mu_vertices(EE(3))));
                    auto  d_grad = EE_d_grad(idx);
-                   auto        d = d0(idx);
-                   auto&       lambda = EE_lambda(idx);
-                   decltype(d) d_shift = 0;
+                   auto  d = d0(idx), &lambda = EE_lambda(idx), d_shift = 0.0;
                    auto& cnt = EE_cnt(idx);
                    d_shift += d_grad.segment<3>(0).dot(x_hat(EE(0)));
                    d_shift += d_grad.segment<3>(3).dot(x_hat(EE(1)));
@@ -676,21 +650,6 @@ void GlobalActiveSetManager::Impl::record_non_penetrate_positions()
     if(non_penetrate_positions.size() != x_hat.size())
         non_penetrate_positions.resize(x_hat.size());
     muda::BufferLaunch().copy<Vector3>(non_penetrate_positions.view(), std::as_const(x_hat));
-    {
-        static int rec_call = 0;
-        if(rec_call < 3)
-        {
-            int N = (int)non_penetrate_positions.size();
-            std::vector<Vector3> h_src(N), h_dst(N);
-            cudaMemcpy(h_src.data(), x_hat.data(), N * sizeof(Vector3), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_dst.data(), non_penetrate_positions.data(), N * sizeof(Vector3), cudaMemcpyDeviceToHost);
-            for(int i = 0; i < N; ++i)
-                spdlog::info("[record_np] call={} v{} src=({},{},{}) dst=({},{},{})",
-                    rec_call, i, h_src[i][0], h_src[i][1], h_src[i][2],
-                    h_dst[i][0], h_dst[i][1], h_dst[i][2]);
-        }
-        rec_call++;
-    }
     for(auto&& [i, R] : enumerate(active_set_reporters.view()))
     {
         R->record_non_penetrate_state();
@@ -705,13 +664,6 @@ void GlobalActiveSetManager::Impl::recover_non_penetrate_positions()
         R->report_vertex_offset_count(offset, count);
         NonPenetratePositionInfo info(this, offset, count);
         R->recover_non_penetrate(info);
-    }
-    {
-        int N = (int)non_penetrate_positions.size();
-        std::vector<Vector3> h_np(N);
-        cudaMemcpy(h_np.data(), non_penetrate_positions.data(), N * sizeof(Vector3), cudaMemcpyDeviceToHost);
-        for(int i = 0; i < N; ++i)
-            spdlog::info("[recover_np] v{} np_pos=({},{},{})", i, h_np[i][0], h_np[i][1], h_np[i][2]);
     }
     global_vertex_manager->overwrite_positions(non_penetrate_positions.view());
 }
@@ -729,17 +681,6 @@ void GlobalActiveSetManager::Impl::post_ccd()
 void GlobalActiveSetManager::Impl::advance_non_penetrate_positions(Float alpha)
 {
     auto x_hat = global_vertex_manager->positions();
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    int N = static_cast<int>(non_penetrate_positions.size());
-    if(N > 0)
-    {
-        int block = 256;
-        int grid  = (N + block - 1) / block;
-        kernel_advance_non_penetrate_pos<<<grid, block>>>(
-            N, non_penetrate_positions.data(), x_hat.data(), alpha);
-        cudaDeviceSynchronize();
-    }
-#else
     muda::ParallelFor()
         .file_line(__FILE__, __LINE__)
         .apply(non_penetrate_positions.size(),
@@ -747,7 +688,6 @@ void GlobalActiveSetManager::Impl::advance_non_penetrate_positions(Float alpha)
                 x_hat = x_hat.cviewer().name("x_hat"),
                 alpha = alpha] __device__(int i) mutable
                { x(i) = x(i) + (x_hat(i) - x(i)) * alpha; });
-#endif
     for(auto&& [i, R] : enumerate(active_set_reporters.view()))
     {
         R->advance_non_penetrate_state(alpha);

@@ -1,6 +1,9 @@
 [submodule "scripts/SymEigen"]
 	path = scripts/SymEigen
 	url = https://github.com/MuGdxy/SymEigen.git
+[submodule "external/muda"]
+	path = external/muda
+	url = file:///root/libuipc/external/muda
 [submodule "external/GKlib"]
 	path = external/GKlib
 	url = file:///root/libuipc/external/GKlib

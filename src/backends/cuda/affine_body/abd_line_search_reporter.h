@@ -47,14 +47,14 @@ class ABDLineSearchReporter final : public LineSearchReporter
 
         // intermediate energy buffers
         muda::DeviceBuffer<Float> body_id_to_kinetic_energy;
-        muda::DeviceBuffer<Float> abd_kinetic_energy;
+        muda::DeviceVar<Float>    abd_kinetic_energy;
         muda::DeviceBuffer<Float> body_id_to_shape_energy;
-        muda::DeviceBuffer<Float> abd_shape_energy;
+        muda::DeviceVar<Float>    abd_shape_energy;
 
         SimSystemSlotCollection<ABDLineSearchSubreporter> reporters;
         OffsetCountCollection<IndexT> reporter_energy_offsets_counts;
         muda::DeviceBuffer<Float>     reporter_energies;
-        muda::DeviceBuffer<Float>      total_reporter_energy;
+        muda::DeviceVar<Float>        total_reporter_energy;
 
         AffineBodyDynamics::Impl& abd() const
         {

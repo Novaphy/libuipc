@@ -122,45 +122,40 @@ class StableNeoHookean3D final : public FEM3DConstitution
     virtual void do_compute_gradient_hessian(ComputeGradientHessianInfo& info) override
     {
         using namespace muda;
-        namespace SNH = sym::stable_neo_hookean_3d;
-
-        const int       n            = static_cast<int>(info.indices().size());
-        const Float*    pmus         = mus.data();
-        const Float*    plambdas     = lambdas.data();
-        const Vector4i* pidx         = info.indices().data();
-        const Vector3*  pxs          = info.xs().data();
-        const Matrix3x3* pDm         = info.Dm_invs().data();
-        const Float*    pvol         = info.rest_volumes().data();
-        const Float     dt           = info.dt();
-        const int       grad_only_i  = info.gradient_only() ? 1 : 0;
+        namespace SNH      = sym::stable_neo_hookean_3d;
+        auto gradient_only = info.gradient_only();
 
         ParallelFor()
             .file_line(__FILE__, __LINE__)
-            .apply(n,
-                   [pmus,
-                    plambdas,
-                    pidx,
-                    pxs,
-                    pDm,
-                    pvol,
-                    dt,
-                    grad_only_i,
-                    G3s   = info.gradients().viewer().name("gradients"),
-                    H3x3s = info.hessians().viewer().name("hessians")] __device__(int I) mutable
+            .apply(info.indices().size(),
+                   [mus     = mus.cviewer().name("mus"),
+                    lambdas = lambdas.cviewer().name("lambdas"),
+                    indices = info.indices().viewer().name("indices"),
+                    xs      = info.xs().viewer().name("xs"),
+                    Dm_invs = info.Dm_invs().viewer().name("Dm_invs"),
+                    G3s     = info.gradients().viewer().name("gradients"),
+                    H3x3s   = info.hessians().viewer().name("hessians"),
+                    volumes = info.rest_volumes().viewer().name("volumes"),
+                    dt      = info.dt(),
+                    gradient_only] __device__(int I) mutable
                    {
-                       const Vector4i&  tet    = pidx[I];
-                       const Matrix3x3& Dm_inv = pDm[I];
-                       Float            mu     = pmus[I];
-                       Float            lambda = plambdas[I];
+                       const Vector4i&  tet    = indices(I);
+                       const Matrix3x3& Dm_inv = Dm_invs(I);
+                       Float            mu     = mus(I);
+                       Float            lambda = lambdas(I);
 
-                       const Vector3& x0 = pxs[tet(0)];
-                       const Vector3& x1 = pxs[tet(1)];
-                       const Vector3& x2 = pxs[tet(2)];
-                       const Vector3& x3 = pxs[tet(3)];
+                       const Vector3& x0 = xs(tet(0));
+                       const Vector3& x1 = xs(tet(1));
+                       const Vector3& x2 = xs(tet(2));
+                       const Vector3& x3 = xs(tet(3));
 
                        auto F = fem::F(x0, x1, x2, x3, Dm_inv);
 
-                       auto Vdt2 = pvol[I] * dt * dt;
+                       auto J = F.determinant();
+
+                       //auto VecF = flatten(F);
+
+                       auto Vdt2 = volumes(I) * dt * dt;
 
                        Matrix3x3 dEdF;
                        SNH::dEdVecF(dEdF, mu, lambda, F);
@@ -168,48 +163,21 @@ class StableNeoHookean3D final : public FEM3DConstitution
                        VecdEdF *= Vdt2;
 
                        Matrix9x12 dFdx = fem::dFdx(Dm_inv);
-                       Vector12   G;
-                       for(int r = 0; r < 12; ++r)
-                       {
-                           Float s = 0;
-                           for(int k = 0; k < 9; ++k)
-                               s += dFdx(k, r) * VecdEdF(k);
-                           G(r) = s;
-                       }
+                       Vector12   G    = dFdx.transpose() * VecdEdF;
 
                        DoubletVectorAssembler DVA{G3s};
-                       DVA.template segment<4>(I * 4).write(tet, G);
+                       DVA.segment<StencilSize>(I * StencilSize).write(tet, G);
 
-                       if(grad_only_i)
+                       if(gradient_only)
                            return;
 
                        Matrix9x9 ddEddF;
                        SNH::ddEddVecF(ddEddF, mu, lambda, F);
                        ddEddF *= Vdt2;
                        make_spd(ddEddF);
-
-                       Matrix9x12 T_mid;
-                       for(int r = 0; r < 9; ++r)
-                           for(int c = 0; c < 12; ++c)
-                           {
-                               Float s = 0;
-                               for(int k = 0; k < 9; ++k)
-                                   s += ddEddF(r, k) * dFdx(k, c);
-                               T_mid(r, c) = s;
-                           }
-
-                       Matrix12x12 H;
-                       for(int i = 0; i < 12; ++i)
-                           for(int j = 0; j < 12; ++j)
-                           {
-                               Float s = 0;
-                               for(int k = 0; k < 9; ++k)
-                                   s += dFdx(k, i) * T_mid(k, j);
-                               H(i, j) = s;
-                           }
-
+                       Matrix12x12 H = dFdx.transpose() * ddEddF * dFdx;
                        TripletMatrixAssembler TMA{H3x3s};
-                       TMA.template half_block<4>(I * 10).write(tet, H);
+                       TMA.half_block<StencilSize>(I * HalfHessianSize).write(tet, H);
                    });
     }
 };

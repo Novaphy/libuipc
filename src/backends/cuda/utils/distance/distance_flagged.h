@@ -1,7 +1,5 @@
 #pragma once
 #include <type_define.h>
-#include <cmath>
-#include <limits>
 #include <utils/distance/point_point.h>
 #include <utils/distance/point_edge.h>
 #include <utils/distance/point_triangle.h>
@@ -11,18 +9,10 @@
 
 namespace uipc::backend::cuda::distance
 {
-template <typename T>
-MUDA_HOST MUDA_DEVICE constexpr T ee_parallel_rel_tol()
-{
-    constexpr T eps        = std::numeric_limits<T>::epsilon();
-    constexpr T scaled_eps = T(64) * eps;
-    return scaled_eps > T(1e-12) ? scaled_eps : T(1e-12);
-}
-
 namespace detail
 {
     template <int N>
-    MUDA_HOST MUDA_DEVICE IndexT active_count(const Vector<IndexT, N>& flag)
+    MUDA_GENERIC IndexT active_count(const Vector<IndexT, N>& flag)
     {
         IndexT count = 0;
 #pragma unroll
@@ -31,7 +21,7 @@ namespace detail
         return count;
     }
 
-    inline MUDA_HOST MUDA_DEVICE Vector<IndexT, 2> pp_from_pe(const Vector<IndexT, 3>& flag)
+    inline MUDA_GENERIC Vector<IndexT, 2> pp_from_pe(const Vector<IndexT, 3>& flag)
     {
         MUDA_ASSERT(detail::active_count(flag) == 2, "active count mismatch");
 
@@ -55,7 +45,7 @@ namespace detail
         return offsets;
     }
 
-    inline MUDA_HOST MUDA_DEVICE Vector<IndexT, 3> pe_from_pt(const Vector<IndexT, 4>& flag)
+    inline MUDA_GENERIC Vector<IndexT, 3> pe_from_pt(const Vector<IndexT, 4>& flag)
     {
         MUDA_ASSERT(detail::active_count(flag) == 3,
                     "active count mismatch, yours=(%d,%d,%d,%d)",
@@ -89,7 +79,7 @@ namespace detail
         return offsets;
     }
 
-    inline MUDA_HOST MUDA_DEVICE Vector<IndexT, 2> pp_from_pt(const Vector<IndexT, 4>& flag)
+    inline MUDA_GENERIC Vector<IndexT, 2> pp_from_pt(const Vector<IndexT, 4>& flag)
     {
         MUDA_ASSERT(detail::active_count(flag) == 2,
                     "active count mismatch, yours=(%d,%d,%d,%d)",
@@ -116,7 +106,7 @@ namespace detail
         return offsets;
     }
 
-    inline MUDA_HOST MUDA_DEVICE Vector<IndexT, 3> pe_from_ee(const Vector<IndexT, 4>& flag)
+    inline MUDA_GENERIC Vector<IndexT, 3> pe_from_ee(const Vector<IndexT, 4>& flag)
     {
         MUDA_ASSERT(detail::active_count(flag) == 3,
                     "active count mismatch, yours=(%d,%d,%d,%d)",
@@ -145,7 +135,7 @@ namespace detail
         return offsets;
     }
 
-    inline MUDA_HOST MUDA_DEVICE Vector<IndexT, 2> pp_from_ee(const Vector<IndexT, 4>& flag)
+    inline MUDA_GENERIC Vector<IndexT, 2> pp_from_ee(const Vector<IndexT, 4>& flag)
     {
         MUDA_ASSERT(detail::active_count(flag) == 2,
                     "active count mismatch, yours=(%d,%d,%d,%d)",
@@ -174,7 +164,7 @@ namespace detail
 }  // namespace detail
 
 
-MUDA_HOST MUDA_DEVICE inline IndexT degenerate_point_triangle(const Vector<IndexT, 4>& flag,
+MUDA_GENERIC inline IndexT degenerate_point_triangle(const Vector<IndexT, 4>& flag,
                                                      Vector<IndexT, 4>& offsets)
 {
     // collect active indices
@@ -194,7 +184,7 @@ MUDA_HOST MUDA_DEVICE inline IndexT degenerate_point_triangle(const Vector<Index
     return dim;
 }
 
-MUDA_HOST MUDA_DEVICE inline IndexT degenerate_edge_edge(const Vector<IndexT, 4>& flag,
+MUDA_GENERIC inline IndexT degenerate_edge_edge(const Vector<IndexT, 4>& flag,
                                                 Vector<IndexT, 4>& offsets)
 {
     // collect active indices
@@ -214,7 +204,7 @@ MUDA_HOST MUDA_DEVICE inline IndexT degenerate_edge_edge(const Vector<IndexT, 4>
     return dim;
 }
 
-MUDA_HOST MUDA_DEVICE inline IndexT degenerate_point_edge(const Vector<IndexT, 3>& flag,
+MUDA_GENERIC inline IndexT degenerate_point_edge(const Vector<IndexT, 3>& flag,
                                                  Vector<IndexT, 3>& offsets)
 {
     // collect active indices
@@ -231,14 +221,14 @@ MUDA_HOST MUDA_DEVICE inline IndexT degenerate_point_edge(const Vector<IndexT, 3
 }
 
 template <typename T>
-MUDA_HOST MUDA_DEVICE Vector<IndexT, 2> point_point_distance_flag(const Eigen::Vector<T, 3>& p0,
+MUDA_GENERIC Vector<IndexT, 2> point_point_distance_flag(const Eigen::Vector<T, 3>& p0,
                                                          const Eigen::Vector<T, 3>& p1)
 {
     return Vector<IndexT, 2>{1, 1};
 }
 
 template <typename T>
-MUDA_HOST MUDA_DEVICE Vector<IndexT, 3> point_edge_distance_flag(const Eigen::Vector<T, 3>& p,
+MUDA_GENERIC Vector<IndexT, 3> point_edge_distance_flag(const Eigen::Vector<T, 3>& p,
                                                         const Eigen::Vector<T, 3>& e0,
                                                         const Eigen::Vector<T, 3>& e1)
 {
@@ -257,6 +247,7 @@ MUDA_HOST MUDA_DEVICE Vector<IndexT, 3> point_edge_distance_flag(const Eigen::Ve
         return F;
     }
     auto ratio = e.dot(p - e0) / e2;
+
     F[1] = ratio < 1.0 ? 1 : 0;
     F[2] = ratio > 0.0 ? 1 : 0;
 
@@ -264,7 +255,7 @@ MUDA_HOST MUDA_DEVICE Vector<IndexT, 3> point_edge_distance_flag(const Eigen::Ve
 }
 
 template <typename T>
-MUDA_HOST MUDA_DEVICE Vector4i point_triangle_distance_flag(const Eigen::Vector<T, 3>& p,
+MUDA_GENERIC Vector4i point_triangle_distance_flag(const Eigen::Vector<T, 3>& p,
                                                    const Eigen::Vector<T, 3>& t0,
                                                    const Eigen::Vector<T, 3>& t1,
                                                    const Eigen::Vector<T, 3>& t2)
@@ -369,46 +360,46 @@ MUDA_HOST MUDA_DEVICE Vector4i point_triangle_distance_flag(const Eigen::Vector<
 
 namespace detail
 {
-template <typename T>
-MUDA_HOST MUDA_DEVICE void update_ee_near_parallel_candidate(const Eigen::Vector<T, 3>& p,
-                                                             const Eigen::Vector<T, 3>& s0,
-                                                             const Eigen::Vector<T, 3>& s1,
-                                                             T&                    minD,
-                                                             Vector4i&             F,
-                                                             const Vector4i&       F_pe,
-                                                             const Vector4i&       F_pp0,
-                                                             const Vector4i&       F_pp1,
-                                                             bool                  is_initial)
-{
-    auto pe_flag = point_edge_distance_flag(p, s0, s1);
-    T    d;
-    if(pe_flag[1] && pe_flag[2])
-        point_edge_distance2(p, s0, s1, d);
-    else if(pe_flag[1])
-        point_point_distance2(p, s0, d);
-    else
-        point_point_distance2(p, s1, d);
-    if(is_initial || d < minD)
+    template <typename T>
+    MUDA_GENERIC void update_ee_near_parallel_candidate(const Eigen::Vector<T, 3>& p,
+                                                        const Eigen::Vector<T, 3>& s0,
+                                                        const Eigen::Vector<T, 3>& s1,
+                                                        T&              minD,
+                                                        Vector4i&       F,
+                                                        const Vector4i& F_pe,
+                                                        const Vector4i& F_pp0,
+                                                        const Vector4i& F_pp1,
+                                                        bool is_initial)
     {
-        minD = d;
+        auto pe_flag = point_edge_distance_flag(p, s0, s1);
+        T    d;
         if(pe_flag[1] && pe_flag[2])
-            F = F_pe;
+            point_edge_distance2(p, s0, s1, d);
         else if(pe_flag[1])
-            F = F_pp0;
+            point_point_distance2(p, s0, d);
         else
-            F = F_pp1;
+            point_point_distance2(p, s1, d);
+        if(is_initial || d < minD)
+        {
+            minD = d;
+            if(pe_flag[1] && pe_flag[2])
+                F = F_pe;
+            else if(pe_flag[1])
+                F = F_pp0;
+            else
+                F = F_pp1;
+        }
     }
-}
 }  // namespace detail
 
 template <typename T>
-MUDA_HOST MUDA_DEVICE Vector4i edge_edge_distance_flag(const Eigen::Vector<T, 3>& ea0,
+MUDA_GENERIC Vector4i edge_edge_distance_flag(const Eigen::Vector<T, 3>& ea0,
                                               const Eigen::Vector<T, 3>& ea1,
                                               const Eigen::Vector<T, 3>& eb0,
                                               const Eigen::Vector<T, 3>& eb1)
 {
     Vector4i    F                 = {1, 1, 1, 1};  // default EE
-    constexpr T kEeParallelRelTol = ee_parallel_rel_tol<T>();
+    constexpr T kEeParallelRelTol = static_cast<T>(1e-12);
 
     Eigen::Vector<T, 3> u  = ea1 - ea0;
     Eigen::Vector<T, 3> v  = eb1 - eb0;
@@ -469,9 +460,7 @@ MUDA_HOST MUDA_DEVICE Vector4i edge_edge_distance_flag(const Eigen::Vector<T, 3>
     else
     {
         tN = (a * e - b * d);
-        T coplanar_scale = u.norm() * v.norm() * w.norm() + T(1);
-        if(tN > T(0) && tN < tD
-           && std::abs(u.cross(v).dot(w)) <= kEeParallelRelTol * coplanar_scale)
+        if(tN > 0.0 && tN < tD && u.cross(v).dot(w) == 0.0)
         {
             // avoid coplanar or nearly parallel EE
             if(sN < D / 2)
@@ -559,7 +548,7 @@ MUDA_HOST MUDA_DEVICE Vector4i edge_edge_distance_flag(const Eigen::Vector<T, 3>
 }
 
 template <typename T>
-MUDA_HOST MUDA_DEVICE void point_point_distance2(const Vector2i&            flag,
+MUDA_GENERIC void point_point_distance2(const Vector2i&            flag,
                                         const Eigen::Vector<T, 3>& a,
                                         const Eigen::Vector<T, 3>& b,
                                         T&                         D)
@@ -568,7 +557,7 @@ MUDA_HOST MUDA_DEVICE void point_point_distance2(const Vector2i&            flag
 }
 
 template <typename T>
-MUDA_HOST MUDA_DEVICE void point_edge_distance2(const Vector<IndexT, 3>&   flag,
+MUDA_GENERIC void point_edge_distance2(const Vector<IndexT, 3>&   flag,
                                        const Eigen::Vector<T, 3>& p,
                                        const Eigen::Vector<T, 3>& e0,
                                        const Eigen::Vector<T, 3>& e1,
@@ -596,7 +585,7 @@ MUDA_HOST MUDA_DEVICE void point_edge_distance2(const Vector<IndexT, 3>&   flag,
 }
 
 template <typename T>
-MUDA_HOST MUDA_DEVICE void point_triangle_distance2(const Vector4i&            flag,
+MUDA_GENERIC void point_triangle_distance2(const Vector4i&            flag,
                                            const Eigen::Vector<T, 3>& p,
                                            const Eigen::Vector<T, 3>& t0,
                                            const Eigen::Vector<T, 3>& t1,
@@ -635,7 +624,7 @@ MUDA_HOST MUDA_DEVICE void point_triangle_distance2(const Vector4i&            f
 }
 
 template <typename T>
-MUDA_HOST MUDA_DEVICE void edge_edge_distance2(const Vector4i&            flag,
+MUDA_GENERIC void edge_edge_distance2(const Vector4i&            flag,
                                       const Eigen::Vector<T, 3>& ea0,
                                       const Eigen::Vector<T, 3>& ea1,
                                       const Eigen::Vector<T, 3>& eb0,
@@ -674,7 +663,7 @@ MUDA_HOST MUDA_DEVICE void edge_edge_distance2(const Vector4i&            flag,
 }
 
 template <typename T>
-MUDA_HOST MUDA_DEVICE void point_point_distance2_gradient(const Vector2i& flag,
+MUDA_GENERIC void point_point_distance2_gradient(const Vector2i& flag,
                                                  const Eigen::Vector<T, 3>& a,
                                                  const Eigen::Vector<T, 3>& b,
                                                  Eigen::Vector<T, 6>&       G)
@@ -684,7 +673,7 @@ MUDA_HOST MUDA_DEVICE void point_point_distance2_gradient(const Vector2i& flag,
 }
 
 template <typename T>
-MUDA_HOST MUDA_DEVICE void point_edge_distance2_gradient(const Vector<IndexT, 3>&   flag,
+MUDA_GENERIC void point_edge_distance2_gradient(const Vector<IndexT, 3>&   flag,
                                                 const Eigen::Vector<T, 3>& p,
                                                 const Eigen::Vector<T, 3>& e0,
                                                 const Eigen::Vector<T, 3>& e1,
@@ -706,7 +695,7 @@ MUDA_HOST MUDA_DEVICE void point_edge_distance2_gradient(const Vector<IndexT, 3>
 
 #pragma unroll
         for(int i = 0; i < 2; ++i)
-            G.template segment<3>(offsets[i] * 3) = G6.template segment<3>(i * 3);
+            G.segment<3>(offsets[i] * 3) = G6.segment<3>(i * 3);
     }
     else if(dim == 3)
     {
@@ -719,7 +708,7 @@ MUDA_HOST MUDA_DEVICE void point_edge_distance2_gradient(const Vector<IndexT, 3>
 }
 
 template <typename T>
-MUDA_HOST MUDA_DEVICE void point_triangle_distance2_gradient(const Vector4i& flag,
+MUDA_GENERIC void point_triangle_distance2_gradient(const Vector4i& flag,
                                                     const Eigen::Vector<T, 3>& p,
                                                     const Eigen::Vector<T, 3>& t0,
                                                     const Eigen::Vector<T, 3>& t1,
@@ -742,7 +731,7 @@ MUDA_HOST MUDA_DEVICE void point_triangle_distance2_gradient(const Vector4i& fla
 
 #pragma unroll
         for(int i = 0; i < 2; ++i)
-            G.template segment<3>(offsets[i] * 3) = G6.template segment<3>(i * 3);
+            G.segment<3>(offsets[i] * 3) = G6.segment<3>(i * 3);
     }
     else if(dim == 3)
     {
@@ -756,7 +745,7 @@ MUDA_HOST MUDA_DEVICE void point_triangle_distance2_gradient(const Vector4i& fla
 
 #pragma unroll
         for(int i = 0; i < 3; ++i)
-            G.template segment<3>(offsets[i] * 3) = G9.template segment<3>(i * 3);
+            G.segment<3>(offsets[i] * 3) = G9.segment<3>(i * 3);
     }
     else if(dim == 4)
     {
@@ -771,7 +760,7 @@ MUDA_HOST MUDA_DEVICE void point_triangle_distance2_gradient(const Vector4i& fla
 }
 
 template <typename T>
-MUDA_HOST MUDA_DEVICE void edge_edge_distance2_gradient(const Vector4i&            flag,
+MUDA_GENERIC void edge_edge_distance2_gradient(const Vector4i&            flag,
                                                const Eigen::Vector<T, 3>& ea0,
                                                const Eigen::Vector<T, 3>& ea1,
                                                const Eigen::Vector<T, 3>& eb0,
@@ -793,7 +782,7 @@ MUDA_HOST MUDA_DEVICE void edge_edge_distance2_gradient(const Vector4i&         
 
 #pragma unroll
         for(int i = 0; i < 2; ++i)
-            G.template segment<3>(offsets[i] * 3) = G6.template segment<3>(i * 3);
+            G.segment<3>(offsets[i] * 3) = G6.segment<3>(i * 3);
     }
     else if(dim == 3)
     {
@@ -807,7 +796,7 @@ MUDA_HOST MUDA_DEVICE void edge_edge_distance2_gradient(const Vector4i&         
 
 #pragma unroll
         for(int i = 0; i < 3; ++i)
-            G.template segment<3>(offsets[i] * 3) = G9.template segment<3>(i * 3);
+            G.segment<3>(offsets[i] * 3) = G9.segment<3>(i * 3);
     }
     else if(dim == 4)
     {
@@ -833,7 +822,7 @@ MUDA_HOST MUDA_DEVICE void edge_edge_distance2_gradient(const Vector4i&         
 }
 
 template <typename T>
-MUDA_HOST MUDA_DEVICE void point_point_distance2_hessian(const Vector2i&            flag,
+MUDA_GENERIC void point_point_distance2_hessian(const Vector2i&            flag,
                                                 const Eigen::Vector<T, 3>& a,
                                                 const Eigen::Vector<T, 3>& b,
                                                 Eigen::Matrix<T, 6, 6>&    H)
@@ -844,7 +833,7 @@ MUDA_HOST MUDA_DEVICE void point_point_distance2_hessian(const Vector2i&        
 }
 
 template <typename T>
-MUDA_HOST MUDA_DEVICE void point_edge_distance2_hessian(const Vector<IndexT, 3>&   flag,
+MUDA_GENERIC void point_edge_distance2_hessian(const Vector<IndexT, 3>&   flag,
                                                const Eigen::Vector<T, 3>& p,
                                                const Eigen::Vector<T, 3>& e0,
                                                const Eigen::Vector<T, 3>& e1,
@@ -882,7 +871,7 @@ MUDA_HOST MUDA_DEVICE void point_edge_distance2_hessian(const Vector<IndexT, 3>&
 }
 
 template <typename T>
-MUDA_HOST MUDA_DEVICE void point_triangle_distance2_hessian(const Vector4i& flag,
+MUDA_GENERIC void point_triangle_distance2_hessian(const Vector4i& flag,
                                                    const Eigen::Vector<T, 3>& p,
                                                    const Eigen::Vector<T, 3>& t0,
                                                    const Eigen::Vector<T, 3>& t1,
@@ -939,7 +928,7 @@ MUDA_HOST MUDA_DEVICE void point_triangle_distance2_hessian(const Vector4i& flag
 }
 
 template <typename T>
-MUDA_HOST MUDA_DEVICE void edge_edge_distance2_hessian(const Vector4i&            flag,
+MUDA_GENERIC void edge_edge_distance2_hessian(const Vector4i&            flag,
                                               const Eigen::Vector<T, 3>& ea0,
                                               const Eigen::Vector<T, 3>& ea1,
                                               const Eigen::Vector<T, 3>& eb0,

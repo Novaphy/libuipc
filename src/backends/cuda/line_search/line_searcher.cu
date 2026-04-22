@@ -75,7 +75,7 @@ Float LineSearcher::compute_energy(bool is_initial)
         span{m_energy_values}.subspan(m_reporters.view().size());
 
     Float total_energy =
-        std::accumulate(m_energy_values.begin(), m_energy_values.end(), Float(0));
+        std::accumulate(m_energy_values.begin(), m_energy_values.end(), 0.0);
 
     if(m_report_energy)
     {

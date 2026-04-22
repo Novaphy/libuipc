@@ -8,7 +8,7 @@ namespace uipc::backend::cuda
 /**
  * @brief Edge thickness
  */
-inline MUDA_HOST MUDA_DEVICE Float edge_thickness(const Float& thickness_E0, const Float& thickness_E1)
+inline MUDA_GENERIC Float edge_thickness(const Float& thickness_E0, const Float& thickness_E1)
 {
     if constexpr(RUNTIME_CHECK)
     {
@@ -21,9 +21,9 @@ inline MUDA_HOST MUDA_DEVICE Float edge_thickness(const Float& thickness_E0, con
 /**
  * @brief Triangle thickness
  */
-inline MUDA_HOST MUDA_DEVICE Float triangle_thickness(const Float& thickness_T0,
-                                                      const Float& thickness_T1,
-                                                      const Float& thickness_T2)
+inline MUDA_GENERIC Float triangle_thickness(const Float& thickness_T0,
+                                             const Float& thickness_T1,
+                                             const Float& thickness_T2)
 {
     if constexpr(RUNTIME_CHECK)
     {
@@ -37,10 +37,10 @@ inline MUDA_HOST MUDA_DEVICE Float triangle_thickness(const Float& thickness_T0,
 /**
  * @brief Point-Triangle thickness calculation
  */
-inline MUDA_HOST MUDA_DEVICE Float PT_thickness(const Float& thickness_P,
-                                                const Float& thickness_T0,
-                                                const Float& thickness_T1,
-                                                const Float& thickness_T2)
+inline MUDA_GENERIC Float PT_thickness(const Float& thickness_P,
+                                       const Float& thickness_T0,
+                                       const Float& thickness_T1,
+                                       const Float& thickness_T2)
 {
     if constexpr(RUNTIME_CHECK)
     {
@@ -55,10 +55,10 @@ inline MUDA_HOST MUDA_DEVICE Float PT_thickness(const Float& thickness_P,
 /**
  * @brief Edge-Edge thickness calculation
  */
-inline MUDA_HOST MUDA_DEVICE Float EE_thickness(const Float& thickness_Ea0,
-                                                const Float& thickness_Ea1,
-                                                const Float& thickness_Eb0,
-                                                const Float& thickness_Eb1)
+inline MUDA_GENERIC Float EE_thickness(const Float& thickness_Ea0,
+                                       const Float& thickness_Ea1,
+                                       const Float& thickness_Eb0,
+                                       const Float& thickness_Eb1)
 {
     if constexpr(RUNTIME_CHECK)
     {
@@ -73,9 +73,9 @@ inline MUDA_HOST MUDA_DEVICE Float EE_thickness(const Float& thickness_Ea0,
 /**
  * @brief Point-Edge thickness calculation
  */
-inline MUDA_HOST MUDA_DEVICE Float PE_thickness(const Float& thickness_P,
-                                                const Float& thickness_E0,
-                                                const Float& thickness_E1)
+inline MUDA_GENERIC Float PE_thickness(const Float& thickness_P,
+                                       const Float& thickness_E0,
+                                       const Float& thickness_E1)
 {
     if constexpr(RUNTIME_CHECK)
     {
@@ -89,7 +89,7 @@ inline MUDA_HOST MUDA_DEVICE Float PE_thickness(const Float& thickness_P,
 /**
  * @brief Point-Point thickness calculation
  */
-inline MUDA_HOST MUDA_DEVICE Float PP_thickness(const Float& thickness_P0, const Float& thickness_P1)
+inline MUDA_GENERIC Float PP_thickness(const Float& thickness_P0, const Float& thickness_P1)
 {
     // return (thickness_P0 + thickness_P1) / 2.0;
     return thickness_P0 + thickness_P1;
@@ -98,7 +98,7 @@ inline MUDA_HOST MUDA_DEVICE Float PP_thickness(const Float& thickness_P0, const
 /**
  * @brief the range of d^2, considering the thickness
  */
-inline MUDA_HOST MUDA_DEVICE Vector2 D_range(Float xi, Float d_hat)
+inline MUDA_GENERIC Vector2 D_range(Float xi, Float d_hat)
 {
     auto upper = xi + d_hat;
     auto lower = xi;
@@ -108,7 +108,7 @@ inline MUDA_HOST MUDA_DEVICE Vector2 D_range(Float xi, Float d_hat)
 /**
  * @brief check if D is in the active range [D_range.x(), D_range.y())
  */
-inline MUDA_HOST MUDA_DEVICE bool is_active_D(Vector2 D_range, Float D)
+inline MUDA_GENERIC bool is_active_D(Vector2 D_range, Float D)
 {
     return D_range.x() < D && D < D_range.y();
 }

@@ -48,10 +48,6 @@ void GlobalTrajectoryFilter::Impl::init()
     auto filter_view = filters.view();
     tois.resize(filter_view.size());
     h_tois.resize(filter_view.size());
-    // Default to "no restriction": toi = 1.0.
-    // Individual filters may reduce it when they detect upcoming impacts.
-    tois.fill(1.0f);
-    std::fill(h_tois.begin(), h_tois.end(), 1.0f);
 }
 
 void GlobalTrajectoryFilter::detect(Float alpha)
@@ -82,10 +78,6 @@ void GlobalTrajectoryFilter::filter_active()
 
 Float GlobalTrajectoryFilter::Impl::filter_toi(Float alpha)
 {
-    // Reset tois for this evaluation. Some filters may early-out and not write toi,
-    // so we must keep a valid default (1.0) to avoid bogus min-toi=0.
-    tois.fill(1.0f);
-
     auto filter_view = filters.view();
     for(auto&& [i, filter] : enumerate(filter_view))
     {
@@ -100,11 +92,7 @@ Float GlobalTrajectoryFilter::Impl::filter_toi(Float alpha)
     {
         for(auto&& [i, toi] : enumerate(h_tois))
         {
-            // Some filters may output toi=0 when no candidates exist (meaning "no restriction").
-            // Treat 0 as 1 to keep the global min-toi meaningful; still reject negative values.
-            UIPC_ASSERT(toi >= 0.0f, "Invalid toi[{}] value: {}", filter_view[i]->name(), toi);
-            if(toi == 0.0f)
-                toi = 1.0f;
+            UIPC_ASSERT(toi > 0.0f, "Invalid toi[{}] value: {}", filter_view[i]->name(), toi);
         }
     }
 

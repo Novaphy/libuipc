@@ -2,7 +2,6 @@
 #include <type_define.h>
 #include <utils/dihedral_angle.h>
 #include <cmath>
-#include <type_traits>
 
 namespace uipc::backend::cuda
 {
@@ -17,20 +16,12 @@ namespace sym::stress_plastic_discrete_shell_bending
     template <typename T>
     inline UIPC_GENERIC constexpr T plasticity_write_threshold()
     {
-#if defined(UIPC_FLOAT_SCALAR) && UIPC_FLOAT_SCALAR
-        if constexpr(std::is_same_v<T, float>)
-            return static_cast<T>(1e-5);
-#endif
         return static_cast<T>(1e-6);
     }
 
     template <typename T>
     inline UIPC_GENERIC constexpr T dihedral_guard_eps()
     {
-#if defined(UIPC_FLOAT_SCALAR) && UIPC_FLOAT_SCALAR
-        if constexpr(std::is_same_v<T, float>)
-            return static_cast<T>(1e-8);
-#endif
         return static_cast<T>(1e-12);
     }
 

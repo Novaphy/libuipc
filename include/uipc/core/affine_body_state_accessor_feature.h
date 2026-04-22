@@ -16,15 +16,8 @@ class UIPC_CORE_API AffineBodyStateAccessorFeatureOverrider
     virtual void do_copy_from(const geometry::SimplicialComplex& state_geo) = 0;
     virtual void do_copy_to(geometry::SimplicialComplex& state_geo)         = 0;
 
-    /**
-     * @brief Copy per-body world-space transforms into a backend buffer.
-     *        Only AB backends that expose body transforms in a compact
-     *        layout need to override this.
-     */
-    virtual void do_copy_transform_to(backend::BufferView buffer_view,
-                                      IndexT body_offset, SizeT body_count) {}
-    virtual void do_copy_velocity_to(backend::BufferView buffer_view,
-                                     IndexT body_offset, SizeT body_count) {}
+    virtual void do_copy_transform_to(backend::BufferView buffer_view, IndexT body_offset, SizeT body_count) = 0;
+    virtual void do_copy_velocity_to(backend::BufferView buffer_view, IndexT body_offset, SizeT body_count)  = 0;
 };
 
 class UIPC_CORE_API AffineBodyStateAccessorFeature final : public Feature
@@ -63,13 +56,26 @@ class UIPC_CORE_API AffineBodyStateAccessorFeature final : public Feature
     void copy_to(geometry::SimplicialComplex& state_geo) const;
 
     /**
-     * @brief Copy per-body transforms into a backend buffer (e.g. for state
-     *        accessors used by external pipelines).
+     * @brief Copy transform data (Matrix4x4) for the specified body range into an externally-owned buffer.
+     *
+     * @param buffer_view The destination buffer view to copy transform data into.
+     * @param body_offset The starting body index in affine body system.
+     * @param body_count The number of bodies to include, if body_count == ~0ull, all bodies from body_offset to the end will be included.
      */
     void copy_transform_to(backend::BufferView buffer_view,
-                           IndexT body_offset, SizeT body_count) const;
+                            IndexT              body_offset = 0,
+                            SizeT               body_count  = ~0ull) const;
+
+    /**
+     * @brief Copy velocity data (Matrix4x4) for the specified body range into an externally-owned buffer.
+     *
+     * @param buffer_view The destination buffer view to copy velocity data into.
+     * @param body_offset The starting body index in affine body system.
+     * @param body_count The number of bodies to include, if body_count == ~0ull, all bodies from body_offset to the end will be included.
+     */
     void copy_velocity_to(backend::BufferView buffer_view,
-                          IndexT body_offset, SizeT body_count) const;
+                           IndexT              body_offset = 0,
+                           SizeT               body_count  = ~0ull) const;
 
   private:
     virtual std::string_view                   get_name() const override;

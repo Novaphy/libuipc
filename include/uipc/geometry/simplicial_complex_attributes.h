@@ -3,7 +3,6 @@
 #include <uipc/geometry/attribute_collection.h>
 #include <uipc/common/json.h>
 #include <uipc/geometry/attribute_friend.h>
-#include <utility>
 namespace uipc::geometry
 {
 template <bool IsConst, IndexT N>
@@ -43,19 +42,13 @@ class SimplicialComplexAttributes
 	 * @return Topo 
 	 */
     [[nodiscard]] AttributeSlot<TopoValueT>& topo()
+        requires(!IsConst && N > 0)
     {
-        if constexpr(IsConst)
-        {
-            return const_cast<AttributeSlot<TopoValueT>&>(
-                *std::as_const(m_attributes).template find<TopoValueT>("topo"));
-        }
-        else
-        {
-            return *m_attributes.template find<TopoValueT>("topo");
-        }
+        return *m_attributes.template find<TopoValueT>("topo");
     }
 
     [[nodiscard]] const AttributeSlot<TopoValueT>& topo() const
+        requires(N > 0)
     {
         return *m_attributes.template find<TopoValueT>("topo");
     }

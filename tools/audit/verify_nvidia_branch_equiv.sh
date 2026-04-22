@@ -2,6 +2,9 @@
 #
 # verify_nvidia_branch_equiv.sh
 # ----------------------------
+# baseline: libuipc-origin/libuipc/ snapshot taken 2026-04-22 (rebase-2026-04-22.md).
+#           Override REF_DIR env to diff against any other reference tree.
+#
 # For every modified .cu / .h / .hpp / .cpp / .inl file under src/ in the
 # libuipc fork that we have intentionally branch-gated for Corex, extract the
 # "NVIDIA branch" view (UIPC_COREX_CUDA10_COMPAT undefined) and diff it against
@@ -20,7 +23,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-REF_DIR="/root/src"
+REF_DIR="${REF_DIR:-/root/src}"
 EXTRACT="${ROOT_DIR}/tools/audit/extract_nvidia_branch.py"
 
 if [ ! -d "${REF_DIR}" ]; then

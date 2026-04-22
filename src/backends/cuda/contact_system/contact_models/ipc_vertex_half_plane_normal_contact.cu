@@ -22,12 +22,10 @@ class IPCVertexHalfPlaneNormalContact final : public VertexHalfPlaneNormalContac
     {
         using namespace muda;
 
-        auto PH_count = info.PHs().size();
-        if(PH_count > 0) Launch((PH_count + 255) / 256, 256)
+        ParallelFor()
             .file_line(__FILE__, __LINE__)
-            .apply(
-                   [PH_count,
-                    Es  = info.energies().viewer().name("Es"),
+            .apply(info.PHs().size(),
+                   [Es  = info.energies().viewer().name("Es"),
                     PHs = info.PHs().viewer().name("PHs"),
                     plane_positions = half_plane->positions().viewer().name("plane_positions"),
                     plane_normals = half_plane->normals().viewer().name("plane_normals"),
@@ -39,10 +37,8 @@ class IPCVertexHalfPlaneNormalContact final : public VertexHalfPlaneNormalContac
                     eps_v                    = info.eps_velocity(),
                     half_plane_vertex_offset = info.half_plane_vertex_offset(),
                     d_hats = info.d_hats().viewer().name("d_hats"),
-                    dt     = info.dt()] __device__() mutable
+                    dt     = info.dt()] __device__(int I) mutable
                    {
-                       int I = blockIdx.x * blockDim.x + threadIdx.x;
-                       if(I >= PH_count) return;
                        Vector2i PH = PHs(I);
 
                        IndexT vI = PH(0);
@@ -71,12 +67,10 @@ class IPCVertexHalfPlaneNormalContact final : public VertexHalfPlaneNormalContac
 
         if(info.PHs().size())
         {
-            auto PH_N = info.PHs().size();
-            Launch((PH_N + 255) / 256, 256)
+            ParallelFor()
                 .file_line(__FILE__, __LINE__)
-                .apply(
-                       [PH_N,
-                        gradient_only = info.gradient_only(),
+                .apply(info.PHs().size(),
+                       [gradient_only = info.gradient_only(),
                         Grad = info.gradients().viewer().name("Grad"),
                         Hess = info.hessians().viewer().name("Hess"),
                         PHs  = info.PHs().viewer().name("PHs"),
@@ -89,10 +83,8 @@ class IPCVertexHalfPlaneNormalContact final : public VertexHalfPlaneNormalContac
                         eps_v  = info.eps_velocity(),
                         d_hats = info.d_hats().viewer().name("d_hats"),
                         half_plane_vertex_offset = info.half_plane_vertex_offset(),
-                        dt = info.dt()] __device__() mutable
+                        dt = info.dt()] __device__(int I) mutable
                        {
-                           int I = blockIdx.x * blockDim.x + threadIdx.x;
-                           if(I >= PH_N) return;
                            Vector2i PH = PHs(I);
 
                            IndexT vI = PH(0);

@@ -2,6 +2,12 @@
 
 namespace uipc::backend::cuda
 {
+span<const InterAffineBodyConstitution::InterGeoInfo> InterAffineBodyConstitution::inter_geo_info() const noexcept
+{
+    auto [offset, count] = m_manager->m_impl.constitution_geo_info_offsets_counts[m_index];
+    return span{m_manager->m_impl.constitution_inter_geo_infos}.subspan(offset, count);
+}
+
 void InterAffineBodyConstitution::do_build()
 {
     auto all_uids = world().scene().constitution_tabular().uids();

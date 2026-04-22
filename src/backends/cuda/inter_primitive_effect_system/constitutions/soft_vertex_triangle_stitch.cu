@@ -45,7 +45,6 @@ class SoftVertexTriangleStitch : public InterPrimitiveConstitution
         list<Float>     lambda_buffer;
         list<Matrix3x3> Dm_inv_buffer;
         list<Float>     rest_volume_buffer;
-
         auto geo_slots    = world().scene().geometries();
         using ForEachInfo = InterPrimitiveConstitutionManager::ForEachInfo;
         info.for_each(
@@ -64,15 +63,6 @@ class SoftVertexTriangleStitch : public InterPrimitiveConstitution
                 Vector2i ids         = geo_ids->view()[0];
                 auto     l_slot      = info.geo_slot(ids[0]);
                 auto     r_slot      = info.geo_slot(ids[1]);
-                auto     l_rest_slot = info.rest_geo_slot(ids[0]);
-                auto     r_rest_slot = info.rest_geo_slot(ids[1]);
-                UIPC_ASSERT(l_rest_slot,
-                            "SoftVertexTriangleStitch requires rest geometry for slot id {}",
-                            ids[0]);
-                UIPC_ASSERT(r_rest_slot,
-                            "SoftVertexTriangleStitch requires rest geometry for slot id {}",
-                            ids[1]);
-
                 auto l_geo = l_slot->geometry().as<geometry::SimplicialComplex>();
                 UIPC_ASSERT(l_geo,
                             "SoftVertexTriangleStitch requires simplicial complex geometry, but got {} ({})",
@@ -83,17 +73,6 @@ class SoftVertexTriangleStitch : public InterPrimitiveConstitution
                             "SoftVertexTriangleStitch requires simplicial complex geometry, but got {} ({})",
                             r_slot->geometry().type(),
                             r_slot->id());
-                auto l_rest_geo =
-                    l_rest_slot->geometry().as<geometry::SimplicialComplex>();
-                UIPC_ASSERT(l_rest_geo,
-                            "SoftVertexTriangleStitch requires rest simplicial complex for id {}",
-                            ids[0]);
-                auto r_rest_geo =
-                    r_rest_slot->geometry().as<geometry::SimplicialComplex>();
-                UIPC_ASSERT(r_rest_geo,
-                            "SoftVertexTriangleStitch requires rest simplicial complex for id {}",
-                            ids[1]);
-
                 auto l_offset = l_geo->meta().find<IndexT>(builtin::global_vertex_offset);
                 UIPC_ASSERT(l_offset,
                             "SoftVertexTriangleStitch requires attribute `global_vertex_offset` on meta() of geometry {} ({})",
@@ -107,11 +86,11 @@ class SoftVertexTriangleStitch : public InterPrimitiveConstitution
                             r_slot->id());
                 IndexT r_offset_v = r_offset->view()[0];
 
-                auto rest0_pos = l_rest_geo->positions().view();
-                auto rest1_pos = r_rest_geo->positions().view();
+                auto aim0_pos = l_geo->positions().view();
+                auto aim1_pos = r_geo->positions().view();
 
-                Transform l_transform(l_rest_geo->transforms().view()[0]);
-                Transform r_transform(r_rest_geo->transforms().view()[0]);
+                Transform l_transform(l_geo->transforms().view()[0]);
+                Transform r_transform(r_geo->transforms().view()[0]);
 
                 auto min_sep_slot = geo.instances().find<Float>("min_separate_distance");
                 UIPC_ASSERT(min_sep_slot, "SoftVertexTriangleStitch requires per-instance attribute `min_separate_distance`");
@@ -126,10 +105,10 @@ class SoftVertexTriangleStitch : public InterPrimitiveConstitution
                 {
                     const Vector4i& t = topo_view[i];
                     IndexT  v_id = t(0), tri0 = t(1), tri1 = t(2), tri2 = t(3);
-                    Vector3 x0 = l_transform * rest0_pos[v_id];
-                    Vector3 x1 = r_transform * rest1_pos[tri0];
-                    Vector3 x2 = r_transform * rest1_pos[tri1];
-                    Vector3 x3 = r_transform * rest1_pos[tri2];
+                    Vector3 x0 = l_transform * aim0_pos[v_id];
+                    Vector3 x1 = r_transform * aim1_pos[tri0];
+                    Vector3 x2 = r_transform * aim1_pos[tri1];
+                    Vector3 x3 = r_transform * aim1_pos[tri2];
 
                     Float   d  = min_sep_view[i];
                     Vector3 e1 = x2 - x1, e2 = x3 - x1;
@@ -145,6 +124,7 @@ class SoftVertexTriangleStitch : public InterPrimitiveConstitution
                     normal /= nrm;
 
                     Float signed_dist = normal.dot(x0 - x1);
+
                     if(std::abs(signed_dist) < d)
                     {
                         Float sign = (signed_dist >= 0) ? 1.0 : -1.0;
@@ -155,16 +135,28 @@ class SoftVertexTriangleStitch : public InterPrimitiveConstitution
                     Dm.col(0)      = x1 - x0;
                     Dm.col(1)      = x2 - x0;
                     Dm.col(2)      = x3 - x0;
-                    Float rest_vol = (1.0 / 6.0) * std::abs(Dm.determinant());
 
-                    topo_buffer.push_back(Vector4i{t(0) + l_offset_v,
-                                                   t(1) + r_offset_v,
-                                                   t(2) + r_offset_v,
-                                                   t(3) + r_offset_v});
+                    Float det = Dm.determinant();
+                    if(det < 0)
+                    {
+                        std::swap(x1, x2);
+                        std::swap(tri0, tri1);
+                        Dm.col(0) = x1 - x0;
+                        Dm.col(1) = x2 - x0;
+                        det = -det;
+                    }
+                    
+                    Float rest_vol = (1.0 / 6.0) * det;
+
+                    topo_buffer.push_back(Vector4i{v_id + l_offset_v,
+                                                   tri0 + r_offset_v,
+                                                   tri1 + r_offset_v,
+                                                   tri2 + r_offset_v});
                     mu_buffer.push_back(mu_view[i]);
                     lambda_buffer.push_back(lambda_view[i]);
                     Dm_inv_buffer.push_back(Dm.inverse());
                     rest_volume_buffer.push_back(rest_vol);
+
                 }
             });
 
@@ -179,6 +171,7 @@ class SoftVertexTriangleStitch : public InterPrimitiveConstitution
         lambdas.copy_from(h_lambdas);
         Dm_invs.copy_from(h_Dm_invs);
         rest_volumes.copy_from(h_rest_volumes);
+
     }
 
     void do_report_energy_extent(EnergyExtentInfo& info) override
@@ -235,87 +228,54 @@ class SoftVertexTriangleStitch : public InterPrimitiveConstitution
         using namespace muda;
         namespace SVTS = sym::soft_vertex_triangle_stitch;
 
-        const int       n         = static_cast<int>(topos.size());
-        const Vector4i* ptopos    = topos.data();
-        const Vector3*  pxs       = info.positions().data();
-        const Float*    pmus      = mus.data();
-        const Float*    plambdas  = lambdas.data();
-        const Matrix3x3* pDm      = Dm_invs.data();
-        const Float*    prest_vol = rest_volumes.data();
-        const Float     dt        = info.dt();
-        const int       grad_only = info.gradient_only() ? 1 : 0;
+        gradients = info.gradients();
+        hessians  = info.hessians();
 
         ParallelFor()
             .file_line(__FILE__, __LINE__)
-            .apply(n,
-                   [ptopos,
-                    pxs,
-                    pmus,
-                    plambdas,
-                    pDm,
-                    prest_vol,
-                    dt,
-                    grad_only,
-                    G3s   = info.gradients().viewer().name("gradients"),
-                    H3x3s = info.hessians().viewer().name("hessians")] __device__(int I) mutable
+            .apply(topos.size(),
+                   [topos         = topos.cviewer().name("topos"),
+                    xs            = info.positions().cviewer().name("xs"),
+                    mus           = mus.cviewer().name("mus"),
+                    lambdas       = lambdas.cviewer().name("lambdas"),
+                    Dm_invs       = Dm_invs.cviewer().name("Dm_invs"),
+                    rest_vols     = rest_volumes.cviewer().name("rest_volumes"),
+                    G3s           = info.gradients().viewer().name("Gs"),
+                    H3x3s         = info.hessians().viewer().name("H3x3s"),
+                    dt            = info.dt(),
+                    gradient_only = info.gradient_only()] __device__(int I)
                    {
-                       const Vector4i& tet = ptopos[I];
-                       Vector3         x0  = pxs[tet(0)];
-                       Vector3         x1  = pxs[tet(1)];
-                       Vector3         x2  = pxs[tet(2)];
-                       Vector3         x3  = pxs[tet(3)];
+                       const Vector4i& tet = topos(I);
+                       Vector3         x0  = xs(tet(0));
+                       Vector3         x1  = xs(tet(1));
+                       Vector3         x2  = xs(tet(2));
+                       Vector3         x3  = xs(tet(3));
 
-                       Matrix3x3 F    = fem::F(x0, x1, x2, x3, pDm[I]);
+                       Matrix3x3 F    = fem::F(x0, x1, x2, x3, Dm_invs(I));
                        Vector9   VecF = flatten(F);
 
-                       Float Vdt2 = prest_vol[I] * dt * dt;
+                       Float Vdt2 = rest_vols(I) * dt * dt;
 
                        Vector9 dEdVecF;
-                       SVTS::dEdVecF(dEdVecF, pmus[I], plambdas[I], VecF);
+                       SVTS::dEdVecF(dEdVecF, mus(I), lambdas(I), VecF);
                        dEdVecF *= Vdt2;
 
-                       Matrix9x12 dFdx = fem::dFdx(pDm[I]);
-                       Vector12   G;
-                       for(int r = 0; r < 12; ++r)
-                       {
-                           Float s = 0;
-                           for(int k = 0; k < 9; ++k)
-                               s += dFdx(k, r) * dEdVecF(k);
-                           G(r) = s;
-                       }
+                       Matrix9x12 dFdx = fem::dFdx(Dm_invs(I));
+                       Vector12   G    = dFdx.transpose() * dEdVecF;
 
                        DoubletVectorAssembler VA{G3s};
-                       VA.template segment<4>(I * 4).write(tet, G);
+                       VA.segment<StencilSize>(I * StencilSize).write(tet, G);
 
-                       if(grad_only)
+                       if(gradient_only)
                            return;
 
                        Matrix9x9 ddEddVecF;
-                       SVTS::ddEddVecF(ddEddVecF, pmus[I], plambdas[I], VecF);
+                       SVTS::ddEddVecF(ddEddVecF, mus(I), lambdas(I), VecF);
                        ddEddVecF *= Vdt2;
                        make_spd(ddEddVecF);
-
-                       Matrix9x12 T_mid;
-                       for(int r = 0; r < 9; ++r)
-                           for(int c = 0; c < 12; ++c)
-                           {
-                               Float s = 0;
-                               for(int k = 0; k < 9; ++k)
-                                   s += ddEddVecF(r, k) * dFdx(k, c);
-                               T_mid(r, c) = s;
-                           }
-
-                       Matrix12x12 H;
-                       for(int i = 0; i < 12; ++i)
-                           for(int j = 0; j < 12; ++j)
-                           {
-                               Float s = 0;
-                               for(int k = 0; k < 9; ++k)
-                                   s += dFdx(k, i) * T_mid(k, j);
-                               H(i, j) = s;
-                           }
+                       Matrix12x12 H = dFdx.transpose() * ddEddVecF * dFdx;
                        TripletMatrixAssembler MA{H3x3s};
-                       MA.template half_block<4>(I * 10).write(tet, H);
+                       MA.half_block<StencilSize>(I * HalfHessianSize).write(tet, H);
                    });
     }
 };

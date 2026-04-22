@@ -8,12 +8,7 @@ void DeviceVar<T>::ensure_allocated() const
 {
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
     if(!m_data)
-    {
-        // Default-async on Corex 4.4+ (UIPC_COREX_ASYNC_MEMORY=1) so first use
-        // does not block on a synchronous cudaMalloc; falls back to the legacy
-        // sync path automatically when DEFAULT_ASYNC_ALLOC_FREE is false.
-        Memory().alloc(const_cast<T**>(&m_data), sizeof(T));
-    }
+        Memory().alloc(const_cast<T**>(&m_data), sizeof(T), false);
 #endif
 }
 
@@ -62,8 +57,7 @@ DeviceVar<T>& DeviceVar<T>::operator=(DeviceVar<T>&& other)
 
     if(m_data)
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-        // Default-async on Corex 4.4+; sync on legacy Corex 3.x.
-        Memory().free(m_data);
+        Memory().free(m_data, false);
 #else
         Memory().free(m_data).wait();
 #endif
@@ -131,8 +125,7 @@ DeviceVar<T>::~DeviceVar()
 {
     if(m_data)
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-        // Default-async on Corex 4.4+; sync on legacy Corex 3.x.
-        Memory().free(m_data);
+        Memory().free(m_data, false);
 #else
         Memory().free(m_data).wait();
 #endif

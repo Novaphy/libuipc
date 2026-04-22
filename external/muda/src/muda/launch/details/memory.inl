@@ -16,28 +16,6 @@ MUDA_HOST Memory& Memory::alloc_1d(T** ptr, size_t byte_size, bool async)
         return *this;
     }
 
-#if defined(UIPC_COREX_ASYNC_MEMORY) && UIPC_COREX_ASYNC_MEMORY
-    // Iluvatar Corex 4.4+: native cudaMallocAsync available. Use it for the
-    // hot path, fall back to a single sync cudaMalloc only when the async
-    // pool rejects the request (e.g. very small or very large byte sizes
-    // pre-pool-warmup). The legacy cudaMallocPitch / cudaMalloc3D fallback
-    // chain was a Corex 3.x quirk and is no longer needed on 4.4+.
-    if(async)
-    {
-        auto alloc_err = cudaMallocAsync(reinterpret_cast<void**>(ptr), byte_size, stream());
-        if(alloc_err == cudaSuccess)
-            return *this;
-        std::fprintf(stderr,
-                     "[corex_alloc] cudaMallocAsync(%zu) failed: %s, retrying cudaMalloc\n",
-                     byte_size,
-                     cudaGetErrorString(alloc_err));
-        std::fflush(stderr);
-        (void)cudaGetLastError();
-    }
-    checkCudaErrors(cudaMalloc(reinterpret_cast<void**>(ptr), byte_size));
-    return *this;
-#else
-    // Legacy Corex 3.x path: cudaMalloc + multi-step fallback.
     auto alloc_err = cudaMalloc(reinterpret_cast<void**>(ptr), byte_size);
     if(alloc_err != cudaSuccess)
     {
@@ -77,7 +55,6 @@ MUDA_HOST Memory& Memory::alloc_1d(T** ptr, size_t byte_size, bool async)
         checkCudaErrors(alloc_err);
     }
     return *this;
-#endif
 #else
 #ifdef MUDA_WITH_ASYNC_MEMORY_ALLOC_FREE
     if(async)

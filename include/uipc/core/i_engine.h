@@ -3,11 +3,10 @@
 #include <uipc/backend/visitors/world_visitor.h>
 #include <uipc/core/engine_status.h>
 #include <uipc/core/feature_collection.h>
-#include <uipc/core/i_sanity_checker.h>
-
 namespace uipc::core
 {
 class World;
+class ISanityCheckerCollection;
 
 class UIPC_CORE_API IEngine
 {
@@ -25,13 +24,6 @@ class UIPC_CORE_API IEngine
     EngineStatusCollection&  status();
     const FeatureCollection& features() const;
 
-    /**
-     * @brief Insert backend-specific sanity checkers into @p collection.
-     *
-     * Engines that ship their own sanity checkers (e.g. the cuda backend)
-     * override do_insert_sanity_checkers(); the default implementation is
-     * a no-op so backends without sanity checkers don't need to override.
-     */
     void insert_sanity_checkers(ISanityCheckerCollection& collection);
 
   protected:

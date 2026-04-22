@@ -4,9 +4,6 @@
 #include <backends/common/module.h>
 #include <filesystem>
 #include <fstream>
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-#include <cstdio>
-#endif
 #include <uipc/backend/engine_create_info.h>
 #include <backends/common/backend_path_tool.h>
 
@@ -15,7 +12,6 @@ namespace uipc::backend
 SimEngine::SimEngine(EngineCreateInfo* info)
     : m_workspace(info->workspace)
 {
-    logger::info("[backend] SimEngine base ctor enter, workspace={}", m_workspace);
 }
 
 Json SimEngine::do_to_json() const
@@ -35,26 +31,9 @@ WorldVisitor& SimEngine::world() noexcept
 void SimEngine::build_systems()
 {
     auto& funcs = SimSystemAutoRegister::creators().entries;
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    std::size_t corex_creator_i = 0;
-#endif
     for(auto& f : funcs)
     {
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-        std::fprintf(stderr,
-                     "[corex_demo] SimEngine: SimSystem creator #%zu calling...\n",
-                     corex_creator_i);
-        std::fflush(stderr);
-#endif
         auto uptr = f(*this);
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-        std::fprintf(stderr,
-                     "[corex_demo] SimEngine: SimSystem creator #%zu done (ptr=%p)\n",
-                     corex_creator_i,
-                     static_cast<void*>(uptr.get()));
-        std::fflush(stderr);
-        ++corex_creator_i;
-#endif
         if(uptr)
             m_system_collection.create(std::move(uptr));
     }
