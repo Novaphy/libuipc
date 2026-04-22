@@ -26,9 +26,54 @@ REGISTER_CONSTITUTION_UIDS()
     return uids;
 }
 
+// ---------------------------------------------------------------------------
+// AffineBodyMaterial / AffineBodyConstitution::create_material
+//
+// The header `include/uipc/constitution/affine_body_constitution.h` declares
+// (and exports via UIPC_CONSTITUTION_API):
+//     AffineBodyMaterial AffineBodyConstitution::create_material(Float) const noexcept;
+//     void               AffineBodyMaterial::apply_to(SimplicialComplex&) const;
+//     AffineBodyMaterial::AffineBodyMaterial(const AffineBodyConstitution&,
+//                                            Float, Float = 1e3) noexcept;  // private friend
+// They are part of libuipc's stable public API and are used by upstream
+// tests (apps/tests/core/{constitution,object}.cpp) and downstream code
+// alike. The corex-port refactor introduced a richer
+// `create_abd_attributes(...)` codepath but inadvertently dropped these
+// thin wrappers from the .cpp, leaving the header declarations as
+// dangling exports. Restore them so that:
+//   - uipc_constitution.{so,dll,dylib} actually exports the symbols its
+//     public header promises;
+//   - apps/tests/core/{constitution,object}.cpp link cleanly on the
+//     NVIDIA path (they are built whenever UIPC_BUILD_TESTS=ON; the
+//     corex-only filter in apps/tests/core/CMakeLists.txt is no longer
+//     needed and is dropped in the same commit);
+//   - the existing 3-arg AffineBodyConstitution::apply_to(sc, kappa,
+//     mass_density) is the single source of truth; AffineBodyMaterial
+//     remains a stateful "pre-bound (kappa, mass_density)" wrapper that
+//     forwards to it.
+// ---------------------------------------------------------------------------
+AffineBodyMaterial::AffineBodyMaterial(const AffineBodyConstitution& ab,
+                                       Float                         kappa,
+                                       Float mass_density) noexcept
+    : m_constitution(ab)
+    , m_kappa(kappa)
+    , m_mass_density(mass_density)
+{
+}
+
+void AffineBodyMaterial::apply_to(geometry::SimplicialComplex& sc) const
+{
+    m_constitution.apply_to(sc, m_kappa, m_mass_density);
+}
+
 AffineBodyConstitution::AffineBodyConstitution(const Json& config) noexcept
     : m_config(config)
 {
+}
+
+AffineBodyMaterial AffineBodyConstitution::create_material(Float kappa) const noexcept
+{
+    return AffineBodyMaterial{*this, kappa};
 }
 
 U64 AffineBodyConstitution::get_uid() const noexcept
