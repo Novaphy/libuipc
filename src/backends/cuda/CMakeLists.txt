@@ -26,12 +26,30 @@ find_package(CUDAToolkit REQUIRED)
 uipc_add_backend(cuda)
 
 # basic setup
+#
+# NOTE on uipc_io:
+# The sanity-check sources under src/backends/cuda/sanity_check/* (compiled
+# only on the NVIDIA path; filtered out on Corex by the `_corex.{cu,h,...}`
+# / `/backends/cuda/sanity_check/` rules below) call
+# `uipc::geometry::SimplicialComplexIO::{ctor,write}` to dump debug meshes
+# when a sanity check fails. Those symbols live in `uipc_io.dll` (see
+# src/io/CMakeLists.txt). On Linux the resulting `.so` is allowed to leave
+# undefined references to be resolved at load time, so the missing link
+# edge silently worked. On Windows MSVC every `__imp_*` reference must be
+# satisfied at link time by an explicit import library, so the missing
+# `uipc_io` link edge surfaces as
+#   LNK2019 / LNK1120 unresolved external symbol
+#       __imp_??0SimplicialComplexIO@geometry@uipc@@QEAA@XZ
+#       __imp_?write@SimplicialComplexIO@geometry@uipc@@QEAAX...
+# in uipc_backend_cuda.dll. Add the dependency explicitly so both
+# platforms link cleanly.
 target_link_libraries(cuda PUBLIC
     muda::muda
     CUDA::cublas
     CUDA::cusparse
     CUDA::cusolver
     uipc_geometry
+    uipc_io
 )
 
 # add CCCL include directory for CUDA 13.0 compatibility
