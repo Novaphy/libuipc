@@ -1,28 +1,62 @@
 #include <global_geometry/global_vertex_manager.h>
 #include <active_set_system/global_active_set_manager.h>
-#include <joint_dof_system/global_joint_dof_manager.h>
 #include <uipc/common/enumerate.h>
 #include <uipc/common/range.h>
 #include <muda/cub/device/device_reduce.h>
 #include <global_geometry/vertex_reporter.h>
 #include <collision_detection/global_trajectory_filter.h>
 #include <sim_engine.h>
+#include <algorithm>
+#include <cstdlib>
+#include <vector>
 
 /*************************************************************************************************
 * Core Implementation
 *************************************************************************************************/
+
 namespace uipc::backend::cuda
 {
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+// CoreX: muda::ParallelFor device lambdas can silently fail; use explicit __global__ kernels.
+// Per-vertex Vector3* matches buffer layout (do not cast to flat double/float*).
+// Ref: docs/Libuipc在国产平台天数Corex环境上的适配移植（3.27～4.3）.md §1.2
+__global__ void kernel_gvm_step_forward(int N, Vector3* pos, const Vector3* safe_pos,
+                                        const Vector3* disp, Float alpha)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    pos[i] = safe_pos[i] + alpha * disp[i];
+}
+
+__global__ void kernel_gvm_setup_ccd(int N, Vector3* pos, Vector3* tmp, Vector3* disp,
+                                     const Vector3* base_pos)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    disp[i] = pos[i] - base_pos[i];
+    tmp[i]  = pos[i];
+    pos[i]  = base_pos[i];
+}
+#endif
+
 REGISTER_SIM_SYSTEM(GlobalVertexManager);
 
 void GlobalVertexManager::do_build()
 {
     auto d_hat = world().scene().config().find<Float>("contact/d_hat");
     m_impl.default_d_hat = d_hat->view()[0];
+#if defined(UIPC_FLOAT_SCALAR)
+    if(const char* env = std::getenv("UIPC_FLOAT_D_HAT_SCALE"))
+    {
+        char* end = nullptr;
+        double factor = std::strtod(env, &end);
+        if(end != env && factor > 0.0)
+            m_impl.default_d_hat *= static_cast<Float>(factor);
+    }
+#endif
 
     m_impl.global_trajectory_filter  = find<GlobalTrajectoryFilter>();
-    m_impl.global_active_set_manager = find<GlobalActiveSetManager>();
-    m_impl.global_joint_dof_manager  = find<GlobalJointDofManager>();
+    m_impl.global_active_set_manager  = find<GlobalActiveSetManager>();
 }
 
 void GlobalVertexManager::Impl::init()
@@ -60,14 +94,49 @@ void GlobalVertexManager::Impl::init()
     positions.resize(total_count);
     rest_positions.resize(total_count);
     safe_positions.resize(total_count);
+
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    // BufferLaunch().fill() silently fails on CoreX, so resize(N,val) leaves
+    // buffers uninitialized.  Use host vectors + cudaMemcpy for reliable init.
+    contact_element_ids.resize(total_count);
+    subscene_element_ids.resize(total_count);
+    thicknesses.resize(total_count);
+    dimensions.resize(total_count);
+    displacements.resize(total_count);
+    displacement_norms.resize(total_count);
+    body_ids.resize(total_count);
+    d_hats.resize(total_count);
+
+    {
+        int N = static_cast<int>(total_count);
+        std::vector<int>     h_cids(N, 0);
+        std::vector<int>     h_sids(N, 0);
+        std::vector<Float>   h_thick(N, 0.0);
+        std::vector<int>     h_dims(N, 3);
+        std::vector<Vector3> h_disp(N, Vector3::Zero());
+        std::vector<Float>   h_dnorms(N, 0.0);
+        std::vector<int>     h_bids(N, -1);
+        std::vector<Float>   h_dhats(N, default_d_hat);
+
+        cudaMemcpy(contact_element_ids.data(),  h_cids.data(),  N * sizeof(int),     cudaMemcpyHostToDevice);
+        cudaMemcpy(subscene_element_ids.data(), h_sids.data(),  N * sizeof(int),     cudaMemcpyHostToDevice);
+        cudaMemcpy(thicknesses.data(),          h_thick.data(), N * sizeof(Float),   cudaMemcpyHostToDevice);
+        cudaMemcpy(dimensions.data(),           h_dims.data(),  N * sizeof(int),     cudaMemcpyHostToDevice);
+        cudaMemcpy(displacements.data(),        h_disp.data(),  N * sizeof(Vector3), cudaMemcpyHostToDevice);
+        cudaMemcpy(displacement_norms.data(),   h_dnorms.data(),N * sizeof(Float),   cudaMemcpyHostToDevice);
+        cudaMemcpy(body_ids.data(),             h_bids.data(),  N * sizeof(int),     cudaMemcpyHostToDevice);
+        cudaMemcpy(d_hats.data(),               h_dhats.data(), N * sizeof(Float),   cudaMemcpyHostToDevice);
+    }
+#else
     contact_element_ids.resize(total_count, 0);
     subscene_element_ids.resize(total_count, 0);
     thicknesses.resize(total_count, 0.0);
-    dimensions.resize(total_count, 3);  // default 3D
+    dimensions.resize(total_count, 3);
     displacements.resize(total_count, Vector3::Zero());
     displacement_norms.resize(total_count, 0.0);
-    body_ids.resize(total_count, -1);  // -1 means no care about body id
-    d_hats.resize(total_count, default_d_hat);  // use default d_hat if not specified
+    body_ids.resize(total_count, -1);
+    d_hats.resize(total_count, default_d_hat);
+#endif
 
     // 4) Create the subviews for each attribute_reporter,
     //    so that each reporter can write to its own subview
@@ -82,8 +151,16 @@ void GlobalVertexManager::Impl::init()
     }
 
     // 5) Initialize previous positions and safe positions
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    prev_positions.resize(total_count);
+    checkCudaErrors(cudaMemcpy(prev_positions.data(), positions.data(),
+                               sizeof(Vector3) * total_count, cudaMemcpyDeviceToDevice));
+    checkCudaErrors(cudaMemcpy(safe_positions.data(), positions.data(),
+                               sizeof(Vector3) * total_count, cudaMemcpyDeviceToDevice));
+#else
     prev_positions = positions;
     safe_positions = positions;
+#endif
 
     // 6) Other initializations
     axis_max_disp = 0.0;
@@ -115,6 +192,14 @@ void GlobalVertexManager::Impl::step_forward(Float alpha)
 {
     using namespace muda;
 
+    int N = static_cast<int>(positions.size());
+    if(N == 0) return;
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    int block = 256;
+    int grid  = (N + block - 1) / block;
+    kernel_gvm_step_forward<<<grid, block>>>(
+        N, positions.data(), safe_positions.data(), displacements.data(), alpha);
+#else
     ParallelFor()
         .file_line(__FILE__, __LINE__)
         .apply(positions.size(),
@@ -123,6 +208,7 @@ void GlobalVertexManager::Impl::step_forward(Float alpha)
                 disp     = displacements.viewer().name("disp"),
                 alpha    = alpha] __device__(int i) mutable
                { pos(i) = safe_pos(i) + alpha * disp(i); });
+#endif
 }
 
 void GlobalVertexManager::Impl::collect_vertex_displacements()
@@ -139,30 +225,48 @@ void GlobalVertexManager::Impl::setup_ccd(muda::CBufferView<Vector3> base_positi
     auto& tmp_pos = safe_positions;
     UIPC_ASSERT(base_positions.size() == positions.size(),
                 "Base positions size not equal to vertex count");
+    int N = static_cast<int>(positions.size());
+    if(N == 0) return;
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    int block = 256;
+    int grid  = (N + block - 1) / block;
+    kernel_gvm_setup_ccd<<<grid, block>>>(N, positions.data(), tmp_pos.data(),
+                                          displacements.data(), base_positions.data());
+#else
     muda::ParallelFor()
         .file_line(__FILE__, __LINE__)
         .apply(positions.size(),
-               [pos     = positions.viewer().name("pos"),
-                tmp_pos = tmp_pos.viewer().name("tmp_pos"),
-                disp    = displacements.viewer().name("disp"),
+               [pos      = positions.viewer().name("pos"),
+                tmp_pos  = tmp_pos.viewer().name("tmp_pos"),
+                disp     = displacements.viewer().name("disp"),
                 base_pos = base_positions.cviewer().name("base_pos")] __device__(int i) mutable
                {
                    disp(i)    = pos(i) - base_pos(i);
                    tmp_pos(i) = pos(i);
                    pos(i)     = base_pos(i);
                });
+#endif
 }
 
 void GlobalVertexManager::Impl::restore_ccd()
 {
-    muda::BufferLaunch().copy<Vector3>(positions.view(),
-                                       std::as_const(safe_positions).view());
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    checkCudaErrors(cudaMemcpy(positions.data(), safe_positions.data(),
+                               sizeof(Vector3) * positions.size(), cudaMemcpyDeviceToDevice));
+#else
+    muda::BufferLaunch().copy<Vector3>(positions.view(), std::as_const(safe_positions).view());
+#endif
 }
 
 void GlobalVertexManager::Impl::overwrite_positions(muda::CBufferView<Vector3> src)
 {
     UIPC_ASSERT(src.size() == positions.size(), "Source size not equal to vertex count");
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    checkCudaErrors(cudaMemcpy(positions.data(), src.data(),
+                               sizeof(Vector3) * positions.size(), cudaMemcpyDeviceToDevice));
+#else
     muda::BufferLaunch().copy<Vector3>(positions.view(), src);
+#endif
 }
 
 void GlobalVertexManager::VertexAttributeInfo::require_discard_friction() const noexcept
@@ -181,13 +285,25 @@ void GlobalVertexManager::VertexAttributeInfo::require_discard_friction() const 
 void GlobalVertexManager::Impl::record_prev_positions()
 {
     using namespace muda;
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    checkCudaErrors(cudaMemcpy(prev_positions.data(), positions.data(),
+                               sizeof(Vector3) * positions.size(), cudaMemcpyDeviceToDevice));
+#else
     BufferLaunch().copy<Vector3>(prev_positions.view(), std::as_const(positions).view());
+#endif
 }
 
 void GlobalVertexManager::Impl::record_start_point()
 {
     using namespace muda;
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    checkCudaErrors(cudaMemcpy(safe_positions.data(),
+                               positions.data(),
+                               sizeof(Vector3) * positions.size(),
+                               cudaMemcpyDeviceToDevice));
+#else
     BufferLaunch().copy<Vector3>(safe_positions.view(), std::as_const(positions).view());
+#endif
 }
 
 Float GlobalVertexManager::Impl::compute_axis_max_displacement()
@@ -207,26 +323,29 @@ Float GlobalVertexManager::Impl::compute_axis_max_displacement()
 
 AABB GlobalVertexManager::Impl::compute_vertex_bounding_box()
 {
-    Float max_float = std::numeric_limits<Float>::max();
-    muda::DeviceReduce()
-        .Reduce(
-            positions.data(),
-            min_pos.data(),
-            positions.size(),
-            [] CUB_RUNTIME_FUNCTION(const Vector3& L, const Vector3& R) -> Vector3
-            { return L.cwiseMin(R); },
-            Vector3{max_float, max_float, max_float})
-        .Reduce(
-            positions.data(),
-            max_pos.data(),
-            positions.size(),
-            [] CUB_RUNTIME_FUNCTION(const Vector3& L, const Vector3& R) -> Vector3
-            { return L.cwiseMax(R); },
-            Vector3{-max_float, -max_float, -max_float});
+    auto n = positions.size();
+    if(n == 0)
+    {
+        vertex_bounding_box = AABB{};
+        return vertex_bounding_box;
+    }
 
-    Vector3 min_pos_host, max_pos_host;
-    min_pos_host = min_pos;
-    max_pos_host = max_pos;
+    std::vector<Vector3> h_positions(n);
+    positions.copy_to(h_positions);
+
+    Float max_float = std::numeric_limits<Float>::max();
+    Vector3 min_pos_host{max_float, max_float, max_float};
+    Vector3 max_pos_host{-max_float, -max_float, -max_float};
+
+    for(const auto& p : h_positions)
+    {
+        min_pos_host[0] = std::min(min_pos_host[0], p[0]);
+        min_pos_host[1] = std::min(min_pos_host[1], p[1]);
+        min_pos_host[2] = std::min(min_pos_host[2], p[2]);
+        max_pos_host[0] = std::max(max_pos_host[0], p[0]);
+        max_pos_host[1] = std::max(max_pos_host[1], p[1]);
+        max_pos_host[2] = std::max(max_pos_host[2], p[2]);
+    }
 
     vertex_bounding_box = AABB{min_pos_host.cast<float>(), max_pos_host.cast<float>()};
     return vertex_bounding_box;

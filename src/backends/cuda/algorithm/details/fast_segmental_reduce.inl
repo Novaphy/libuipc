@@ -1,5 +1,8 @@
 #include <cub/warp/warp_reduce.cuh>
 #include <muda/ext/eigen/atomic.h>
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+#include <thrust/device_ptr.h>
+#endif
 
 namespace muda
 {
@@ -27,7 +30,12 @@ FastSegmentalReduce<BlockSize, WarpSize>& FastSegmentalReduce<BlockSize, WarpSiz
     constexpr int block_dim  = BlockSize;
     constexpr int warp_count = block_dim / warp_size;
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    cudaMemsetAsync(thrust::raw_pointer_cast(out.data()), 0,
+                    out.size() * sizeof(ValueT), this->stream());
+#else
     BufferLaunch(this->stream()).fill<ValueT>(out, ValueT{0});
+#endif
 
     int block_count = (size + block_dim - 1) / block_dim;
     Launch(block_count, block_dim, 0, this->stream())
@@ -41,11 +49,12 @@ FastSegmentalReduce<BlockSize, WarpSize>& FastSegmentalReduce<BlockSize, WarpSiz
             {
                 using WarpReduceInt = cub::WarpReduce<int, warp_size>;
                 using WarpReduceT   = cub::WarpReduce<T, warp_size>;
+                constexpr int kWarpCount = warp_count;
 
                 __shared__ union
                 {
-                    typename WarpReduceInt::TempStorage index_storage[warp_count];
-                    typename WarpReduceT::TempStorage t_storage[warp_count];
+                    typename WarpReduceInt::TempStorage index_storage[kWarpCount];
+                    typename WarpReduceT::TempStorage t_storage[kWarpCount];
                 };
 
                 auto global_thread_id   = blockDim.x * blockIdx.x + threadIdx.x;
@@ -156,7 +165,12 @@ FastSegmentalReduce<BlockSize, WarpSize>& FastSegmentalReduce<BlockSize, WarpSiz
     constexpr int block_dim  = BlockSize;
     constexpr int warp_count = block_dim / warp_size;
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    cudaMemsetAsync(thrust::raw_pointer_cast(out.data()), 0,
+                    out.size() * sizeof(Matrix), this->stream());
+#else
     BufferLaunch(this->stream()).fill<Matrix>(out, Matrix::Zero().eval());
+#endif
 
     int block_count = (size + block_dim - 1) / block_dim;
     Launch(block_count, block_dim, 0, this->stream())
@@ -170,11 +184,12 @@ FastSegmentalReduce<BlockSize, WarpSize>& FastSegmentalReduce<BlockSize, WarpSiz
             {
                 using WarpReduceInt = cub::WarpReduce<int, warp_size>;
                 using WarpReduceT   = cub::WarpReduce<T, warp_size>;
+                constexpr int kWarpCount = warp_count;
 
                 __shared__ union
                 {
-                    typename WarpReduceInt::TempStorage index_storage[warp_count];
-                    typename WarpReduceT::TempStorage t_storage[warp_count];
+                    typename WarpReduceInt::TempStorage index_storage[kWarpCount];
+                    typename WarpReduceT::TempStorage t_storage[kWarpCount];
                 };
 
                 auto global_thread_id   = blockDim.x * blockIdx.x + threadIdx.x;

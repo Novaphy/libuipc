@@ -14,8 +14,9 @@ template <typename T, typename... Args>
 U<T> make_unique(Args&&... args)
 {
     std::pmr::polymorphic_allocator<T> alloc;
-    return U<T>(alloc.template new_object<T, Args...>(std::forward<Args>(args)...),
-                PmrDeleter<T>{});
+    T*                               ptr = std::allocator_traits<decltype(alloc)>::allocate(alloc, 1);
+    std::allocator_traits<decltype(alloc)>::construct(alloc, ptr, std::forward<Args>(args)...);
+    return U<T>(ptr, PmrDeleter<T>{});
 }
 
 template <typename DstT, typename SrcT>
@@ -29,7 +30,8 @@ S<T> make_shared(Args&&... args)
 {
     auto resource = std::pmr::get_default_resource();
     std::pmr::polymorphic_allocator<T> alloc{resource};
-    return std::shared_ptr<T>(alloc.template new_object<T, Args...>(std::forward<Args>(args)...),
-                              PmrDeleter<T>{});
+    T* ptr = std::allocator_traits<decltype(alloc)>::allocate(alloc, 1);
+    std::allocator_traits<decltype(alloc)>::construct(alloc, ptr, std::forward<Args>(args)...);
+    return std::shared_ptr<T>(ptr, PmrDeleter<T>{});
 }
 }  // namespace uipc

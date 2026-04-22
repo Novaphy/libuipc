@@ -239,5 +239,4 @@ class ABDJacobiDyadicMass
 };
 }  // namespace uipc::backend::cuda
 
-#include "details/abd_jacobi_matrix.inl"
 #endif

@@ -127,7 +127,7 @@ class ABDLinearSubsystem final : public DiagLinearSubsystem
         // diag hessian for preconditioner
         muda::DeviceBuffer<Matrix12x12> diag_hessian;
         muda::DeviceBuffer<Float>       block_norm;
-        muda::DeviceVar<Float>          reduced_norm;
+        muda::DeviceBuffer<Float>       reduced_norm;
 
         Float dt = 0.0f;  // time step, used in assemble
     };

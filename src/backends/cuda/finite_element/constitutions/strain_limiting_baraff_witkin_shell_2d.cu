@@ -173,38 +173,51 @@ class StrainLimitingBaraffWitkinShell2D final : public Codim2DConstitution
         using namespace muda;
         namespace BWS = sym::strainlimiting_baraff_witkin_shell_2d;
 
+        const int        n            = static_cast<int>(info.indices().size());
+        const Float*     pmus         = mus.data();
+        const Float*     plambdas     = lambdas.data();
+        const Float*     pstrainRates = strain_rates.data();
+        const Vector3i*  pidx         = info.indices().data();
+        const Vector3*   pxs          = info.xs().data();
+        const Float*     pthick       = info.thicknesses().data();
+        const Float*     prest_areas  = info.rest_areas().data();
+        const Float      dt           = info.dt();
+        const Matrix2x2* pIB          = inv_B_matrices.data();
+        const int        grad_only_i  = info.gradient_only() ? 1 : 0;
+        const int        hhs          = static_cast<int>(HalfHessianSize);
+
         ParallelFor()
             .file_line(__FILE__, __LINE__)
-            .apply(info.indices().size(),
-                   [mus         = mus.cviewer().name("mus"),
-                    lambdas     = lambdas.cviewer().name("lambdas"),
-                    strainRates = strain_rates.cviewer().name("strainRates"),
-                    indices     = info.indices().viewer().name("indices"),
-                    xs          = info.xs().viewer().name("xs"),
-                    thicknesses = info.thicknesses().viewer().name("thicknesses"),
-                    G3s        = info.gradients().viewer().name("gradients"),
-                    H3x3s      = info.hessians().viewer().name("hessians"),
-                    rest_areas = info.rest_areas().viewer().name("volumes"),
-                    dt         = info.dt(),
-                    IBs        = inv_B_matrices.cviewer().name("IBs"),
-                    half_hessian_size = HalfHessianSize,
-                    gradient_only = info.gradient_only()] __device__(int I) mutable
+            .apply(n,
+                   [pmus,
+                    plambdas,
+                    pstrainRates,
+                    pidx,
+                    pxs,
+                    pthick,
+                    prest_areas,
+                    dt,
+                    pIB,
+                    grad_only_i,
+                    hhs,
+                    G3s = info.gradients().viewer().name("gradients"),
+                    H3s = info.hessians().viewer().name("hessians")] __device__(int I) mutable
                    {
                        Vector9  X;
-                       Vector3i idx = indices(I);
+                       Vector3i idx = pidx[I];
                        for(int i = 0; i < 3; ++i)
-                           X.segment<3>(3 * i) = xs(idx(i));
+                           X.segment<3>(3 * i) = pxs[idx(i)];
 
-                       const Matrix2x2& IB = IBs(I);
+                       const Matrix2x2& IB = pIB[I];
 
-                       Float lambda      = lambdas(I);
-                       Float mu          = mus(I);
-                       Float strain_rate = strainRates(I);
-                       Float rest_area   = rest_areas(I);
+                       Float lambda      = plambdas[I];
+                       Float mu          = pmus[I];
+                       Float strain_rate = pstrainRates[I];
+                       Float rest_area   = prest_areas[I];
 
-                       Float thickness = triangle_thickness(thicknesses(idx(0)),
-                                                            thicknesses(idx(1)),
-                                                            thicknesses(idx(2)));
+                       Float thickness = triangle_thickness(pthick[idx(0)],
+                                                            pthick[idx(1)],
+                                                            pthick[idx(2)]);
 
                        Matrix<Float, 3, 2> Ds =
                            BWS::Ds3x2(X.segment<3>(0), X.segment<3>(3), X.segment<3>(6));
@@ -213,7 +226,7 @@ class StrainLimitingBaraffWitkinShell2D final : public Codim2DConstitution
                        Vector2 anisotropic_a = Vector2(1, 0);
                        Vector2 anisotropic_b = Vector2(0, 1);
 
-                       auto dFdx = BWS::dFdX(IB);
+                       Matrix<Float, 6, 9> dFdx = BWS::dFdX(IB);
 
                        Float V = 2 * rest_area * thickness;
 
@@ -222,15 +235,24 @@ class StrainLimitingBaraffWitkinShell2D final : public Codim2DConstitution
                        Matrix<Float, 3, 2> dEdF;
                        BWS::dEdF(dEdF, F, anisotropic_a, anisotropic_b, lambda, mu, strain_rate);
 
-                       auto VecdEdF = BWS::flatten(dEdF);
+                       Vector6 VecdEdF = BWS::flatten(dEdF);
 
-                       Vector9 G = dFdx.transpose() * VecdEdF;
+                       // Corex: avoid Eigen transpose / chained expr in device lambda
+                       Vector9 G;
+                       for(int r = 0; r < 9; ++r)
+                       {
+                           Float s = 0;
+                           for(int k = 0; k < 6; ++k)
+                               s += dFdx(k, r) * VecdEdF(k);
+                           G(r) = s;
+                       }
 
                        G *= Vdt2;
                        DoubletVectorAssembler DVA{G3s};
-                       DVA.segment<StencilSize>(I * StencilSize).write(idx, G);
+                       // `.template` avoids `<` being parsed as less-than on dependent type
+                       DVA.template segment<3>(I * 3).write(idx, G);
 
-                       if(gradient_only)
+                       if(grad_only_i)
                            return;
 
                        Matrix6x6 ddEddF;
@@ -238,10 +260,28 @@ class StrainLimitingBaraffWitkinShell2D final : public Codim2DConstitution
 
                        ddEddF *= Vdt2;
 
-                       Matrix9x9 H = dFdx.transpose() * ddEddF * dFdx;
+                       Matrix<Float, 6, 9> T1;
+                       for(int r = 0; r < 6; ++r)
+                           for(int c = 0; c < 9; ++c)
+                           {
+                               Float s = 0;
+                               for(int k = 0; k < 6; ++k)
+                                   s += ddEddF(r, k) * dFdx(k, c);
+                               T1(r, c) = s;
+                           }
 
-                       TripletMatrixAssembler TMA{H3x3s};
-                       TMA.half_block<StencilSize>(I * half_hessian_size).write(idx, H);
+                       Matrix9x9 H;
+                       for(int i = 0; i < 9; ++i)
+                           for(int j = 0; j < 9; ++j)
+                           {
+                               Float s = 0;
+                               for(int k = 0; k < 6; ++k)
+                                   s += dFdx(k, i) * T1(k, j);
+                               H(i, j) = s;
+                           }
+
+                       TripletMatrixAssembler TMA{H3s};
+                       TMA.template half_block<3>(I * hhs).write(idx, H);
                    });
     }
 };

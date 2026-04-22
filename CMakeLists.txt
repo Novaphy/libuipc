@@ -49,6 +49,11 @@ option(UIPC_MUDA_USE_COREX "Enable Corex-specific CUDA build compatibility mode"
 set(UIPC_COREX_CUDA_STANDARD "20" CACHE STRING "CUDA C++ standard used when UIPC_MUDA_USE_COREX=ON (20 required for std::span/ranges in headers)")
 set(UIPC_COREX_CUDA_ARCHITECTURES "ivcore11" CACHE STRING "CUDA architectures used when UIPC_MUDA_USE_COREX=ON")
 set(UIPC_COREX_CUDA_COMPILER "" CACHE FILEPATH "Path to Corex CUDA compiler (optional)")
+# Iluvatar Corex 4.4 ships cudaMallocAsync / cudaFreeAsync (verified at runtime on
+# Iluvatar MR-V100). Enable the async-memory path under the Corex compat branch
+# instead of falling back to synchronous cudaMalloc + multi-step fallbacks.
+# Set to OFF to restore the legacy synchronous path used on Corex 3.x / pre-4.4.
+option(UIPC_COREX_USE_ASYNC_MEMORY "Use cudaMallocAsync/cudaFreeAsync on Corex (>= 4.4)" ON)
 
 if(UIPC_MUDA_USE_COREX)
     if(UIPC_COREX_CUDA_ARCHITECTURES)
@@ -67,6 +72,12 @@ if(UIPC_MUDA_USE_COREX)
     # GCC10 + oneTBB on this environment may fail with PSTL's legacy tbb::task backend.
     # Force serial PSTL backend for build-only compatibility.
     add_compile_definitions(_PSTL_PAR_BACKEND_SERIAL=1 _GLIBCXX_USE_TBB_PAR_BACKEND=0)
+
+    # Project-wide Corex compatibility macro. ALL targets must see this consistently
+    # because shared headers in include/ have #if defined(UIPC_COREX_CUDA10_COMPAT)
+    # ABI switches; mismatched definitions across targets would cause silent ODR
+    # violations and link errors.
+    add_compile_definitions(UIPC_COREX_CUDA10_COMPAT)
 endif()
 
 # Propagate UIPC_CUDA_ARCHITECTURES to CMake's CUDA variable so generators (VS, etc.)

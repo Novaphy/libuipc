@@ -15,7 +15,7 @@ void AffineBodyRod::apply_to(geometry::SimplicialComplex& sc,
                              Float                        mass_density,
                              Float                        thickness) const
 {
-    UIPC_ASSERT_THROW(sc.dim() == 1,
+    UIPC_ASSERT(sc.dim() == 1,
                 "AffineBodyRod requires a 1D simplicial complex (edge mesh), got dim={}.",
                 sc.dim());
 
@@ -25,7 +25,7 @@ void AffineBodyRod::apply_to(geometry::SimplicialComplex& sc,
     Vector3 m_x_bar;
     Matrix3x3 m_x_bar_x_bar;
     geometry::affine_body::compute_dyadic_mass(sc, mass_density, thickness, m, m_x_bar, m_x_bar_x_bar);
-    create_attributes(sc, kappa, mass_density, volume, m, m_x_bar, m_x_bar_x_bar);
+    create_abd_attributes(sc, kappa, mass_density, volume, m, m_x_bar, m_x_bar_x_bar);
 
     auto is_codim = sc.meta().find<IndexT>(builtin::is_codim);
     if(!is_codim)
@@ -35,7 +35,7 @@ void AffineBodyRod::apply_to(geometry::SimplicialComplex& sc,
 
     auto attr_thickness = sc.vertices().find<Float>(builtin::thickness);
     if(!attr_thickness)
-        attr_thickness = sc.vertices().create<Float>(builtin::thickness, 0.0);
+        attr_thickness = sc.vertices().create<Float>(builtin::thickness, thickness);
     auto thickness_view = geometry::view(*attr_thickness);
     std::ranges::fill(thickness_view, thickness);
 }

@@ -34,7 +34,7 @@ template <typename T>
 class DenseVectorAssembler
 {
   public:
-    MUDA_GENERIC DenseVectorAssembler(const muda::DenseVectorViewer<T>& dense)
+    MUDA_HOST MUDA_DEVICE DenseVectorAssembler(const muda::DenseVectorViewer<T>& dense)
         : m_dense(dense)
     {
     }
@@ -94,7 +94,7 @@ class DoubletVectorAssembler
   public:
     using ElementVector = Eigen::Matrix<T, SegmentDim, 1>;
 
-    MUDA_GENERIC DoubletVectorAssembler(const muda::DoubletVectorViewer<T, SegmentDim>& doublet)
+    MUDA_HOST MUDA_DEVICE DoubletVectorAssembler(const muda::DoubletVectorViewer<T, SegmentDim>& doublet)
         : m_doublet(doublet)
     {
     }
@@ -106,7 +106,7 @@ class DoubletVectorAssembler
       public:
         using SegmentVector = Eigen::Vector<T, N * SegmentDim>;
 
-        MUDA_GENERIC ProxyRange(DoubletVectorAssembler& assembler, IndexT I)
+        MUDA_HOST MUDA_DEVICE ProxyRange(DoubletVectorAssembler& assembler, IndexT I)
             : m_assembler(assembler)
             , m_I(I)
         {
@@ -119,8 +119,8 @@ class DoubletVectorAssembler
                         m_assembler.m_doublet.kernel_line());
         }
 
-        MUDA_GENERIC void write(const Eigen::Vector<IndexT, N>& indices,
-                                const SegmentVector&            value)
+        MUDA_HOST MUDA_DEVICE void write(const Eigen::Vector<IndexT, N>& indices,
+                                         const SegmentVector&            value)
             requires(N > 1)
         {
             IndexT offset = m_I;
@@ -131,9 +131,9 @@ class DoubletVectorAssembler
             }
         }
 
-        MUDA_GENERIC void write(const Eigen::Vector<IndexT, N>& indices,
-                                const Eigen::Vector<IndexT, N>& ignore,
-                                const SegmentVector&            value)
+        MUDA_HOST MUDA_DEVICE void write(const Eigen::Vector<IndexT, N>& indices,
+                                         const Eigen::Vector<IndexT, N>& ignore,
+                                         const SegmentVector&            value)
             requires(N > 1)
         {
             IndexT offset = m_I;
@@ -146,13 +146,13 @@ class DoubletVectorAssembler
             }
         }
 
-        MUDA_GENERIC void write(IndexT indices, const ElementVector& value)
+        MUDA_HOST MUDA_DEVICE void write(IndexT indices, const ElementVector& value)
             requires(N == 1)
         {
             m_assembler.m_doublet(m_I).write(indices, value);
         }
 
-        MUDA_GENERIC void write(IndexT indices, IndexT ignore, const ElementVector& value)
+        MUDA_HOST MUDA_DEVICE void write(IndexT indices, IndexT ignore, const ElementVector& value)
             requires(N == 1)
         {
             ElementVector G = value;
@@ -171,7 +171,7 @@ class DoubletVectorAssembler
      * @brief Take a range of [I, I + N) from the doublets.
      */
     template <int N>
-    MUDA_GENERIC ProxyRange<N> segment(IndexT I)
+    MUDA_HOST MUDA_DEVICE ProxyRange<N> segment(IndexT I)
     {
         return ProxyRange<N>(*this, I);
     }
@@ -179,7 +179,7 @@ class DoubletVectorAssembler
     /** 
      * @brief Take a range of [I, I + 1) from the doublets.
      */
-    MUDA_GENERIC ProxyRange<1> operator()(IndexT I)
+    MUDA_HOST MUDA_DEVICE ProxyRange<1> operator()(IndexT I)
     {
         return ProxyRange<1>(*this, I);
     }
@@ -201,7 +201,7 @@ class TripletMatrixAssembler
     using ElementMatrix = Eigen::Matrix<T, BlockDim, BlockDim>;
 
 
-    MUDA_GENERIC TripletMatrixAssembler(const muda::TripletMatrixViewer<T, BlockDim>& triplet)
+    MUDA_HOST MUDA_DEVICE TripletMatrixAssembler(const muda::TripletMatrixViewer<T, BlockDim>& triplet)
         : m_triplet(triplet)
     {
     }
@@ -213,7 +213,7 @@ class TripletMatrixAssembler
       public:
         using BlockMatrix = Eigen::Matrix<T, N * BlockDim, N * BlockDim>;
 
-        MUDA_GENERIC ProxyRange(TripletMatrixAssembler& assembler, IndexT I)
+        MUDA_HOST MUDA_DEVICE ProxyRange(TripletMatrixAssembler& assembler, IndexT I)
             : m_assembler(assembler)
             , m_I(I)
         {
@@ -228,9 +228,9 @@ class TripletMatrixAssembler
         }
 
 
-        MUDA_GENERIC void write(const Eigen::Vector<IndexT, N>& l_indices,
-                                const Eigen::Vector<IndexT, N>& r_indices,
-                                const BlockMatrix&              value)
+        MUDA_HOST MUDA_DEVICE void write(const Eigen::Vector<IndexT, N>& l_indices,
+                                         const Eigen::Vector<IndexT, N>& r_indices,
+                                         const BlockMatrix&              value)
             requires(N > 1)
         {
             IndexT offset = m_I;
@@ -246,11 +246,11 @@ class TripletMatrixAssembler
             }
         }
 
-        MUDA_GENERIC void write(const Eigen::Vector<IndexT, N>& l_indices,
-                                const Eigen::Vector<int8_t, N>& l_ignore,
-                                const Eigen::Vector<IndexT, N>& r_indices,
-                                const Eigen::Vector<int8_t, N>& r_ignore,
-                                const BlockMatrix&              value)
+        MUDA_HOST MUDA_DEVICE void write(const Eigen::Vector<IndexT, N>& l_indices,
+                                         const Eigen::Vector<int8_t, N>& l_ignore,
+                                         const Eigen::Vector<IndexT, N>& r_indices,
+                                         const Eigen::Vector<int8_t, N>& r_ignore,
+                                         const BlockMatrix&              value)
             requires(N > 1)
         {
             IndexT offset = m_I;
@@ -272,29 +272,29 @@ class TripletMatrixAssembler
         }
 
 
-        MUDA_GENERIC void write(const Eigen::Vector<IndexT, N>& indices, const BlockMatrix& value)
+        MUDA_HOST MUDA_DEVICE void write(const Eigen::Vector<IndexT, N>& indices, const BlockMatrix& value)
             requires(N > 1)
         {
             write(indices, indices, value);
         }
 
 
-        MUDA_GENERIC void write(const Eigen::Vector<IndexT, N>& indices,
-                                const Eigen::Vector<int8_t, N>  ignore,
-                                const BlockMatrix&              value)
+        MUDA_HOST MUDA_DEVICE void write(const Eigen::Vector<IndexT, N>& indices,
+                                         const Eigen::Vector<int8_t, N>  ignore,
+                                         const BlockMatrix&              value)
             requires(N > 1)
         {
             write(indices, ignore, indices, ignore, value);
         }
 
-        MUDA_GENERIC void write(IndexT indices, const ElementMatrix& value)
+        MUDA_HOST MUDA_DEVICE void write(IndexT indices, const ElementMatrix& value)
             requires(N == 1)
         {
             IndexT offset = m_I;
             m_assembler.m_triplet(offset).write(indices, indices, value);
         }
 
-        MUDA_GENERIC void write(IndexT indices, IndexT ignore, const ElementMatrix& value)
+        MUDA_HOST MUDA_DEVICE void write(IndexT indices, IndexT ignore, const ElementMatrix& value)
             requires(N == 1)
         {
             IndexT        offset = m_I;
@@ -321,7 +321,7 @@ class TripletMatrixAssembler
         };
 
         using BlockMatrix = Eigen::Matrix<T, N * BlockDim, N * BlockDim>;
-        MUDA_GENERIC ProxyRangeHalf(const TripletMatrixAssembler& assembler, IndexT I)
+        MUDA_HOST MUDA_DEVICE ProxyRangeHalf(const TripletMatrixAssembler& assembler, IndexT I)
             : m_assembler(assembler)
             , m_I(I)
         {
@@ -338,7 +338,7 @@ class TripletMatrixAssembler
         /**
          * @brief Only write to the upper triangular part of the global matrix. (not the submatrix)
          */
-        MUDA_GENERIC void write(const Eigen::Vector<IndexT, N>& indices, const BlockMatrix& value)
+        MUDA_HOST MUDA_DEVICE void write(const Eigen::Vector<IndexT, N>& indices, const BlockMatrix& value)
         {
             IndexT offset = m_I;
             for(IndexT ii = 0; ii < N; ++ii)
@@ -359,9 +359,9 @@ class TripletMatrixAssembler
         /**
          * @brief Only write to the upper triangular part of the global matrix. (not the submatrix)
          */
-        MUDA_GENERIC void write(const Eigen::Vector<IndexT, N>& l_indices,
-                                const Eigen::Vector<IndexT, N>& r_indices,
-                                const BlockMatrix&              value)
+        MUDA_HOST MUDA_DEVICE void write(const Eigen::Vector<IndexT, N>& l_indices,
+                                         const Eigen::Vector<IndexT, N>& r_indices,
+                                         const BlockMatrix&              value)
         {
             IndexT offset = m_I;
             for(IndexT ii = 0; ii < N; ++ii)
@@ -384,9 +384,9 @@ class TripletMatrixAssembler
          * 
          * Constraints: if either side is ignored, write zero.
          */
-        MUDA_GENERIC void write(const Eigen::Vector<IndexT, N>& indices,
-                                const Eigen::Vector<int8_t, N>  ignore,
-                                const BlockMatrix&              value)
+        MUDA_HOST MUDA_DEVICE void write(const Eigen::Vector<IndexT, N>& indices,
+                                         const Eigen::Vector<int8_t, N>  ignore,
+                                         const BlockMatrix&              value)
         {
             IndexT offset = m_I;
             for(IndexT ii = 0; ii < N; ++ii)
@@ -410,17 +410,17 @@ class TripletMatrixAssembler
         }
 
       private:
-        MUDA_GENERIC UpperLR upper_LR(const Eigen::Vector<IndexT, N>& indices,
-                                      const IndexT&                   I,
-                                      const IndexT&                   J)
+        MUDA_HOST MUDA_DEVICE UpperLR upper_LR(const Eigen::Vector<IndexT, N>& indices,
+                                               const IndexT&                   I,
+                                               const IndexT&                   J)
         {
             return upper_LR(indices, indices, I, J);
         }
 
-        MUDA_GENERIC UpperLR upper_LR(const Eigen::Vector<IndexT, N>& l_indices,
-                                      const Eigen::Vector<IndexT, N>& r_indices,
-                                      const IndexT&                   I,
-                                      const IndexT&                   J)
+        MUDA_HOST MUDA_DEVICE UpperLR upper_LR(const Eigen::Vector<IndexT, N>& l_indices,
+                                               const Eigen::Vector<IndexT, N>& r_indices,
+                                               const IndexT&                   I,
+                                               const IndexT&                   J)
         {
             auto submatrix_offset = m_assembler.m_triplet.submatrix_offset();
             MUDA_ASSERT(submatrix_offset.x == submatrix_offset.y,
@@ -452,7 +452,7 @@ class TripletMatrixAssembler
      * @brief Take a range of [I, I + N * N) from the triplets.
      */
     template <int M, int N>
-    MUDA_GENERIC ProxyRange<N> block(IndexT I)
+    MUDA_HOST MUDA_DEVICE ProxyRange<N> block(IndexT I)
         requires(M == N)
     {
         return ProxyRange<N>(*this, I);
@@ -462,7 +462,7 @@ class TripletMatrixAssembler
      * @brief Take a range of [I, I + N * (N + 1) / 2) from the triplets.
      */
     template <int N>
-    MUDA_GENERIC ProxyRangeHalf<N> half_block(IndexT I)
+    MUDA_HOST MUDA_DEVICE ProxyRangeHalf<N> half_block(IndexT I)
     {
         return ProxyRangeHalf<N>(*this, I);
     }
@@ -470,7 +470,7 @@ class TripletMatrixAssembler
     /** 
      * @brief Take a range of [I, I + 1) from the triplets.
      */
-    MUDA_GENERIC ProxyRange<1> operator()(IndexT I)
+    MUDA_HOST MUDA_DEVICE ProxyRange<1> operator()(IndexT I)
     {
         return ProxyRange<1>(*this, I);
     }

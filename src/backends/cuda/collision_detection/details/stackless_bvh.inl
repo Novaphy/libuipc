@@ -1,5 +1,9 @@
 #include <cuda_device/builtin.h>
 #include <muda/launch.h>
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+#include <thrust/device_ptr.h>
+#define RAW_PTR(x) thrust::raw_pointer_cast((x).data())
+#endif
 
 namespace uipc::culbvh
 {
@@ -35,7 +39,7 @@ struct PlainAABB
     float3 _min, _max;
 };
 
-MUDA_GENERIC MUDA_INLINE PlainAABB toPlainAABB(const aabb& box)
+MUDA_HOST MUDA_DEVICE MUDA_INLINE PlainAABB toPlainAABB(const aabb& box)
 {
     PlainAABB res;
     res._min = make_float3(box.min().x(), box.min().y(), box.min().z());
@@ -43,7 +47,7 @@ MUDA_GENERIC MUDA_INLINE PlainAABB toPlainAABB(const aabb& box)
     return res;
 }
 
-MUDA_GENERIC MUDA_INLINE aabb fromPlainAABB(const PlainAABB& box)
+MUDA_HOST MUDA_DEVICE MUDA_INLINE aabb fromPlainAABB(const PlainAABB& box)
 {
     aabb aabb;
     aabb.min() = Vector<float, 3>(box._min.x, box._min.y, box._min.z);
@@ -55,7 +59,7 @@ struct intAABB
 {
     int3 _min, _max;
 
-    MUDA_GENERIC MUDA_INLINE void convertFrom(const aabb& other, float3& origin, float3& delta)
+    MUDA_HOST MUDA_DEVICE MUDA_INLINE void convertFrom(const aabb& other, float3& origin, float3& delta)
     {
         _min.x = static_cast<int>((other.min().x() - origin.x) / delta.x);
         _min.y = static_cast<int>((other.min().y() - origin.y) / delta.y);
@@ -67,13 +71,13 @@ struct intAABB
 };
 
 template <typename T>
-MUDA_GENERIC MUDA_INLINE T __mm_min(T a, T b)
+MUDA_HOST MUDA_DEVICE MUDA_INLINE T __mm_min(T a, T b)
 {
     return a > b ? b : a;
 }
 
 template <typename T>
-MUDA_GENERIC MUDA_INLINE T __mm_max(T a, T b)
+MUDA_HOST MUDA_DEVICE MUDA_INLINE T __mm_max(T a, T b)
 {
     return a > b ? a : b;
 }
@@ -96,7 +100,7 @@ MUDA_DEVICE MUDA_INLINE float atomicMaxf(float* addr, float value)
     return old;
 }
 
-MUDA_GENERIC MUDA_INLINE uint expandBits(uint v)
+MUDA_HOST MUDA_DEVICE MUDA_INLINE uint expandBits(uint v)
 {  ///< Expands a 10-bit integer into 30 bits by inserting 2 zeros after each bit.
     v = (v * 0x00010001u) & 0xFF0000FFu;
     v = (v * 0x00000101u) & 0x0F00F00Fu;
@@ -105,7 +109,7 @@ MUDA_GENERIC MUDA_INLINE uint expandBits(uint v)
     return v;
 }
 
-MUDA_GENERIC MUDA_INLINE uint morton3D(float x, float y, float z)
+MUDA_HOST MUDA_DEVICE MUDA_INLINE uint morton3D(float x, float y, float z)
 {  ///< Calculates a 30-bit Morton code for the given 3D point located within the unit cube [0,1].
     x       = ::fmin(::fmax(x * 1024.0f, 0.0f), 1023.0f);
     y       = ::fmin(::fmax(y * 1024.0f, 0.0f), 1023.0f);
@@ -117,7 +121,7 @@ MUDA_GENERIC MUDA_INLINE uint morton3D(float x, float y, float z)
 }
 
 // Custom comparison for int3 based on lexicographical ordering
-MUDA_GENERIC MUDA_INLINE bool lessThan(const int3& a, const int3& b)
+MUDA_HOST MUDA_DEVICE MUDA_INLINE bool lessThan(const int3& a, const int3& b)
 {
     if(a.x != b.x)
         return a.x < b.x;
@@ -126,12 +130,12 @@ MUDA_GENERIC MUDA_INLINE bool lessThan(const int3& a, const int3& b)
     return a.z < b.z;
 }
 
-MUDA_GENERIC MUDA_INLINE Vector2i to_eigen(int2 v)
+MUDA_HOST MUDA_DEVICE MUDA_INLINE Vector2i to_eigen(int2 v)
 {
     return Vector2i{v.x, v.y};
 }
 
-MUDA_GENERIC MUDA_INLINE int2 make_ordered_pair(int a, int b)
+MUDA_HOST MUDA_DEVICE MUDA_INLINE int2 make_ordered_pair(int a, int b)
 {
     if(a < b)
         return int2{a, b};
@@ -139,17 +143,16 @@ MUDA_GENERIC MUDA_INLINE int2 make_ordered_pair(int a, int b)
         return int2{b, a};
 }
 
-MUDA_GENERIC MUDA_INLINE float3 operator-(const float3& v0, const float3& v1)
+MUDA_HOST MUDA_DEVICE MUDA_INLINE float3 operator-(const float3& v0, const float3& v1)
 {
     return make_float3(v0.x - v1.x, v0.y - v1.y, v0.z - v1.z);
 }
 
-MUDA_GENERIC MUDA_INLINE void SafeCopyTo(int2* sharedRes,
-                                         int   totalResInBlock,
-
-                                         Vector2i* globalRes,
-                                         int       globalIdx,
-                                         int       maxRes)
+MUDA_HOST MUDA_DEVICE MUDA_INLINE void SafeCopyTo(int2* sharedRes,
+                                                  int   totalResInBlock,
+                                                  Vector2i* globalRes,
+                                                  int       globalIdx,
+                                                  int       maxRes)
 {
     if(globalIdx >= maxRes      // Out of memory for results.
        || totalResInBlock == 0  // No results to write
@@ -173,6 +176,129 @@ MUDA_GENERIC MUDA_INLINE void SafeCopyTo(int2* sharedRes,
 }
 
 }  // namespace uipc::culbvh
+
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+namespace uipc::backend::cuda::corex_bvh
+{
+using AABB = uipc::backend::cuda::AABB;
+using namespace uipc::culbvh;
+
+static __global__ void kernel_calcMCs(int N, const AABB* boxes, const AABB* scene, uint32_t* codes)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= N) return;
+    auto bv = boxes[idx];
+    auto center = bv.center();
+    float3 c = make_float3(center.x(), center.y(), center.z());
+    auto sceneMin = scene->min();
+    float3 sceneMinVec = make_float3(sceneMin.x(), sceneMin.y(), sceneMin.z());
+    float3 offset = c - sceneMinVec;
+    auto sceneSize = scene->sizes();
+    codes[idx] = morton3D(offset.x / sceneSize.x(), offset.y / sceneSize.y(), offset.z / sceneSize.z());
+}
+
+static __global__ void kernel_calcInverseMapping(int N, const int* sorted_id, int* primMap)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= N) return;
+    primMap[sorted_id[idx]] = idx;
+}
+
+static __global__ void kernel_buildPrimitives(int N, const int* primMap, const AABB* boxes,
+                                       int* ext_idx, AABB* ext_aabb)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= N) return;
+    int newIdx = primMap[idx];
+    ext_idx[newIdx] = idx;
+    ext_aabb[newIdx] = boxes[idx];
+}
+
+static __global__ void kernel_calcSplitMetrics(int N, const uint32_t* codes, int* metrics)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= N) return;
+    metrics[idx] = (idx != N - 1) ? (32 - __clz(codes[idx] ^ codes[idx + 1])) : 33;
+}
+
+static __global__ void kernel_calcIntNodeOrders(int N, const int* int_lc, const int* lcas,
+                                          const uint32_t* depths, const uint32_t* offsets, int* tkMap)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= N) return;
+    int node = lcas[idx];
+    int depth = depths[idx];
+    int id = offsets[idx];
+    if(node != -1)
+    {
+        for(; depth--; node = int_lc[node])
+        {
+            tkMap[node] = id++;
+        }
+    }
+}
+
+static __global__ void kernel_updateBvhExtNodeLinks(int N, const int* mapTable, int* lcas, uint32_t* pars)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= N) return;
+    pars[idx] = mapTable[pars[idx]];
+    int ori = lcas[idx];
+    if(ori != -1)
+        lcas[idx] = mapTable[ori] << 1;
+    else
+        lcas[idx] = idx << 1 | 1;
+}
+
+static __global__ void kernel_reorderNode(int N, int intSize,
+                                    const int* lcas, const AABB* lvs_box,
+                                    const int* tkMap, const int* int_lc,
+                                    const uint32_t* int_mark, const int* int_range_y,
+                                    const AABB* int_aabb,
+                                    stacklessnode* nodes)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= N) return;
+    stacklessnode Node;
+    Node.lc = -1;
+    int escape = lcas[idx + 1];
+    if(escape == -1)
+    {
+        Node.escape = -1;
+    }
+    else
+    {
+        int bLeaf = escape & 1;
+        escape >>= 1;
+        Node.escape = escape + (bLeaf ? intSize : 0);
+    }
+    Node.bound = lvs_box[idx];
+    nodes[idx + intSize] = Node;
+
+    if(idx < intSize)
+    {
+        stacklessnode intNode;
+        int newId = tkMap[idx];
+        uint32_t mark = int_mark[idx];
+        intNode.lc = (mark & 1) ? (int_lc[idx] + intSize) : tkMap[int_lc[idx]];
+        intNode.bound = int_aabb[idx];
+        int intEscape = lcas[int_range_y[idx] + 1];
+        if(intEscape == -1)
+        {
+            intNode.escape = -1;
+        }
+        else
+        {
+            int bLeaf = intEscape & 1;
+            intEscape >>= 1;
+            intNode.escape = intEscape + (bLeaf ? intSize : 0);
+        }
+        nodes[newId] = intNode;
+    }
+}
+
+}  // namespace uipc::backend::cuda::corex_bvh
+#endif
 
 namespace uipc::backend::cuda
 {
@@ -298,54 +424,71 @@ MUDA_INLINE void StacklessBVH::Impl::calcMCsFromBox(muda::CBufferView<AABB> aabb
 {
     using namespace culbvh;
     using namespace muda;
+    int N = aabbs.size();
+    if(N == 0) return;
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    int block = 256;
+    int grid = (N + block - 1) / block;
+    corex_bvh::kernel_calcMCs<<<grid, block>>>(N, (const AABB*)aabbs.data(), (const AABB*)scene_box.data(), (uint32_t*)codes.data());
+    cudaDeviceSynchronize();
+#else
     ParallelFor()
         .file_line(__FILE__, __LINE__)
-        .apply(aabbs.size(),
+        .apply(N,
                [box   = aabbs.viewer().name("box"),
                 scene = scene_box.viewer().name("scene"),
                 codes = codes.viewer().name("codes")] __device__(int idx)
                {
                    AABB bv = box(idx);
-
-                   // Get center using Eigen API
                    auto   center = bv.center();
                    float3 c = make_float3(center.x(), center.y(), center.z());
-
-                   // Get scene min
                    auto   sceneMin = scene->min();
                    float3 sceneMinVec =
                        make_float3(sceneMin.x(), sceneMin.y(), sceneMin.z());
                    const float3 offset = c - sceneMinVec;
-
-                   // Get dimensions
                    auto sceneSize = scene->sizes();
                    codes(idx)     = morton3D(offset.x / sceneSize.x(),
                                          offset.y / sceneSize.y(),
                                          offset.z / sceneSize.z());
                });
+#endif
 }
 
 /// incoherent access, thus poor performance
 MUDA_INLINE void StacklessBVH::Impl::calcInverseMapping()
 {
     using namespace muda;
+    int N = sorted_id.size();
+    if(N == 0) return;
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    int block = 256, grid = (N + block - 1) / block;
+    corex_bvh::kernel_calcInverseMapping<<<grid, block>>>(N, RAW_PTR(sorted_id), RAW_PTR(primMap));
+    cudaDeviceSynchronize();
+#else
     ParallelFor()
         .file_line(__FILE__, __LINE__)
-        .apply(sorted_id.size(),
+        .apply(N,
                [map    = sorted_id.viewer().name("map"),
                 invMap = primMap.viewer().name("invMap")] __device__(int idx)
-               {
-                   //
-                   invMap(map(idx)) = idx;
-               });
+               { invMap(map(idx)) = idx; });
+#endif
 }
 
 MUDA_INLINE void StacklessBVH::Impl::buildPrimitivesFromBox(muda::CBufferView<AABB> aabbs)
-{  ///< update idx-th _bxs to idx-th leaf
+{
     using namespace muda;
-    ParallelFor().apply(aabbs.size(),
+    int N = aabbs.size();
+    if(N == 0) return;
+
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    int block = 256, grid = (N + block - 1) / block;
+    corex_bvh::kernel_buildPrimitives<<<grid, block>>>(N, RAW_PTR(primMap), (const AABB*)aabbs.data(),
+                                                        RAW_PTR(ext_idx), RAW_PTR(ext_aabb));
+    cudaDeviceSynchronize();
+#else
+    ParallelFor().apply(N,
                         [_primIdx = ext_idx.viewer().name("primIdx"),
                          _primBox = ext_aabb.viewer().name("primBox"),
                          _primMap = primMap.viewer().name("primMap"),
@@ -356,16 +499,25 @@ MUDA_INLINE void StacklessBVH::Impl::buildPrimitivesFromBox(muda::CBufferView<AA
                             _primIdx(newIdx) = idx;
                             _primBox(newIdx) = bv;
                         });
+#endif
 }
 
 
 MUDA_INLINE void StacklessBVH::Impl::calcExtNodeSplitMetrics()
 {
     using namespace muda;
+    int N = mtcode.size();
+    if(N == 0) return;
+
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    int block = 256, grid = (N + block - 1) / block;
+    corex_bvh::kernel_calcSplitMetrics<<<grid, block>>>(N, RAW_PTR(mtcode), RAW_PTR(metric));
+    cudaDeviceSynchronize();
+#else
     ParallelFor()
         .file_line(__FILE__, __LINE__)
-        .apply(mtcode.size(),
-               [extsize  = mtcode.size(),
+        .apply(N,
+               [extsize  = (int)N,
                 _codes   = mtcode.viewer().name("_codes"),
                 _metrics = metric.viewer().name("_metrics")] __device__(int idx)
                {
@@ -373,6 +525,7 @@ MUDA_INLINE void StacklessBVH::Impl::calcExtNodeSplitMetrics()
                                        32 - __clz(_codes(idx) ^ _codes(idx + 1)) :
                                        33;
                });
+#endif
 }
 
 MUDA_INLINE void StacklessBVH::Impl::buildIntNodes(int size)
@@ -511,7 +664,14 @@ MUDA_INLINE void StacklessBVH::Impl::buildIntNodes(int size)
 MUDA_INLINE void StacklessBVH::Impl::calcIntNodeOrders(int size)
 {
     using namespace muda;
+    if(size == 0) return;
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    int block = 256, grid = (size + block - 1) / block;
+    corex_bvh::kernel_calcIntNodeOrders<<<grid, block>>>(size, RAW_PTR(int_lc), RAW_PTR(ext_lca),
+                                                          RAW_PTR(count), RAW_PTR(offsetTable), RAW_PTR(tkMap));
+    cudaDeviceSynchronize();
+#else
     ParallelFor()
         .file_line(__FILE__, __LINE__)
         .apply(size,
@@ -524,24 +684,28 @@ MUDA_INLINE void StacklessBVH::Impl::calcIntNodeOrders(int size)
                    int node  = _lcas(idx);
                    int depth = _depths(idx);
                    int id    = _offsets(idx);
-
                    if(node != -1)
                    {
                        for(; depth--; node = _tks_lc(node))
-                       {
-                           _tkMap(node) = id++;
-                       }
+                       { _tkMap(node) = id++; }
                    }
                });
+#endif
 }
 
 MUDA_INLINE void StacklessBVH::Impl::updateBvhExtNodeLinks(int size)
 {
     using namespace muda;
 
-    if(flags.size() == 0)  // no internal nodes, thus no need to update
+    if(flags.size() == 0)
         return;
+    if(size == 0) return;
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    int block = 256, grid = (size + block - 1) / block;
+    corex_bvh::kernel_updateBvhExtNodeLinks<<<grid, block>>>(size, RAW_PTR(tkMap), RAW_PTR(ext_lca), RAW_PTR(ext_par));
+    cudaDeviceSynchronize();
+#else
     ParallelFor()
         .file_line(__FILE__, __LINE__)
         .apply(size,
@@ -556,37 +720,42 @@ MUDA_INLINE void StacklessBVH::Impl::updateBvhExtNodeLinks(int size)
                    else
                        _lcas(idx) = idx << 1 | 1;
                });
+#endif
 }
 
 MUDA_INLINE void StacklessBVH::Impl::reorderNode(int intSize)
 {
     using namespace culbvh;
     using namespace muda;
+    int N = intSize + 1;
+    if(N == 0) return;
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    int block = 256, grid = (N + block - 1) / block;
+    corex_bvh::kernel_reorderNode<<<grid, block>>>(N, intSize,
+        RAW_PTR(ext_lca), RAW_PTR(ext_aabb),
+        RAW_PTR(tkMap), RAW_PTR(int_lc), RAW_PTR(int_mark), RAW_PTR(int_range_y),
+        RAW_PTR(int_aabb), RAW_PTR(nodes));
+    cudaDeviceSynchronize();
+#else
     ParallelFor()
         .file_line(__FILE__, __LINE__)
-        .apply(intSize + 1,
+        .apply(N,
                [intSize,
-                // leaf nodes
                 _lvs_lca = ext_lca.viewer().name("_lvs_lca"),
                 _lvs_box = ext_aabb.viewer().name("_lvs_box"),
-                // internal nodes
                 _tkMap           = tkMap.viewer().name("_tkMap"),
                 _unorderedTks_lc = int_lc.viewer().name("_unorderedTks_lc"),
                 _unorderedTks_mark = int_mark.viewer().name("_unorderedTks_mark"),
                 _unorderedTks_rangey = int_range_y.viewer().name("_unorderedTks_rangey"),
                 _unorderedTks_box = int_aabb.viewer().name("_unorderedTks_box"),
-                // total nodes
                 _nodes = nodes.viewer().name("_nodes")] __device__(int idx)
                {
                    stacklessnode Node;
                    Node.lc    = -1;
                    int escape = _lvs_lca(idx + 1);
-
                    if(escape == -1)
-                   {
-                       Node.escape = -1;
-                   }
+                   { Node.escape = -1; }
                    else
                    {
                        int bLeaf = escape & 1;
@@ -594,27 +763,18 @@ MUDA_INLINE void StacklessBVH::Impl::reorderNode(int intSize)
                        Node.escape = escape + (bLeaf ? intSize : 0);
                    }
                    Node.bound = _lvs_box(idx);
-
-
                    _nodes(idx + intSize) = Node;
-
                    if(idx >= intSize)
                        return;
-
                    stacklessnode internalNode;
-                   int           newId = _tkMap(idx);
-                   uint32_t      mark  = _unorderedTks_mark(idx);
-
+                   int newId = _tkMap(idx);
+                   uint32_t mark = _unorderedTks_mark(idx);
                    internalNode.lc = mark & 1 ? _unorderedTks_lc(idx) + intSize :
                                                 _tkMap(_unorderedTks_lc(idx));
                    internalNode.bound = _unorderedTks_box(idx);
-
                    int internalEscape = _lvs_lca(_unorderedTks_rangey(idx) + 1);
-
                    if(internalEscape == -1)
-                   {
-                       internalNode.escape = -1;
-                   }
+                   { internalNode.escape = -1; }
                    else
                    {
                        int bLeaf = internalEscape & 1;
@@ -623,6 +783,7 @@ MUDA_INLINE void StacklessBVH::Impl::reorderNode(int intSize)
                    }
                    _nodes(newId) = internalNode;
                });
+#endif
 }
 
 inline void StacklessBVH::Impl::build(muda::CBufferView<AABB> aabbs)
@@ -664,19 +825,20 @@ inline void StacklessBVH::Impl::build(muda::CBufferView<AABB> aabbs)
 
 
     // Initialize flags to 0
-    thrust::fill(flags.begin(), flags.end(), 0);
-    thrust::fill(thrust::device, ext_mark.begin(), ext_mark.end(), 7);
-    thrust::fill(thrust::device, ext_lca.begin(), ext_lca.end(), 0);
-    thrust::fill(thrust::device, ext_par.begin(), ext_par.end(), 0);
+    thrust::fill(thrust::device, flags.data(), flags.data() + flags.size(), 0);
+    thrust::fill(thrust::device, ext_mark.data(), ext_mark.data() + ext_mark.size(), 7);
+    thrust::fill(thrust::device, ext_lca.data(), ext_lca.data() + ext_lca.size(), 0);
+    thrust::fill(thrust::device, ext_par.data(), ext_par.data() + ext_par.size(), 0);
 
     calcMaxBVFromBox(aabbs, scene_box.view());
 
     calcMCsFromBox(aabbs, scene_box.view(), mtcode.view());
 
-    auto null_stream = thrust::cuda::par_nosync.on(nullptr);
+    auto null_stream = thrust::cuda::par.on(nullptr);
 
-    thrust::sequence(null_stream, sorted_id.begin(), sorted_id.end());
-    thrust::sort_by_key(null_stream, mtcode.begin(), mtcode.end(), sorted_id.begin());
+    thrust::sequence(null_stream, sorted_id.data(), sorted_id.data() + sorted_id.size());
+    thrust::sort_by_key(
+        null_stream, mtcode.data(), mtcode.data() + mtcode.size(), sorted_id.data());
 
     calcInverseMapping();
 
@@ -686,12 +848,13 @@ inline void StacklessBVH::Impl::build(muda::CBufferView<AABB> aabbs)
 
     buildIntNodes(numObjs);
 
-    thrust::exclusive_scan(null_stream, count.begin(), count.end(), offsetTable.begin());
+    thrust::exclusive_scan(
+        null_stream, count.data(), count.data() + count.size(), offsetTable.data());
 
     calcIntNodeOrders(numObjs);
 
     // fill the last ext_lca to -1
-    thrust::fill(null_stream, ext_lca.begin() + numObjs, ext_lca.begin() + numObjs + 1, -1);
+    thrust::fill(null_stream, ext_lca.data() + numObjs, ext_lca.data() + numObjs + 1, -1);
 
     updateBvhExtNodeLinks(numObjs);
 
@@ -978,7 +1141,11 @@ inline void StacklessBVH::build(muda::CBufferView<AABB> aabbs)
     m_impl.build(aabbs);
 }
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+template <typename Pred>
+#else
 template <std::invocable<IndexT, IndexT> Pred>
+#endif
 void StacklessBVH::detect(Pred callback, QueryBuffer& qbuffer)
 {
     using namespace muda;
@@ -990,10 +1157,17 @@ void StacklessBVH::detect(Pred callback, QueryBuffer& qbuffer)
         return;
     }
 
+    if(qbuffer.m_pairs.size() == 0)
+        qbuffer.m_pairs.resize(50 * 1024);
+
     auto do_query = [&]
     {
         // clear counter
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        cudaMemset(qbuffer.m_cpNum.data(), 0, sizeof(int));
+#else
         BufferLaunch().fill(qbuffer.m_cpNum.view(), 0);
+#endif
 
         m_impl.StacklessCDSharedSelf(
             callback, qbuffer.m_cpNum.view(), qbuffer.m_pairs.view());
@@ -1029,12 +1203,16 @@ inline void StacklessBVH::QueryBuffer::build(muda::CBufferView<AABB> aabbs)
     auto d_querySortedId = m_querySortedId.data();
     auto numQuery        = size;
 
-    auto null_stream = thrust::cuda::par_nosync.on(nullptr);
+    auto null_stream = thrust::cuda::par.on(nullptr);
     thrust::sequence(null_stream, d_querySortedId, d_querySortedId + numQuery);
     thrust::sort_by_key(null_stream, d_queryMtCode, d_queryMtCode + numQuery, d_querySortedId);
 }
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+template <typename Pred>
+#else
 template <std::invocable<IndexT, IndexT> Pred>
+#endif
 void StacklessBVH::query(muda::CBufferView<AABB> aabbs, Pred callback, QueryBuffer& qbuffer)
 {
     if(aabbs.size() == 0 || m_impl.objs.size() == 0)
@@ -1044,12 +1222,18 @@ void StacklessBVH::query(muda::CBufferView<AABB> aabbs, Pred callback, QueryBuff
     }
 
     using namespace muda;
+    if(qbuffer.m_pairs.size() == 0)
+        qbuffer.m_pairs.resize(50 * 1024);
     qbuffer.build(aabbs);
 
     auto do_query = [&]
     {
         // clear counter
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        cudaMemset(qbuffer.m_cpNum.data(), 0, sizeof(int));
+#else
         BufferLaunch().fill(qbuffer.m_cpNum.view(), 0);
+#endif
 
         m_impl.StacklessCDSharedOther(callback,
                                       aabbs,

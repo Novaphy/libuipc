@@ -9,6 +9,8 @@ class Engine;
 
 namespace uipc::core
 {
+class Scene;
+
 class UIPC_CORE_API SanityChecker final
 {
   public:

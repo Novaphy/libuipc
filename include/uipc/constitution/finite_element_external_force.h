@@ -14,9 +14,10 @@ class UIPC_CONSTITUTION_API FiniteElementExternalForce final : public IConstitut
     ~FiniteElementExternalForce();
 
     /**
-     * @brief Apply external force (3D) to finite element vertices
-     * @param sc SimplicialComplex representing finite element geometry
-     * @param force 3D force vector applied uniformly to all vertices
+     * @brief Apply external force (3D) to all vertices of a finite element geometry.
+     *
+     * @param sc    SimplicialComplex representing finite element geometry
+     * @param force 3D force vector applied uniformly to every vertex
      */
     void apply_to(geometry::SimplicialComplex& sc, const Vector3& force);
 

@@ -15,7 +15,9 @@
 #include <pyuipc/core/contact_system_feature.h>
 #include <pyuipc/core/subscene_tabular.h>
 #include <pyuipc/core/state_accessor_feature.h>
+#if !defined(UIPC_COREX_CUDA10_COMPAT) || !UIPC_COREX_CUDA10_COMPAT
 #include <pyuipc/core/distance_diagnoser_feature.h>
+#endif
 
 namespace pyuipc::core
 {
@@ -23,7 +25,9 @@ PyModule::PyModule(py::module& m)
 {
     PyFeatureCollection{m};
     PyContactSystemFeature{m};
+#if !defined(UIPC_COREX_CUDA10_COMPAT) || !UIPC_COREX_CUDA10_COMPAT
     PyDistanceDiagnoserFeature{m};
+#endif
     PyStateAccessorFeature{m};
 
     PyEngine{m};

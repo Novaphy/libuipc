@@ -6,6 +6,7 @@
 #include <finite_element/fem_linear_subsystem.h>
 #include <global_geometry/global_vertex_manager.h>
 #include <finite_element/mas_preconditioner_engine.h>
+#include <uipc/common/span.h>
 #include <uipc/builtin/attribute_name.h>
 #include <uipc/geometry/simplicial_complex.h>
 #include <uipc/common/log.h>
@@ -376,11 +377,14 @@ class FEMMASPreconditioner : public LocalPreconditioner
         engine.init_neighbor(static_cast<int>(vert_num),
                              static_cast<int>(h_neighbor_list.size()),
                              part_map_size,
-                             h_neighbor_list,
-                             h_neighbor_start,
-                             h_neighbor_num,
-                             h_part_to_real,
-                             h_real_to_part);
+                             uipc::span<const unsigned int>(h_neighbor_list.data(),
+                                                            h_neighbor_list.size()),
+                             uipc::span<const unsigned int>(h_neighbor_start.data(),
+                                                            h_neighbor_start.size()),
+                             uipc::span<const unsigned int>(h_neighbor_num.data(),
+                                                            h_neighbor_num.size()),
+                             uipc::span<const int>(h_part_to_real.data(), h_part_to_real.size()),
+                             uipc::span<const int>(h_real_to_part.data(), h_real_to_part.size()));
 
         engine.init_matrix();
 
@@ -401,12 +405,22 @@ class FEMMASPreconditioner : public LocalPreconditioner
 
         // MAS assembly for partitioned vertices
         fill_identity_indices(sorted_indices, triplet_count);
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        engine.set_preconditioner(A.values().data(),
+                                  A.row_indices().data(),
+                                  A.col_indices().data(),
+                                  sorted_indices.data(),
+                                  dof_offset / 3,
+                                  static_cast<int>(triplet_count),
+                                  0);
+#else
         engine.set_preconditioner(A.values(),
                                   A.row_indices(),
                                   A.col_indices(),
                                   sorted_indices.view(),
                                   dof_offset / 3,
                                   0);
+#endif
 
         auto dump_mas = world().scene().config().find<IndexT>("extras/debug/dump_mas_matrices");
         if(dump_mas && dump_mas->view()[0] != 0)

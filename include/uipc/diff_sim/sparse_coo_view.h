@@ -3,6 +3,7 @@
 #include <uipc/common/type_define.h>
 #include <uipc/common/span.h>
 #include <Eigen/Sparse>
+
 namespace uipc::diff_sim
 {
 class UIPC_CORE_API SparseCOOView
@@ -21,7 +22,7 @@ class UIPC_CORE_API SparseCOOView
     Vector2i           shape() const;
 
     Matrix<Float, Eigen::Dynamic, Eigen::Dynamic> to_dense() const;
-    Eigen::SparseMatrix<Float>                    to_sparse() const;
+    Eigen::SparseMatrix<Float> to_sparse() const;
 
   private:
     span<const IndexT> m_row_indices;

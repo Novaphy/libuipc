@@ -5,14 +5,14 @@
 
 namespace uipc::backend::cuda
 {
-inline MUDA_GENERIC Float point_dcd_expansion(const Float& d_hat_P)
+inline MUDA_HOST MUDA_DEVICE Float point_dcd_expansion(const Float& d_hat_P)
 {
     return d_hat_P;
 }
 /**
  * @brief Edge d_hat
  */
-inline MUDA_GENERIC Float edge_dcd_expansion(const Float& d_hat_E0, const Float& d_hat_E1)
+inline MUDA_HOST MUDA_DEVICE Float edge_dcd_expansion(const Float& d_hat_E0, const Float& d_hat_E1)
 {
     if constexpr(RUNTIME_CHECK)
     {
@@ -25,9 +25,9 @@ inline MUDA_GENERIC Float edge_dcd_expansion(const Float& d_hat_E0, const Float&
 /**
  * @brief Triangle d_hat
  */
-inline MUDA_GENERIC Float triangle_dcd_expansion(const Float& d_hat_T0,
-                                                 const Float& d_hat_T1,
-                                                 const Float& d_hat_T2)
+inline MUDA_HOST MUDA_DEVICE Float triangle_dcd_expansion(const Float& d_hat_T0,
+                                                          const Float& d_hat_T1,
+                                                          const Float& d_hat_T2)
 {
     if constexpr(RUNTIME_CHECK)
     {
@@ -41,10 +41,10 @@ inline MUDA_GENERIC Float triangle_dcd_expansion(const Float& d_hat_T0,
 /**
  * @brief Point-Triangle d_hat calculation
  */
-inline MUDA_GENERIC Float PT_d_hat(const Float& d_hat_P,
-                                   const Float& d_hat_T0,
-                                   const Float& d_hat_T1,
-                                   const Float& d_hat_T2)
+inline MUDA_HOST MUDA_DEVICE Float PT_d_hat(const Float& d_hat_P,
+                                            const Float& d_hat_T0,
+                                            const Float& d_hat_T1,
+                                            const Float& d_hat_T2)
 {
     if constexpr(RUNTIME_CHECK)
     {
@@ -58,10 +58,10 @@ inline MUDA_GENERIC Float PT_d_hat(const Float& d_hat_P,
 /**
  * @brief Edge-Edge d_hat calculation
  */
-inline MUDA_GENERIC Float EE_d_hat(const Float& d_hat_Ea0,
-                                   const Float& d_hat_Ea1,
-                                   const Float& d_hat_Eb0,
-                                   const Float& d_hat_Eb1)
+inline MUDA_HOST MUDA_DEVICE Float EE_d_hat(const Float& d_hat_Ea0,
+                                            const Float& d_hat_Ea1,
+                                            const Float& d_hat_Eb0,
+                                            const Float& d_hat_Eb1)
 {
     if constexpr(RUNTIME_CHECK)
     {
@@ -75,7 +75,9 @@ inline MUDA_GENERIC Float EE_d_hat(const Float& d_hat_Ea0,
 /**
  * @brief Point-Edge d_hat calculation
  */
-inline MUDA_GENERIC Float PE_d_hat(const Float& d_hat_P, const Float& d_hat_E0, const Float& d_hat_E1)
+inline MUDA_HOST MUDA_DEVICE Float PE_d_hat(const Float& d_hat_P,
+                                            const Float& d_hat_E0,
+                                            const Float& d_hat_E1)
 {
     if constexpr(RUNTIME_CHECK)
     {
@@ -88,7 +90,7 @@ inline MUDA_GENERIC Float PE_d_hat(const Float& d_hat_P, const Float& d_hat_E0, 
 /**
  * @brief Point-Point d_hat calculation
  */
-inline MUDA_GENERIC Float PP_d_hat(const Float& d_hat_P0, const Float& d_hat_P1)
+inline MUDA_HOST MUDA_DEVICE Float PP_d_hat(const Float& d_hat_P0, const Float& d_hat_P1)
 {
     return (d_hat_P0 + d_hat_P1) / 2.0;
 }

@@ -1,10 +1,14 @@
 #pragma once
 #include <functional>
+#include <uipc/common/demangle.h>
 #include <uipc/common/smart_pointer.h>
 #include <uipc/common/list.h>
 #include <uipc/common/type_traits.h>
 #include <backends/common/i_sim_system.h>
 #include <backends/common/sim_engine.h>
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+#include <cstdio>
+#endif
 
 namespace uipc::backend
 {
@@ -36,6 +40,12 @@ namespace detail
         {
             return [](SimEngine& engine) -> U<ISimSystem>
             {
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+                std::fprintf(stderr,
+                             "[corex_demo] creator type: %s\n",
+                             typeid(SimSystemT).name());
+                std::fflush(stderr);
+#endif
                 return ::uipc::static_pointer_cast<ISimSystem>(
                     SimSystemCreator<SimSystemT>::create(engine));
             };
@@ -44,6 +54,12 @@ namespace detail
         {
             return [](SimEngine& engine) -> U<ISimSystem>
             {
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+                std::fprintf(stderr,
+                             "[corex_demo] creator type: %s\n",
+                             typeid(SimSystemT).name());
+                std::fflush(stderr);
+#endif
                 SimEnginePointer e = dynamic_cast<SimEnginePointer>(&engine);
                 UIPC_ASSERT(e != nullptr,
                             "{} cannot be cast to {}",

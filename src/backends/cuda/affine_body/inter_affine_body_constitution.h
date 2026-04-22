@@ -12,7 +12,6 @@ class InterAffineBodyConstitution : public SimSystem
       public:
     };
 
-    using InterGeoInfo = InterAffineBodyConstitutionManager::InterGeoInfo;
     using FilteredInfo = InterAffineBodyConstitutionManager::FilteredInfo;
     using EnergyExtentInfo = InterAffineBodyConstitutionManager::EnergyExtentInfo;
     using ComputeEnergyInfo = InterAffineBodyConstitutionManager::EnergyInfo;
@@ -34,13 +33,12 @@ class InterAffineBodyConstitution : public SimSystem
 
     virtual U64 get_uid() const noexcept = 0;  // unique identifier for this constitution
 
-    span<const InterGeoInfo> inter_geo_info() const noexcept;
-
     template <typename ForEachGeometry>
-    void for_each(span<S<geometry::GeometrySlot>> geo_slots, ForEachGeometry&& for_every_geometry)
+    void for_each(span<S<geometry::GeometrySlot>> geo_slots,
+                  ForEachGeometry&&               for_every_geometry)
     {
-        InterAffineBodyConstitutionManager::_for_each(
-            geo_slots, inter_geo_info(), std::forward<ForEachGeometry>(for_every_geometry));
+        InterAffineBodyConstitutionManager::FilteredInfo info{&m_manager->m_impl, m_index};
+        info.for_each(geo_slots, std::forward<ForEachGeometry>(for_every_geometry));
     }
 
   private:

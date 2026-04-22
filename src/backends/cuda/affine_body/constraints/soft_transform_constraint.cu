@@ -6,9 +6,9 @@
 
 namespace uipc::backend::cuda
 {
-inline UIPC_GENERIC Matrix12x12 compute_constraint_mass(const ABDJacobiDyadicMass& mass,
-                                                        Float translation_strength,
-                                                        Float rotation_strength)
+inline UIPC_HOST UIPC_DEVICE Matrix12x12 compute_constraint_mass(const ABDJacobiDyadicMass& mass,
+                                                                 Float translation_strength,
+                                                                 Float rotation_strength)
 {
     Matrix12x12 M = mass.to_mat();
     Float cross_term_strength = std::sqrt(translation_strength * rotation_strength);

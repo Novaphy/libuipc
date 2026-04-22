@@ -14,8 +14,8 @@ class ALVertexHalfPlaneTrajectoryFilter final : public VertexHalfPlaneTrajectory
         void filter_active(FilterActiveInfo& info);
         void filter_toi(FilterTOIInfo& info);
 
-        muda::DeviceVar<IndexT> num_collisions;
-        IndexT                  h_num_collisions;
+        muda::DeviceBuffer<IndexT> num_collisions;
+        IndexT                     h_num_collisions;
 
         /**
          * @brief [Vertex-HalfPlane] pairs

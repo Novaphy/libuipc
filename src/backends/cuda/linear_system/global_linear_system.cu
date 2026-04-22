@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <numeric>
 #include <linear_system/global_linear_system.h>
 #include <linear_system/diag_linear_subsystem.h>
 #include <linear_system/off_diag_linear_subsystem.h>
@@ -8,8 +10,8 @@
 #include <fstream>
 #include <sim_engine.h>
 #include <backends/common/backend_path_tool.h>
-#include <Eigen/Sparse>
 #include <utils/matrix_market.h>
+#include <cstdlib>
 
 namespace uipc::backend::cuda
 {
@@ -81,12 +83,21 @@ void GlobalLinearSystem::solve()
     if(m_impl.need_debug_dump) [[unlikely]]
         _dump_A_b();
 
+    const bool corex_linear_trace = std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+    if(corex_linear_trace)
+        logger::info("[corex_trace] solve_linear_system enter");
     m_impl.solve_linear_system();
+    if(corex_linear_trace)
+        logger::info("[corex_trace] solve_linear_system done");
 
     if(m_impl.need_debug_dump) [[unlikely]]
         _dump_x();
 
+    if(corex_linear_trace)
+        logger::info("[corex_trace] distribute_solution enter");
     m_impl.distribute_solution();
+    if(corex_linear_trace)
+        logger::info("[corex_trace] distribute_solution done");
 }
 
 Float GlobalLinearSystem::diag_norm()
@@ -214,7 +225,16 @@ void GlobalLinearSystem::Impl::init()
 void GlobalLinearSystem::Impl::build_linear_system()
 {
     Timer timer{"Build Linear System"};
+    const bool corex_trace = (std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr);
+    auto trace = [&](const char* msg)
+    {
+        if(corex_trace)
+            logger::info("[corex_trace][linear] {}", msg);
+    };
+    trace("build_linear_system: begin");
+    trace("update_subsystem_extent: begin");
     empty_system = !_update_subsystem_extent();
+    trace("update_subsystem_extent: end");
 
     if(empty_system) [[unlikely]]
     {
@@ -222,16 +242,147 @@ void GlobalLinearSystem::Impl::build_linear_system()
         return;
     }
 
+    trace("assemble_linear_system: begin");
     _assemble_linear_system();
+    trace("assemble_linear_system: end");
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    // Default CoreX path now prefers device conversion to avoid host fallback.
+    // Set UIPC_COREX_FORCE_HOST_GE2SYM=1 to force the legacy host path.
+    const bool force_host_ge2sym = (std::getenv("UIPC_COREX_FORCE_HOST_GE2SYM") != nullptr);
+    if(!force_host_ge2sym)
+    {
+        trace("converter.ge2sym: begin");
+        converter.ge2sym(triplet_A);
+        trace("converter.ge2sym: end");
+        trace("converter.convert: begin");
+        converter.convert(triplet_A, bcoo_A);
+        trace("converter.convert: end");
+    }
+    else
+    {
+        trace("host ge2sym+convert: begin");
+        int tc    = static_cast<int>(triplet_A.triplet_count());
+        int nrows = triplet_A.rows();
+        int ncols = triplet_A.cols();
+
+        std::vector<int>       h_rows(tc), h_cols(tc);
+        std::vector<Matrix3x3> h_vals(tc);
+
+        checkCudaErrors(cudaMemcpy(h_rows.data(),
+                                   triplet_A.row_indices().data(),
+                                   sizeof(int) * tc,
+                                   cudaMemcpyDeviceToHost));
+        checkCudaErrors(cudaMemcpy(h_cols.data(),
+                                   triplet_A.col_indices().data(),
+                                   sizeof(int) * tc,
+                                   cudaMemcpyDeviceToHost));
+        checkCudaErrors(cudaMemcpy(h_vals.data(),
+                                   triplet_A.values().data(),
+                                   sizeof(Matrix3x3) * tc,
+                                   cudaMemcpyDeviceToHost));
+
+        std::vector<int>       sym_rows, sym_cols;
+        std::vector<Matrix3x3> sym_vals;
+        sym_rows.reserve(tc);
+        sym_cols.reserve(tc);
+        sym_vals.reserve(tc);
+        for(int i = 0; i < tc; ++i)
+        {
+            if(h_rows[i] <= h_cols[i])
+            {
+                sym_rows.push_back(h_rows[i]);
+                sym_cols.push_back(h_cols[i]);
+                sym_vals.push_back(h_vals[i]);
+            }
+        }
+
+        int sym_count = static_cast<int>(sym_rows.size());
+        std::vector<int> order(sym_count);
+        std::iota(order.begin(), order.end(), 0);
+        std::sort(order.begin(), order.end(), [&](int a, int b)
+        {
+            if(sym_rows[a] != sym_rows[b]) return sym_rows[a] < sym_rows[b];
+            return sym_cols[a] < sym_cols[b];
+        });
+
+        std::vector<int>       out_rows, out_cols;
+        std::vector<Matrix3x3> out_vals;
+        out_rows.reserve(sym_count);
+        out_cols.reserve(sym_count);
+        out_vals.reserve(sym_count);
+
+        for(int k = 0; k < sym_count; ++k)
+        {
+            int idx = order[k];
+            if(!out_rows.empty() && out_rows.back() == sym_rows[idx]
+               && out_cols.back() == sym_cols[idx])
+            {
+                out_vals.back() += sym_vals[idx];
+            }
+            else
+            {
+                out_rows.push_back(sym_rows[idx]);
+                out_cols.push_back(sym_cols[idx]);
+                out_vals.push_back(sym_vals[idx]);
+            }
+        }
+
+        int nnz = static_cast<int>(out_rows.size());
+        bcoo_A.resize(nrows, ncols, nnz);
+
+        checkCudaErrors(cudaMemcpy(bcoo_A.row_indices().data(),
+                                   out_rows.data(),
+                                   sizeof(int) * nnz,
+                                   cudaMemcpyHostToDevice));
+        checkCudaErrors(cudaMemcpy(bcoo_A.col_indices().data(),
+                                   out_cols.data(),
+                                   sizeof(int) * nnz,
+                                   cudaMemcpyHostToDevice));
+        checkCudaErrors(cudaMemcpy(bcoo_A.values().data(),
+                                   out_vals.data(),
+                                   sizeof(Matrix3x3) * nnz,
+                                   cudaMemcpyHostToDevice));
+        trace("host ge2sym+convert: end");
+    }
+#else
+    trace("converter.ge2sym: begin");
     converter.ge2sym(triplet_A);
+    trace("converter.ge2sym: end");
+    trace("converter.convert: begin");
     converter.convert(triplet_A, bcoo_A);
+    trace("converter.convert: end");
+#endif
 
+    trace("assemble_preconditioner: begin");
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    if(corex_trace)
+        logger::info("[corex_trace][precond_asm] pre-precond sync begin");
+    trace("pre-precond sync: begin");
+    checkCudaErrors(cudaDeviceSynchronize());
+    trace("pre-precond sync: end");
+    if(corex_trace)
+        logger::info("[corex_trace][precond_asm] pre-precond sync end");
+#endif
+    if(corex_trace)
+        logger::info("[corex_trace][precond_asm] _assemble_preconditioner call begin");
     _assemble_preconditioner();
+    if(corex_trace)
+        logger::info("[corex_trace][precond_asm] _assemble_preconditioner call end");
+    trace("assemble_preconditioner: end");
+
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    if(corex_trace)
+        logger::info("[corex_trace][precond_asm] post-precond sync begin");
+    checkCudaErrors(cudaDeviceSynchronize());
+    if(corex_trace)
+        logger::info("[corex_trace][precond_asm] post-precond sync end");
+#endif
 
     logger::info("GlobalLinearSystem has {} DoFs, Unique Triplet Count: {}",
                  b.size(),
                  bcoo_A.triplet_count());
+    trace("build_linear_system: end");
 }
 
 bool GlobalLinearSystem::Impl::_update_subsystem_extent()
@@ -322,15 +473,36 @@ bool GlobalLinearSystem::Impl::_update_subsystem_extent()
 
 void GlobalLinearSystem::Impl::_assemble_linear_system()
 {
+    const bool corex_trace = (std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr);
+    auto trace = [&](const char* msg)
+    {
+        if(corex_trace)
+            logger::info("[corex_trace][linear] {}", msg);
+    };
     auto HA = triplet_A.view();
 
     // Clear and invalidate previous values
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    // BufferView::fill() uses ParallelFor device lambda which silently fails on CoreX
+    checkCudaErrors(cudaMemset(triplet_A.values().data(),
+                               0,
+                               sizeof(Matrix3x3) * triplet_A.triplet_count()));
+    checkCudaErrors(cudaMemset(triplet_A.row_indices().data(),
+                               0xFF,
+                               sizeof(int) * triplet_A.triplet_count()));
+    checkCudaErrors(cudaMemset(triplet_A.col_indices().data(),
+                               0xFF,
+                               sizeof(int) * triplet_A.triplet_count()));
+    auto B = b.view();
+    checkCudaErrors(cudaMemset(B.buffer_view().data(), 0, sizeof(Float) * b.size()));
+#else
     triplet_A.values().fill(Matrix3x3::Zero());
     triplet_A.row_indices().fill(-1);
     triplet_A.col_indices().fill(-1);
 
     auto B = b.view();
     B.buffer_view().fill(0.0);
+#endif
 
     auto diag_subsystem_view     = diag_subsystems.view();
     auto off_diag_subsystem_view = off_diag_subsystems.view();
@@ -364,7 +536,15 @@ void GlobalLinearSystem::Impl::_assemble_linear_system()
                                          subsystem_triplet_counts[triplet_i])
                                   .submatrix(ij_offset, ij_count);
 
+            if(corex_trace)
+                logger::info("[corex_trace][linear] diag assemble begin: index={}, local={}",
+                             triplet_i,
+                             dof_i);
             diag_subsystem->assemble(info);
+            if(corex_trace)
+                logger::info("[corex_trace][linear] diag assemble end: index={}, local={}",
+                             triplet_i,
+                             dof_i);
         }
         else
         {
@@ -401,29 +581,57 @@ void GlobalLinearSystem::Impl::_assemble_linear_system()
 
             // logger::info("rl_offset: {}, lr_offset: {}", rl_triplet_offset, lr_triplet_offset);
 
+            if(corex_trace)
+                logger::info("[corex_trace][linear] offdiag assemble begin: index={}, local={}",
+                             triplet_i,
+                             local_index);
             off_diag_subsystem->assemble(info);
+            if(corex_trace)
+                logger::info("[corex_trace][linear] offdiag assemble end: index={}, local={}",
+                             triplet_i,
+                             local_index);
         }
     }
+    trace("_assemble_linear_system: done");
 }
 
 void GlobalLinearSystem::Impl::_assemble_preconditioner()
 {
+    const bool corex_trace = std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
     if(global_preconditioner)
     {
+        if(corex_trace)
+            logger::info("[corex_trace][precond_asm] global_preconditioner begin");
         GlobalPreconditionerAssemblyInfo info{this};
         global_preconditioner->assemble(info);
+        if(corex_trace)
+            logger::info("[corex_trace][precond_asm] global_preconditioner end");
     }
 
+    int idx = 0;
     for(auto&& preconditioner : local_preconditioners.view())
     {
+        if(corex_trace)
+            logger::info("[corex_trace][precond_asm] local[{}] begin", idx);
         LocalPreconditionerAssemblyInfo info{this, preconditioner->m_subsystem->m_index};
         preconditioner->assemble(info);
+        if(corex_trace)
+            logger::info("[corex_trace][precond_asm] local[{}] end", idx);
+        ++idx;
     }
 }
 
 void GlobalLinearSystem::Impl::solve_linear_system()
 {
     Timer timer{"Solve Linear System"};
+    const bool corex_trace = std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+    if(corex_trace)
+        logger::info("[corex_trace] solve_linear_system: pre-sync");
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    checkCudaErrors(cudaDeviceSynchronize());
+#endif
+    if(corex_trace)
+        logger::info("[corex_trace] solve_linear_system: post-sync, calling PCG");
     if(iterative_solver)
     {
         SolvingInfo info{this};
@@ -440,7 +648,22 @@ void GlobalLinearSystem::Impl::distribute_solution()
     auto diag_dof_counts     = diag_dof_offsets_counts.counts();
     auto diag_dof_offsets    = diag_dof_offsets_counts.offsets();
 
-    // distribute the solution to all diag subsystems
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    if(std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM"))
+    {
+        int n = static_cast<int>(x.size());
+        std::vector<Float> hx(n);
+        checkCudaErrors(cudaMemcpy(hx.data(), x.view().data(), sizeof(Float) * n, cudaMemcpyDeviceToHost));
+        Float norm_x = 0;
+        for(int i = 0; i < n; ++i) norm_x += hx[i] * hx[i];
+        norm_x = std::sqrt(norm_x);
+        logger::info("[corex_trace][sol] PCG x: norm={}, x[0..5]={},{},{},{},{},{}",
+                     norm_x,
+                     n > 0 ? hx[0] : 0, n > 1 ? hx[1] : 0, n > 2 ? hx[2] : 0,
+                     n > 3 ? hx[3] : 0, n > 4 ? hx[4] : 0, n > 5 ? hx[5] : 0);
+    }
+#endif
+
     for(auto&& [i, diag_subsystem] : enumerate(diag_subsystems.view()))
     {
         SolutionInfo info{this};
@@ -453,6 +676,8 @@ void GlobalLinearSystem::Impl::apply_preconditioner(muda::DenseVectorView<Float>
                                                     muda::CDenseVectorView<Float> r,
                                                     muda::CVarView<IndexT>        converged)
 {
+    using namespace muda;
+
     (void)converged;
     auto diag_dof_counts  = diag_dof_offsets_counts.counts();
     auto diag_dof_offsets = diag_dof_offsets_counts.offsets();
@@ -487,7 +712,7 @@ void GlobalLinearSystem::Impl::apply_preconditioner(muda::DenseVectorView<Float>
             auto count  = diag_dof_counts[i];
             auto z_sub  = z.subview(offset, count);
             auto r_sub  = r.subview(offset, count);
-            z_sub.buffer_view().copy_from(r_sub.buffer_view());
+            BufferLaunch(ctx.stream()).copy(z_sub.buffer_view(), r_sub.buffer_view());
         }
     }
 }
@@ -498,10 +723,6 @@ void GlobalLinearSystem::Impl::spmv(Float                         a,
                                     muda::DenseVectorView<Float>  y)
 {
     spmver.rbk_sym_spmv(a, bcoo_A.cview(), x, b, y);
-
-    // Just some debug options
-    //  * spmver.sym_spmv(a, bcoo_A.cview(), x, b, y);      // Slightly slower
-    //  * spmver.cpu_sym_spmv(a, bcoo_A.cview(), x, b, y);  // Much slower
 }
 
 void GlobalLinearSystem::Impl::spmv_dot(muda::CDenseVectorView<Float> x,
@@ -562,7 +783,7 @@ Float GlobalLinearSystem::Impl::diag_norm()
     for(auto&& [i, diag_subsystem] : enumerate(diag_subsystems.view()))
     {
         DiagNormInfo info(this, diag_subsystem->m_index);
-        norm = max(norm, diag_subsystem->diag_norm(info));
+        norm = (std::max<Float>)(norm, diag_subsystem->diag_norm(info));
     }
 
     return norm;
@@ -575,7 +796,7 @@ Float GlobalLinearSystem::Impl::mass_norm()
     for(auto&& [i, diag_subsystem] : enumerate(diag_subsystems.view()))
     {
         DiagNormInfo info(this, diag_subsystem->m_index);
-        norm = max(norm, diag_subsystem->mass_norm(info));
+        norm = (std::max<Float>)(norm, diag_subsystem->mass_norm(info));
     }
 
     return norm;

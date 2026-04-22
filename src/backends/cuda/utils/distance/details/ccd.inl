@@ -1,13 +1,28 @@
 //ref: https://github.com/ipc-sim/Codim-IPC/tree/main/Library/Math/Distance
+#include <limits>
 #include <thrust/extrema.h>
 #include <thrust/swap.h>
 namespace uipc::backend::cuda::distance
 {
 template <typename T>
-MUDA_GENERIC bool point_edge_cd_broadphase(const Eigen::Vector<T, 3>& x0,
-                                           const Eigen::Vector<T, 3>& x1,
-                                           const Eigen::Vector<T, 3>& x2,
-                                           T                          dist)
+MUDA_HOST MUDA_DEVICE constexpr T ccd_zero_tol()
+{
+    return T(64) * std::numeric_limits<T>::epsilon();
+}
+
+template <typename T>
+MUDA_HOST MUDA_DEVICE T ccd_safe_denom(T dist_cur, T thickness)
+{
+    T denom    = dist_cur + thickness;
+    T min_denom = ccd_zero_tol<T>() * (dist_cur + thickness + T(1));
+    return denom > min_denom ? denom : min_denom;
+}
+
+template <typename T>
+MUDA_HOST MUDA_DEVICE bool point_edge_cd_broadphase(const Eigen::Vector<T, 3>& x0,
+                                                     const Eigen::Vector<T, 3>& x1,
+                                                     const Eigen::Vector<T, 3>& x2,
+                                                     T                          dist)
 {
     const Eigen::Array<T, 3, 1> max_e = x1.array().max(x2.array());
     const Eigen::Array<T, 3, 1> min_e = x1.array().min(x2.array());
@@ -22,13 +37,13 @@ MUDA_GENERIC bool point_edge_cd_broadphase(const Eigen::Vector<T, 3>& x0,
 }
 
 template <typename T>
-MUDA_GENERIC bool point_edge_ccd_broadphase(const Eigen::Matrix<T, 2, 1>& p,
-                                            const Eigen::Matrix<T, 2, 1>& e0,
-                                            const Eigen::Matrix<T, 2, 1>& e1,
-                                            const Eigen::Matrix<T, 2, 1>& dp,
-                                            const Eigen::Matrix<T, 2, 1>& de0,
-                                            const Eigen::Matrix<T, 2, 1>& de1,
-                                            T                             dist)
+MUDA_HOST MUDA_DEVICE bool point_edge_ccd_broadphase(const Eigen::Matrix<T, 2, 1>& p,
+                                                      const Eigen::Matrix<T, 2, 1>& e0,
+                                                      const Eigen::Matrix<T, 2, 1>& e1,
+                                                      const Eigen::Matrix<T, 2, 1>& dp,
+                                                      const Eigen::Matrix<T, 2, 1>& de0,
+                                                      const Eigen::Matrix<T, 2, 1>& de1,
+                                                      T                             dist)
 {
     const Eigen::Array<T, 2, 1> max_p = p.array().max((p + dp).array());
     const Eigen::Array<T, 2, 1> min_p = p.array().min((p + dp).array());
@@ -47,11 +62,11 @@ MUDA_GENERIC bool point_edge_ccd_broadphase(const Eigen::Matrix<T, 2, 1>& p,
 }
 
 template <typename T>
-MUDA_GENERIC bool point_triangle_cd_broadphase(const Eigen::Vector<T, 3>& p,
-                                               const Eigen::Vector<T, 3>& t0,
-                                               const Eigen::Vector<T, 3>& t1,
-                                               const Eigen::Vector<T, 3>& t2,
-                                               T                          dist)
+MUDA_HOST MUDA_DEVICE bool point_triangle_cd_broadphase(const Eigen::Vector<T, 3>& p,
+                                                         const Eigen::Vector<T, 3>& t0,
+                                                         const Eigen::Vector<T, 3>& t1,
+                                                         const Eigen::Vector<T, 3>& t2,
+                                                         T                          dist)
 {
     const Eigen::Array<T, 3, 1> max_tri = t0.array().max(t1.array()).max(t2.array());
     const Eigen::Array<T, 3, 1> min_tri = t0.array().min(t1.array()).min(t2.array());
@@ -66,11 +81,11 @@ MUDA_GENERIC bool point_triangle_cd_broadphase(const Eigen::Vector<T, 3>& p,
 }
 
 template <typename T>
-MUDA_GENERIC bool edge_edge_cd_broadphase(const Eigen::Vector<T, 3>& ea0,
-                                          const Eigen::Vector<T, 3>& ea1,
-                                          const Eigen::Vector<T, 3>& eb0,
-                                          const Eigen::Vector<T, 3>& eb1,
-                                          T                          dist)
+MUDA_HOST MUDA_DEVICE bool edge_edge_cd_broadphase(const Eigen::Vector<T, 3>& ea0,
+                                                    const Eigen::Vector<T, 3>& ea1,
+                                                    const Eigen::Vector<T, 3>& eb0,
+                                                    const Eigen::Vector<T, 3>& eb1,
+                                                    T                          dist)
 {
     const Eigen::Array<T, 3, 1> max_a = ea0.array().max(ea1.array());
     const Eigen::Array<T, 3, 1> min_a = ea0.array().min(ea1.array());
@@ -87,15 +102,15 @@ MUDA_GENERIC bool edge_edge_cd_broadphase(const Eigen::Vector<T, 3>& ea0,
 }
 
 template <typename T>
-MUDA_GENERIC bool point_triangle_ccd_broadphase(const Eigen::Vector<T, 3>& p,
-                                                const Eigen::Vector<T, 3>& t0,
-                                                const Eigen::Vector<T, 3>& t1,
-                                                const Eigen::Vector<T, 3>& t2,
-                                                const Eigen::Vector<T, 3>& dp,
-                                                const Eigen::Vector<T, 3>& dt0,
-                                                const Eigen::Vector<T, 3>& dt1,
-                                                const Eigen::Vector<T, 3>& dt2,
-                                                T                          dist)
+MUDA_HOST MUDA_DEVICE bool point_triangle_ccd_broadphase(const Eigen::Vector<T, 3>& p,
+                                                          const Eigen::Vector<T, 3>& t0,
+                                                          const Eigen::Vector<T, 3>& t1,
+                                                          const Eigen::Vector<T, 3>& t2,
+                                                          const Eigen::Vector<T, 3>& dp,
+                                                          const Eigen::Vector<T, 3>& dt0,
+                                                          const Eigen::Vector<T, 3>& dt1,
+                                                          const Eigen::Vector<T, 3>& dt2,
+                                                          T                          dist)
 {
     const Eigen::Array<T, 3, 1> max_p   = p.array().max((p + dp).array());
     const Eigen::Array<T, 3, 1> min_p   = p.array().min((p + dp).array());
@@ -122,15 +137,15 @@ MUDA_GENERIC bool point_triangle_ccd_broadphase(const Eigen::Vector<T, 3>& p,
 }
 
 template <typename T>
-MUDA_GENERIC bool edge_edge_ccd_broadphase(const Eigen::Vector<T, 3>& ea0,
-                                           const Eigen::Vector<T, 3>& ea1,
-                                           const Eigen::Vector<T, 3>& eb0,
-                                           const Eigen::Vector<T, 3>& eb1,
-                                           const Eigen::Vector<T, 3>& dea0,
-                                           const Eigen::Vector<T, 3>& dea1,
-                                           const Eigen::Vector<T, 3>& deb0,
-                                           const Eigen::Vector<T, 3>& deb1,
-                                           T                          dist)
+MUDA_HOST MUDA_DEVICE bool edge_edge_ccd_broadphase(const Eigen::Vector<T, 3>& ea0,
+                                                     const Eigen::Vector<T, 3>& ea1,
+                                                     const Eigen::Vector<T, 3>& eb0,
+                                                     const Eigen::Vector<T, 3>& eb1,
+                                                     const Eigen::Vector<T, 3>& dea0,
+                                                     const Eigen::Vector<T, 3>& dea1,
+                                                     const Eigen::Vector<T, 3>& deb0,
+                                                     const Eigen::Vector<T, 3>& deb1,
+                                                     T                          dist)
 {
     const Eigen::Array<T, 3, 1> max_a =
         ea0.array().max(ea1.array()).max((ea0 + dea0).array()).max((ea1 + dea1).array());
@@ -151,13 +166,13 @@ MUDA_GENERIC bool edge_edge_ccd_broadphase(const Eigen::Vector<T, 3>& ea0,
 }
 
 template <typename T>
-MUDA_GENERIC bool point_edge_ccd_broadphase(const Eigen::Vector<T, 3>& p,
-                                            const Eigen::Vector<T, 3>& e0,
-                                            const Eigen::Vector<T, 3>& e1,
-                                            const Eigen::Vector<T, 3>& dp,
-                                            const Eigen::Vector<T, 3>& de0,
-                                            const Eigen::Vector<T, 3>& de1,
-                                            T                          dist)
+MUDA_HOST MUDA_DEVICE bool point_edge_ccd_broadphase(const Eigen::Vector<T, 3>& p,
+                                                      const Eigen::Vector<T, 3>& e0,
+                                                      const Eigen::Vector<T, 3>& e1,
+                                                      const Eigen::Vector<T, 3>& dp,
+                                                      const Eigen::Vector<T, 3>& de0,
+                                                      const Eigen::Vector<T, 3>& de1,
+                                                      T                          dist)
 {
     const Eigen::Array<T, 3, 1> max_p = p.array().max((p + dp).array());
     const Eigen::Array<T, 3, 1> min_p = p.array().min((p + dp).array());
@@ -176,11 +191,11 @@ MUDA_GENERIC bool point_edge_ccd_broadphase(const Eigen::Vector<T, 3>& p,
 }
 
 template <typename T>
-MUDA_GENERIC bool point_point_ccd_broadphase(const Eigen::Vector<T, 3>& p0,
-                                             const Eigen::Vector<T, 3>& p1,
-                                             const Eigen::Vector<T, 3>& dp0,
-                                             const Eigen::Vector<T, 3>& dp1,
-                                             T                          dist)
+MUDA_HOST MUDA_DEVICE bool point_point_ccd_broadphase(const Eigen::Vector<T, 3>& p0,
+                                                       const Eigen::Vector<T, 3>& p1,
+                                                       const Eigen::Vector<T, 3>& dp0,
+                                                       const Eigen::Vector<T, 3>& dp1,
+                                                       T                          dist)
 {
     const Eigen::Array<T, 3, 1> max_p0 = p0.array().max((p0 + dp0).array());
     const Eigen::Array<T, 3, 1> min_p0 = p0.array().min((p0 + dp0).array());
@@ -197,18 +212,18 @@ MUDA_GENERIC bool point_point_ccd_broadphase(const Eigen::Vector<T, 3>& p0,
 }
 
 template <typename T>
-MUDA_GENERIC bool point_triangle_ccd(Eigen::Vector<T, 3> p,
-                                     Eigen::Vector<T, 3> t0,
-                                     Eigen::Vector<T, 3> t1,
-                                     Eigen::Vector<T, 3> t2,
-                                     Eigen::Vector<T, 3> dp,
-                                     Eigen::Vector<T, 3> dt0,
-                                     Eigen::Vector<T, 3> dt1,
-                                     Eigen::Vector<T, 3> dt2,
-                                     T                   eta,
-                                     T                   thickness,
-                                     int                 max_iter,
-                                     T&                  toc)
+MUDA_HOST MUDA_DEVICE bool point_triangle_ccd(Eigen::Vector<T, 3> p,
+                                               Eigen::Vector<T, 3> t0,
+                                               Eigen::Vector<T, 3> t1,
+                                               Eigen::Vector<T, 3> t2,
+                                               Eigen::Vector<T, 3> dp,
+                                               Eigen::Vector<T, 3> dt0,
+                                               Eigen::Vector<T, 3> dt1,
+                                               Eigen::Vector<T, 3> dt2,
+                                               T                   eta,
+                                               T                   thickness,
+                                               int                 max_iter,
+                                               T&                  toc)
 {
     Eigen::Vector<T, 3> mov = (dt0 + dt1 + dt2 + dp) / 4;
     dt0 -= mov;
@@ -218,7 +233,7 @@ MUDA_GENERIC bool point_triangle_ccd(Eigen::Vector<T, 3> p,
     Eigen::Array3<T> dispMag2Vec{dt0.squaredNorm(), dt1.squaredNorm(), dt2.squaredNorm()};
     T maxDispMag = dp.norm() + sqrt(dispMag2Vec.maxCoeff());
 
-    if(maxDispMag <= T(0))
+    if(maxDispMag <= ccd_zero_tol<T>())
     {
         return false;
     }
@@ -227,7 +242,7 @@ MUDA_GENERIC bool point_triangle_ccd(Eigen::Vector<T, 3> p,
     auto flag = point_triangle_distance_flag(p, t0, t1, t2);
     point_triangle_distance2(flag, p, t0, t1, t2, dist2_cur);
     T dist_cur = sqrt(dist2_cur);
-    T gap = eta * (dist2_cur - thickness * thickness) / (dist_cur + thickness);
+    T gap = eta * (dist2_cur - thickness * thickness) / ccd_safe_denom(dist_cur, thickness);
     T toc_prev = toc;
     toc        = 0;
     while(true)
@@ -238,8 +253,8 @@ MUDA_GENERIC bool point_triangle_ccd(Eigen::Vector<T, 3> p,
                 return true;
         }
 
-        T tocLowerBound = (1 - eta) * (dist2_cur - thickness * thickness)
-                          / ((dist_cur + thickness) * maxDispMag);
+        T tocLowerBound = (T(1) - eta) * (dist2_cur - thickness * thickness)
+                          / (ccd_safe_denom(dist_cur, thickness) * maxDispMag);
 
         p += tocLowerBound * dp;
         t0 += tocLowerBound * dt0;
@@ -248,7 +263,7 @@ MUDA_GENERIC bool point_triangle_ccd(Eigen::Vector<T, 3> p,
         flag = point_triangle_distance_flag(p, t0, t1, t2);
         point_triangle_distance2(flag, p, t0, t1, t2, dist2_cur);
         dist_cur = sqrt(dist2_cur);
-        if(toc && ((dist2_cur - thickness * thickness) / (dist_cur + thickness) < gap))
+        if(toc && ((dist2_cur - thickness * thickness) / ccd_safe_denom(dist_cur, thickness) < gap))
         {
             break;
         }
@@ -264,18 +279,18 @@ MUDA_GENERIC bool point_triangle_ccd(Eigen::Vector<T, 3> p,
 }
 
 template <typename T>
-MUDA_GENERIC bool edge_edge_ccd(Eigen::Vector<T, 3> ea0,
-                                Eigen::Vector<T, 3> ea1,
-                                Eigen::Vector<T, 3> eb0,
-                                Eigen::Vector<T, 3> eb1,
-                                Eigen::Vector<T, 3> dea0,
-                                Eigen::Vector<T, 3> dea1,
-                                Eigen::Vector<T, 3> deb0,
-                                Eigen::Vector<T, 3> deb1,
-                                T                   eta,
-                                T                   thickness,
-                                int                 max_iter,
-                                T&                  toc)
+MUDA_HOST MUDA_DEVICE bool edge_edge_ccd(Eigen::Vector<T, 3> ea0,
+                                          Eigen::Vector<T, 3> ea1,
+                                          Eigen::Vector<T, 3> eb0,
+                                          Eigen::Vector<T, 3> eb1,
+                                          Eigen::Vector<T, 3> dea0,
+                                          Eigen::Vector<T, 3> dea1,
+                                          Eigen::Vector<T, 3> deb0,
+                                          Eigen::Vector<T, 3> deb1,
+                                          T                   eta,
+                                          T                   thickness,
+                                          int                 max_iter,
+                                          T&                  toc)
 {
     Eigen::Vector<T, 3> mov = (dea0 + dea1 + deb0 + deb1) / 4;
     dea0 -= mov;
@@ -284,7 +299,7 @@ MUDA_GENERIC bool edge_edge_ccd(Eigen::Vector<T, 3> ea0,
     deb1 -= mov;
     T maxDispMag = sqrt(std::max(dea0.squaredNorm(), dea1.squaredNorm()))
                    + sqrt(std::max(deb0.squaredNorm(), deb1.squaredNorm()));
-    if(maxDispMag == 0)
+    if(maxDispMag <= ccd_zero_tol<T>())
     {
         return false;
     }
@@ -305,7 +320,7 @@ MUDA_GENERIC bool edge_edge_ccd(Eigen::Vector<T, 3> ea0,
         dFunc     = dist2_cur - thickness * thickness;
     }
     T dist_cur = sqrt(dist2_cur);
-    T gap      = eta * dFunc / (dist_cur + thickness);
+    T gap      = eta * dFunc / ccd_safe_denom(dist_cur, thickness);
     T toc_prev = toc;
     toc        = 0;
     while(true)
@@ -316,7 +331,7 @@ MUDA_GENERIC bool edge_edge_ccd(Eigen::Vector<T, 3> ea0,
                 return true;
         }
 
-        T tocLowerBound = (1 - eta) * dFunc / ((dist_cur + thickness) * maxDispMag);
+        T tocLowerBound = (T(1) - eta) * dFunc / (ccd_safe_denom(dist_cur, thickness) * maxDispMag);
 
         ea0 += tocLowerBound * dea0;
         ea1 += tocLowerBound * dea1;
@@ -337,7 +352,7 @@ MUDA_GENERIC bool edge_edge_ccd(Eigen::Vector<T, 3> ea0,
             dFunc     = dist2_cur - thickness * thickness;
         }
         dist_cur = sqrt(dist2_cur);
-        if(toc && (dFunc / (dist_cur + thickness) < gap))
+        if(toc && (dFunc / ccd_safe_denom(dist_cur, thickness) < gap))
         {
             break;
         }
@@ -353,23 +368,23 @@ MUDA_GENERIC bool edge_edge_ccd(Eigen::Vector<T, 3> ea0,
 }
 
 template <typename T>
-MUDA_GENERIC bool point_edge_ccd(Eigen::Vector<T, 3> p,
-                                 Eigen::Vector<T, 3> e0,
-                                 Eigen::Vector<T, 3> e1,
-                                 Eigen::Vector<T, 3> dp,
-                                 Eigen::Vector<T, 3> de0,
-                                 Eigen::Vector<T, 3> de1,
-                                 T                   eta,
-                                 T                   thickness,
-                                 int                 max_iter,
-                                 T&                  toc)
+MUDA_HOST MUDA_DEVICE bool point_edge_ccd(Eigen::Vector<T, 3> p,
+                                           Eigen::Vector<T, 3> e0,
+                                           Eigen::Vector<T, 3> e1,
+                                           Eigen::Vector<T, 3> dp,
+                                           Eigen::Vector<T, 3> de0,
+                                           Eigen::Vector<T, 3> de1,
+                                           T                   eta,
+                                           T                   thickness,
+                                           int                 max_iter,
+                                           T&                  toc)
 {
     Eigen::Vector<T, 3> mov = (dp + de0 + de1) / 3;
     de0 -= mov;
     de1 -= mov;
     dp -= mov;
     T maxDispMag = dp.norm() + sqrt(std::max(de0.squaredNorm(), de1.squaredNorm()));
-    if(maxDispMag == 0)
+    if(maxDispMag <= ccd_zero_tol<T>())
     {
         return false;
     }
@@ -378,7 +393,7 @@ MUDA_GENERIC bool point_edge_ccd(Eigen::Vector<T, 3> p,
     auto flag = point_edge_distance_flag(p, e0, e1);
     point_edge_distance2(flag, p, e0, e1, dist2_cur);
     T dist_cur = sqrt(dist2_cur);
-    T gap = eta * (dist2_cur - thickness * thickness) / (dist_cur + thickness);
+    T gap = eta * (dist2_cur - thickness * thickness) / ccd_safe_denom(dist_cur, thickness);
     T toc_prev = toc;
     toc        = 0;
     while(true)
@@ -389,8 +404,8 @@ MUDA_GENERIC bool point_edge_ccd(Eigen::Vector<T, 3> p,
                 return true;
         }
 
-        T tocLowerBound = (1 - eta) * (dist2_cur - thickness * thickness)
-                          / ((dist_cur + thickness) * maxDispMag);
+        T tocLowerBound = (T(1) - eta) * (dist2_cur - thickness * thickness)
+                          / (ccd_safe_denom(dist_cur, thickness) * maxDispMag);
 
         p += tocLowerBound * dp;
         e0 += tocLowerBound * de0;
@@ -398,7 +413,7 @@ MUDA_GENERIC bool point_edge_ccd(Eigen::Vector<T, 3> p,
         flag = point_edge_distance_flag(p, e0, e1);
         point_edge_distance2(flag, p, e0, e1, dist2_cur);
         dist_cur = sqrt(dist2_cur);
-        if(toc && (dist2_cur - thickness * thickness) / (dist_cur + thickness) < gap)
+        if(toc && (dist2_cur - thickness * thickness) / ccd_safe_denom(dist_cur, thickness) < gap)
         {
             break;
         }
@@ -414,20 +429,20 @@ MUDA_GENERIC bool point_edge_ccd(Eigen::Vector<T, 3> p,
 }
 
 template <typename T>
-MUDA_GENERIC bool point_point_ccd(Eigen::Vector<T, 3> p0,
-                                  Eigen::Vector<T, 3> p1,
-                                  Eigen::Vector<T, 3> dp0,
-                                  Eigen::Vector<T, 3> dp1,
-                                  T                   eta,
-                                  T                   thickness,
-                                  int                 max_iter,
-                                  T&                  toc)
+MUDA_HOST MUDA_DEVICE bool point_point_ccd(Eigen::Vector<T, 3> p0,
+                                            Eigen::Vector<T, 3> p1,
+                                            Eigen::Vector<T, 3> dp0,
+                                            Eigen::Vector<T, 3> dp1,
+                                            T                   eta,
+                                            T                   thickness,
+                                            int                 max_iter,
+                                            T&                  toc)
 {
     Eigen::Vector<T, 3> mov = (dp0 + dp1) / 2;
     dp1 -= mov;
     dp0 -= mov;
     T maxDispMag = dp0.norm() + dp1.norm();
-    if(maxDispMag == 0)
+    if(maxDispMag <= ccd_zero_tol<T>())
     {
         return false;
     }
@@ -436,7 +451,7 @@ MUDA_GENERIC bool point_point_ccd(Eigen::Vector<T, 3> p0,
     auto flag = point_point_distance_flag(p0, p1);
     point_point_distance2(flag, p0, p1, dist2_cur);
     T dist_cur = sqrt(dist2_cur);
-    T gap = eta * (dist2_cur - thickness * thickness) / (dist_cur + thickness);
+    T gap = eta * (dist2_cur - thickness * thickness) / ccd_safe_denom(dist_cur, thickness);
     T toc_prev = toc;
     toc        = 0;
     while(true)
@@ -447,15 +462,15 @@ MUDA_GENERIC bool point_point_ccd(Eigen::Vector<T, 3> p0,
                 return true;
         }
 
-        T tocLowerBound = (1 - eta) * (dist2_cur - thickness * thickness)
-                          / ((dist_cur + thickness) * maxDispMag);
+        T tocLowerBound = (T(1) - eta) * (dist2_cur - thickness * thickness)
+                          / (ccd_safe_denom(dist_cur, thickness) * maxDispMag);
 
         p0 += tocLowerBound * dp0;
         p1 += tocLowerBound * dp1;
         flag = point_point_distance_flag(p0, p1);
         point_point_distance2(flag, p0, p1, dist2_cur);
         dist_cur = sqrt(dist2_cur);
-        if(toc && (dist2_cur - thickness * thickness) / (dist_cur + thickness) < gap)
+        if(toc && (dist2_cur - thickness * thickness) / ccd_safe_denom(dist_cur, thickness) < gap)
         {
             break;
         }

@@ -14,7 +14,7 @@ class EasyVertexHalfPlaneTrajectoryFilter final : public VertexHalfPlaneTrajecto
         void filter_active(FilterActiveInfo& info);
         void filter_toi(FilterTOIInfo& info);
 
-        muda::DeviceVar<IndexT> num_collisions;
+        muda::DeviceBuffer<IndexT> num_collisions;
         IndexT                  h_num_collisions;
 
         /**

@@ -66,31 +66,35 @@ class ARAP3D final : public FEM3DConstitution
         using namespace muda;
         namespace ARAP = sym::arap_3d;
 
+        // Minimal capture: device pointers + scalars only (no DenseViewer / .name()).
+        const int         n     = static_cast<int>(info.indices().size());
+        const Float*      pk    = kappas.data();
+        Float*            pe    = info.energies().data();
+        const Vector4i*   pidx  = info.indices().data();
+        const Vector3*    pxs   = info.xs().data();
+        const Matrix3x3* pDm  = info.Dm_invs().data();
+        const Float*      pvol = info.rest_volumes().data();
+        const Float       dt   = info.dt();
+
         ParallelFor()
             .file_line(__FILE__, __LINE__)
-            .apply(info.indices().size(),
-                   [kappas   = kappas.cviewer().name("mus"),
-                    energies = info.energies().viewer().name("energies"),
-                    indices  = info.indices().viewer().name("indices"),
-                    xs       = info.xs().viewer().name("xs"),
-                    Dm_invs  = info.Dm_invs().viewer().name("Dm_invs"),
-                    volumes  = info.rest_volumes().viewer().name("volumes"),
-                    dt       = info.dt()] __device__(int I)
+            .apply(n,
+                   [pk, pe, pidx, pxs, pDm, pvol, dt] __device__(int I)
                    {
-                       const Vector4i&  tet    = indices(I);
-                       const Matrix3x3& Dm_inv = Dm_invs(I);
+                       const Vector4i&  tet    = pidx[I];
+                       const Matrix3x3& Dm_inv = pDm[I];
 
-                       const Vector3& x0 = xs(tet(0));
-                       const Vector3& x1 = xs(tet(1));
-                       const Vector3& x2 = xs(tet(2));
-                       const Vector3& x3 = xs(tet(3));
+                       const Vector3& x0 = pxs[tet(0)];
+                       const Vector3& x1 = pxs[tet(1)];
+                       const Vector3& x2 = pxs[tet(2)];
+                       const Vector3& x3 = pxs[tet(3)];
 
                        auto F = fem::F(x0, x1, x2, x3, Dm_inv);
 
                        Float E;
 
-                       ARAP::E(E, kappas(I) * dt * dt, volumes(I), F);
-                       energies(I) = E;
+                       ARAP::E(E, pk[I] * dt * dt, pvol[I], F);
+                       pe[I] = E;
                    });
     }
 
@@ -99,50 +103,88 @@ class ARAP3D final : public FEM3DConstitution
         using namespace muda;
         namespace ARAP = sym::arap_3d;
 
+        const int       n     = static_cast<int>(info.indices().size());
+        const Float*    pk    = kappas.data();
+        const Vector4i* pidx  = info.indices().data();
+        const Vector3*  pxs   = info.xs().data();
+        const Matrix3x3* pDm  = info.Dm_invs().data();
+        const Float*    pvol  = info.rest_volumes().data();
+        const Float     dt    = info.dt();
+        const int       grad_only_i = info.gradient_only() ? 1 : 0;
+
         ParallelFor()
             .file_line(__FILE__, __LINE__)
-            .apply(info.indices().size(),
-                   [kappas  = kappas.cviewer().name("mus"),
-                    indices = info.indices().viewer().name("indices"),
-                    xs      = info.xs().viewer().name("xs"),
-                    Dm_invs = info.Dm_invs().viewer().name("Dm_invs"),
-                    G3s     = info.gradients().viewer().name("gradients"),
-                    H3x3s   = info.hessians().viewer().name("hessians"),
-                    volumes = info.rest_volumes().viewer().name("volumes"),
-                    dt      = info.dt(),
-                    gradient_only = info.gradient_only()] __device__(int I) mutable
+            .apply(n,
+                   [pk,
+                    pidx,
+                    pxs,
+                    pDm,
+                    pvol,
+                    dt,
+                    grad_only_i,
+                    G3s = info.gradients().viewer().name("gradients"),
+                    H3s = info.hessians().viewer().name("hessians")] __device__(int I) mutable
                    {
-                       const Vector4i&  tet    = indices(I);
-                       const Matrix3x3& Dm_inv = Dm_invs(I);
+                       const Vector4i&  tet    = pidx[I];
+                       const Matrix3x3& Dm_inv = pDm[I];
 
-                       const Vector3& x0 = xs(tet(0));
-                       const Vector3& x1 = xs(tet(1));
-                       const Vector3& x2 = xs(tet(2));
-                       const Vector3& x3 = xs(tet(3));
+                       const Vector3& x0 = pxs[tet(0)];
+                       const Vector3& x1 = pxs[tet(1)];
+                       const Vector3& x2 = pxs[tet(2)];
+                       const Vector3& x3 = pxs[tet(3)];
 
                        auto F = fem::F(x0, x1, x2, x3, Dm_inv);
 
-                       auto kt2 = kappas(I) * dt * dt;
-                       auto v   = volumes(I);
+                       auto kt2 = pk[I] * dt * dt;
+                       auto v   = pvol[I];
 
                        Vector9 dEdF;
                        ARAP::dEdF(dEdF, kt2, v, F);
 
                        Matrix9x12 dFdx = fem::dFdx(Dm_inv);
-                       Vector12   G12  = dFdx.transpose() * dEdF;
+
+                       // Corex: avoid Eigen transpose / chained expr in device lambda
+                       Vector12 G12;
+                       for(int r = 0; r < 12; ++r)
+                       {
+                           Float s = 0;
+                           for(int k = 0; k < 9; ++k)
+                               s += dFdx(k, r) * dEdF(k);
+                           G12(r) = s;
+                       }
 
                        DoubletVectorAssembler DVA{G3s};
-                       DVA.segment<StencilSize>(I * StencilSize).write(tet, G12);
+                       DVA.template segment<4>(I * 4).write(tet, G12);
 
-                       if(gradient_only)
+                       if(grad_only_i)
                            return;
 
                        Matrix9x9 ddEddF;
                        ARAP::ddEddF(ddEddF, kt2, v, F);
                        make_spd(ddEddF);
-                       Matrix12x12 H12x12 = dFdx.transpose() * ddEddF * dFdx;
-                       TripletMatrixAssembler TMA{H3x3s};
-                       TMA.half_block<StencilSize>(I * HalfHessianSize).write(tet, H12x12);
+
+                       Matrix9x12 T_mid;
+                       for(int r = 0; r < 9; ++r)
+                           for(int c = 0; c < 12; ++c)
+                           {
+                               Float s = 0;
+                               for(int k = 0; k < 9; ++k)
+                                   s += ddEddF(r, k) * dFdx(k, c);
+                               T_mid(r, c) = s;
+                           }
+
+                       Matrix12x12 H12x12;
+                       for(int i = 0; i < 12; ++i)
+                           for(int j = 0; j < 12; ++j)
+                           {
+                               Float s = 0;
+                               for(int k = 0; k < 9; ++k)
+                                   s += dFdx(k, i) * T_mid(k, j);
+                               H12x12(i, j) = s;
+                           }
+
+                       TripletMatrixAssembler TMA{H3s};
+                       TMA.template half_block<4>(I * 10).write(tet, H12x12);
                    });
     }
 };

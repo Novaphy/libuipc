@@ -2,6 +2,8 @@
 #include "abd_jacobi_matrix_corex.cu"
 #else
 #include <affine_body/abd_jacobi_matrix.h>
+#include <muda/atomic.h>
+#include <muda/ext/eigen/atomic.h>
 
 namespace uipc::backend::cuda
 {

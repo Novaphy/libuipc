@@ -1,24 +1,132 @@
 #include <linear_system/spmv.h>
+#include <muda/atomic.h>
 #include <muda/launch/launch.h>
+#include <muda/cub/device/device_reduce.h>
 #include <cub/warp/warp_reduce.cuh>
 #include <cub/warp/warp_scan.cuh>
 #include <cub/util_math.cuh>
 #include <cuda_device/bit_operation.h>
 #include <cuda_device/builtin.h>
 #include <Eigen/Sparse>
+#include <vector>
+
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+// Iluvatar llc may crash on CUB HeadSegmentedReduce / shuffle paths in rbk_* kernels.
+#define UIPC_SPMV_ILUVATAR_RBK_WORKAROUND 1
+#else
+#define UIPC_SPMV_ILUVATAR_RBK_WORKAROUND 0
+#endif
 
 namespace uipc::backend::cuda
 {
+namespace
+{
+__global__ void kernel_pointwise_mul(int n, const Float* x, const Float* y, Float* out)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i < n)
+        out[i] = x[i] * y[i];
+}
+
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+__global__ void kernel_scale_y(int n, Float b, Float* y)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i < n)
+        y[i] = b * y[i];
+}
+
+// Simplified per-row kernel: no __restrict__, scalar accumulators, unrolled
+// inner products, no Float a parameter (caller handles scaling separately).
+// The original kernel_sym_spmv_by_row with array accumulators + __restrict__
+// produces corrupt results on CoreX (suspected compiler codegen / vectorization bug).
+__global__ void kernel_sym_spmv_v2(int          n_block_rows,
+                                   int          n_triplets,
+                                   const int*   rows,
+                                   const int*   cols,
+                                   const Float* blocks,
+                                   const Float* x,
+                                   Float*       y)
+{
+    int br = blockIdx.x * blockDim.x + threadIdx.x;
+    if(br >= n_block_rows)
+        return;
+
+    Float a0 = 0.0, a1 = 0.0, a2 = 0.0;
+
+    for(int t = 0; t < n_triplets; ++t)
+    {
+        int bi = rows[t];
+        int bj = cols[t];
+        const Float* B = blocks + t * 9;
+
+        if(bi == br)
+        {
+            Float x0 = x[bj * 3], x1 = x[bj * 3 + 1], x2 = x[bj * 3 + 2];
+            a0 += B[0] * x0 + B[3] * x1 + B[6] * x2;
+            a1 += B[1] * x0 + B[4] * x1 + B[7] * x2;
+            a2 += B[2] * x0 + B[5] * x1 + B[8] * x2;
+        }
+
+        if(bj == br && bi != bj)
+        {
+            Float x0 = x[bi * 3], x1 = x[bi * 3 + 1], x2 = x[bi * 3 + 2];
+            a0 += B[0] * x0 + B[1] * x1 + B[2] * x2;
+            a1 += B[3] * x0 + B[4] * x1 + B[5] * x2;
+            a2 += B[6] * x0 + B[7] * x1 + B[8] * x2;
+        }
+    }
+
+    y[br * 3 + 0] = a0;
+    y[br * 3 + 1] = a1;
+    y[br * 3 + 2] = a2;
+}
+#endif
+}  // namespace
+
 void Spmv::sym_spmv(Float                           a,
                     muda::CBCOOMatrixView<Float, 3> A,
                     muda::CDenseVectorView<Float>   x,
                     Float                           b,
                     muda::DenseVectorView<Float>    y)
 {
-
     constexpr int N = 3;
     using T         = Float;
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    int ny = static_cast<int>(y.size());
+    int nt = static_cast<int>(A.triplet_count());
+    constexpr int kBlk = 256;
+
+    if(b != 0)
+    {
+        int grid = (ny + kBlk - 1) / kBlk;
+        kernel_scale_y<<<grid, kBlk>>>(ny, b, y.buffer_view().data());
+    }
+    else
+    {
+        checkCudaErrors(cudaMemset(y.buffer_view().data(), 0, sizeof(Float) * ny));
+    }
+    if(nt > 0)
+    {
+        int n_block_rows = ny / 3;
+        int grid = (n_block_rows + kBlk - 1) / kBlk;
+        kernel_sym_spmv_v2<<<grid, kBlk>>>(
+            n_block_rows,
+            nt,
+            A.row_indices().data(),
+            A.col_indices().data(),
+            reinterpret_cast<const Float*>(A.values().data()),
+            x.data(),
+            y.buffer_view().data());
+        // Apply scaling factor if not 1.0
+        if(a != 1.0)
+        {
+            int sgrid = (ny + kBlk - 1) / kBlk;
+            kernel_scale_y<<<sgrid, kBlk>>>(ny, a, y.buffer_view().data());
+        }
+    }
+#else
     if(b != 0)
     {
         muda::ParallelFor()
@@ -43,41 +151,33 @@ void Spmv::sym_spmv(Float                           a,
                {
                    auto&& [i, j, block] = A(index);
 
-                   if(i == j)  // diagonal block
+                   if(i == j)
                    {
                        auto seg_x = x.segment<N>(j * N);
-
                        Eigen::Vector<T, N> vec_x  = seg_x.as_eigen();
                        auto                result = a * block * vec_x;
-
                        auto seg_y = y.segment<N>(i * N);
                        seg_y.atomic_add(result.eval());
                    }
-                   else  // off-diagonal block
+                   else
                    {
-                       // ij-th block
                        {
                            auto seg_x = x.segment<N>(j * N);
-
                            Eigen::Vector<T, N> vec_x  = seg_x.as_eigen();
                            auto                result = a * block * vec_x;
-
                            auto seg_y = y.segment<N>(i * N);
                            seg_y.atomic_add(result.eval());
                        }
-
-                       // ji-th block
                        {
                            auto seg_x = x.segment<N>(i * N);
-
                            Eigen::Vector<T, N> vec_x = seg_x.as_eigen();
                            auto result = a * block.transpose() * vec_x;
-
                            auto seg_y = y.segment<N>(j * N);
                            seg_y.atomic_add(result.eval());
                        }
                    }
                });
+#endif
 }
 
 __host__ __device__ constexpr int b2i(bool b)
@@ -112,6 +212,9 @@ void Spmv::rbk_spmv(Float                           a,
                     Float                           b,
                     muda::DenseVectorView<Float>    y)
 {
+#if UIPC_SPMV_ILUVATAR_RBK_WORKAROUND
+    sym_spmv(a, A, x, b, y);
+#else
     using namespace muda;
     constexpr int N = 3;
     using T         = Float;
@@ -276,6 +379,7 @@ void Spmv::rbk_spmv(Float                           a,
                     }
                 }
             });
+#endif
 }
 
 void Spmv::rbk_sym_spmv(Float                           a,
@@ -285,6 +389,9 @@ void Spmv::rbk_sym_spmv(Float                           a,
                         muda::DenseVectorView<Float>    y)
 
 {
+#if UIPC_SPMV_ILUVATAR_RBK_WORKAROUND
+    sym_spmv(a, A, x, b, y);
+#else
     using namespace muda;
     constexpr int N = 3;
     using T         = Float;
@@ -404,6 +511,7 @@ void Spmv::rbk_sym_spmv(Float                           a,
                        seg_y.atomic_add(result.eval());
                    }
                });
+#endif
 }
 
 void Spmv::rbk_sym_spmv_dot(Float                           a,
@@ -413,6 +521,22 @@ void Spmv::rbk_sym_spmv_dot(Float                           a,
                             muda::DenseVectorView<Float>    y,
                             muda::VarView<Float>            d_dot)
 {
+#if UIPC_SPMV_ILUVATAR_RBK_WORKAROUND
+    sym_spmv(a, A, x, b, y);
+    auto n = static_cast<int>(x.size());
+    if(n > 0)
+    {
+        dot_buffer.resize(n);
+        constexpr int kBlk = 256;
+        int grid = (n + kBlk - 1) / kBlk;
+        kernel_pointwise_mul<<<grid, kBlk>>>(n, x.data(), y.data(), dot_buffer.data());
+        muda::DeviceReduce().Sum(dot_buffer.data(), d_dot.data(), n);
+    }
+    else
+    {
+        checkCudaErrors(cudaMemsetAsync(d_dot.data(), 0, sizeof(Float)));
+    }
+#else
     using namespace muda;
     constexpr int N = 3;
     using T         = Float;
@@ -538,8 +662,9 @@ void Spmv::rbk_sym_spmv_dot(Float                           a,
                    dot_local = WarpReduceFloat(temp_storage_float[warp_id])
                                    .Sum(dot_local);
                    if(lane_id == 0)
-                       atomicAdd(d_dot.data(), dot_local);
+                       muda::atomic_add(d_dot.data(), dot_local);
                });
+#endif
 }
 
 void Spmv::cpu_sym_spmv(Float                           a,
@@ -576,38 +701,29 @@ void Spmv::cpu_sym_spmv(Float                           a,
         int                block_j = col_indices_host[t];
         const BlockMatrix& block   = values_host[t];
 
-        // Convert block indices to scalar indices
         int scalar_i_base = block_i * BlockDim;
         int scalar_j_base = block_j * BlockDim;
 
-        // Add all entries from the block (upper triangular part)
-        for(int bi = 0; bi < BlockDim; ++bi)
+        if(block_i == block_j)
         {
-            for(int bj = 0; bj < BlockDim; ++bj)
-            {
-                Float value    = block(bi, bj);
-                int   scalar_i = scalar_i_base + bi;
-                int   scalar_j = scalar_j_base + bj;
-
-                triplets.emplace_back(scalar_i, scalar_j, value);
-            }
+            // Diagonal block: symmetrize within the 3x3 block
+            // (zero_out_lower may have zeroed the lower triangle)
+            BlockMatrix sym_block = (block + block.transpose()) * Float(0.5);
+            for(int bi = 0; bi < BlockDim; ++bi)
+                for(int bj = 0; bj < BlockDim; ++bj)
+                    triplets.emplace_back(scalar_i_base + bi, scalar_j_base + bj, sym_block(bi, bj));
         }
-
-        // Since matrix is symmetric at block level, also add transpose block (lower triangular part)
-        if(block_i != block_j)
+        else
         {
+            // Off-diagonal: add block at (i,j) and transpose at (j,i)
+            for(int bi = 0; bi < BlockDim; ++bi)
+                for(int bj = 0; bj < BlockDim; ++bj)
+                    triplets.emplace_back(scalar_i_base + bi, scalar_j_base + bj, block(bi, bj));
+
             BlockMatrix block_transpose = block.transpose();
             for(int bi = 0; bi < BlockDim; ++bi)
-            {
                 for(int bj = 0; bj < BlockDim; ++bj)
-                {
-                    Float value  = block_transpose(bi, bj);
-                    int scalar_i = scalar_j_base + bi;  // Swapped base indices
-                    int scalar_j = scalar_i_base + bj;
-
-                    triplets.emplace_back(scalar_i, scalar_j, value);
-                }
-            }
+                    triplets.emplace_back(scalar_j_base + bi, scalar_i_base + bj, block_transpose(bi, bj));
         }
     }
 
@@ -615,6 +731,7 @@ void Spmv::cpu_sym_spmv(Float                           a,
     Eigen::SparseMatrix<Float> A_sparse(total_scalar_rows, total_scalar_cols);
     A_sparse.setFromTriplets(triplets.begin(), triplets.end());
     A_sparse.makeCompressed();
+
 
     // Copy vectors from device to host
     Eigen::VectorX<Float> x_host(x.size());

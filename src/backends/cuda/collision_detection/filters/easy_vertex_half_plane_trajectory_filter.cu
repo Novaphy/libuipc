@@ -46,7 +46,9 @@ void EasyVertexHalfPlaneTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
 
     auto query = [&]
     {
-        num_collisions = 0;
+        if(num_collisions.size() == 0)
+            num_collisions.resize(1);
+        BufferLaunch().fill(num_collisions.view(), IndexT{0});
 
         ParallelFor()
             .file_line(__FILE__, __LINE__)
@@ -116,7 +118,7 @@ void EasyVertexHalfPlaneTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
 
     query();
 
-    h_num_collisions = num_collisions;
+    num_collisions.view().copy_to(&h_num_collisions);
 
     if(h_num_collisions > PHs.size())
     {

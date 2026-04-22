@@ -99,7 +99,10 @@ class GlobalActiveSetManager final : public SimSystem
         muda::DeviceBuffer<int>      sort_index_input;
         muda::DeviceBuffer<int>      sort_index;
         muda::DeviceBuffer<int>      offset, unique_flag;
-        muda::DeviceVar<int>         total_count;
+        // Use DeviceBuffer (lazy resize in merge) instead of DeviceVar: DeviceVar's ctor
+        // calls Memory().alloc().wait(), which can block for a very long time on CoreX when
+        // it is the first GPU sync after skipping the ctor hello kernel.
+        muda::DeviceBuffer<int> total_count;
         muda::DeviceBuffer<Vector2i> tmp_idx;
         muda::DeviceBuffer<Float>    tmp_lambda;
         muda::DeviceBuffer<int>      tmp_cnt;

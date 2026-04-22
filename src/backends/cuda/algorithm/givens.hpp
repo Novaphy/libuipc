@@ -1,7 +1,10 @@
 #pragma once
 #include <cmath>
 #include <type_traits>
-#include <Eigen/Eigen>
+// Avoid <Eigen/Eigen> here: it pulls SparseCore, whose std::min/max interact badly with
+// Corex Clang CUDA's <cuda_wrappers/algorithm> (mixed float/double deduction in Eigen 3.4).
+#include <Eigen/Core>
+#include <Eigen/Dense>
 #include <type_define.h>
 
 namespace uipc::backend::cuda
@@ -88,9 +91,7 @@ namespace math
         template <typename Mat>
         UIPC_GENERIC constexpr void rowRotation(Eigen::MatrixBase<Mat>& A) const
         {
-            //using std::swap;
             const int ncols = int(A.cols());
-            //printf("%d\n", ncols);
             for(int j = 0; j < ncols; ++j)
             {
                 const T tau1 = A(rowi, j);
@@ -199,7 +200,6 @@ namespace math
     {
         U.derived().setIdentity();
         V.derived().setIdentity();
-        //printf("U:  %f, %f, %f\n", U(0, 1), U(2, 1), U(1, 2));
         // First, zero H(2,0) by rotating rows (1,2)
         using T = typename MatH::Scalar;
         GivensRotation<T> r{H(1, 0), H(2, 0), 1, 2};

@@ -7,6 +7,7 @@
 #include <uipc/common/zip.h>
 #include <collision_detection/global_trajectory_filter.h>
 #include <contact_system/adaptive_contact_parameter_reporter.h>
+#include <cstdlib>
 
 namespace uipc::backend
 {
@@ -28,6 +29,17 @@ class SimSystemCreator<cuda::GlobalContactManager>
 
 namespace uipc::backend::cuda
 {
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+// CoreX: explicit kernel instead of ParallelFor (device lambda unreliable on CoreX).
+__global__ void kernel_cfl_disp_norms(int N, Float* disp_norms, const Vector3* disps,
+                                      const int* is_active)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    disp_norms[i] = is_active[i] ? disps[i].norm() : Float(0);
+}
+#endif
+
 REGISTER_SIM_SYSTEM(GlobalContactManager);
 
 void GlobalContactManager::do_build()
@@ -40,6 +52,15 @@ void GlobalContactManager::do_build()
 
     auto d_hat_attr = config.find<Float>("contact/d_hat");
     m_impl.d_hat    = d_hat_attr->view()[0];
+#if defined(UIPC_FLOAT_SCALAR)
+    if(const char* env = std::getenv("UIPC_FLOAT_D_HAT_SCALE"))
+    {
+        char* end     = nullptr;
+        double factor = std::strtod(env, &end);
+        if(end != env && factor > 0.0)
+            m_impl.d_hat *= static_cast<Float>(factor);
+    }
+#endif
 
     auto dt_attr = config.find<Float>("dt");
     m_impl.dt    = dt_attr->view()[0];
@@ -71,8 +92,18 @@ void GlobalContactManager::Impl::init(WorldVisitor& world)
 
 
     // 2) vertex contact info
-    vert_is_active_contact.resize(global_vertex_manager->positions().size(), 0);
-    vert_disp_norms.resize(global_vertex_manager->positions().size(), 0.0);
+    {
+        auto N = global_vertex_manager->positions().size();
+        vert_is_active_contact.resize(N);
+        vert_disp_norms.resize(N);
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        cudaMemset(vert_is_active_contact.data(), 0, sizeof(IndexT) * N);
+        cudaMemset(vert_disp_norms.data(), 0, sizeof(Float) * N);
+#else
+        vert_is_active_contact.fill(0);
+        vert_disp_norms.fill(0.0);
+#endif
+    }
 
     // 3) reporters
     auto contact_reporter_view = contact_reporters.view();
@@ -185,20 +216,42 @@ void GlobalContactManager::Impl::_build_subscene_tabular(WorldVisitor& world)
 
 void GlobalContactManager::Impl::compute_d_hat()
 {
-    // TODO: Now do nothing
+    if(!global_vertex_manager)
+        return;
+
+    auto d_hats = global_vertex_manager->d_hats();
+    if(d_hats.size() == 0)
+        return;
+
+    muda::DeviceReduce().Min(d_hats.data(), min_d_hat.data(), d_hats.size());
+
+    Float h_min_d_hat = min_d_hat;
+    if(h_min_d_hat > 0.0)
+        d_hat = h_min_d_hat;
 }
 
 void GlobalContactManager::Impl::compute_adaptive_kappa()
 {
-    // TODO: Now do nothing
+    if(!adaptive_contact_parameter_reporter)
+        return;
+
+    auto info = GlobalContactManager::AdaptiveParameterInfo(this);
+    adaptive_contact_parameter_reporter->compute_parameters(info);
 }
 
 Float GlobalContactManager::Impl::compute_cfl_condition()
 {
+    compute_d_hat();
+
     if(!cfl_enabled)  // if cfl is disabled, just return 1.0
         return 1.0;
 
-    vert_is_active_contact.fill(0);  // clear the active flag
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    cudaMemset(vert_is_active_contact.data(), 0,
+               sizeof(IndexT) * vert_is_active_contact.size());
+#else
+    vert_is_active_contact.fill(0);
+#endif
 
     if(global_trajectory_filter)
     {
@@ -207,6 +260,16 @@ Float GlobalContactManager::Impl::compute_cfl_condition()
         auto displacements = global_vertex_manager->displacements();
 
         using namespace muda;
+        int N = static_cast<int>(displacements.size());
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        if(N > 0)
+        {
+            int block = 256, grid = (N + block - 1) / block;
+            kernel_cfl_disp_norms<<<grid, block>>>(
+                N, vert_disp_norms.data(), displacements.data(),
+                vert_is_active_contact.data());
+        }
+#else
         ParallelFor()
             .file_line(__FILE__, __LINE__)
             .apply(displacements.size(),
@@ -215,16 +278,19 @@ Float GlobalContactManager::Impl::compute_cfl_condition()
                     is_contact_active = vert_is_active_contact.viewer().name(
                         "vert_is_contact_active")] __device__(int i) mutable
                    {
-                       // if the contact is not active, then the displacement is ignored
                        disp_norms(i) = is_contact_active(i) ? disps(i).norm() : 0.0;
                    });
+#endif
 
         DeviceReduce().Max(vert_disp_norms.data(),
                            max_disp_norm.data(),
                            vert_disp_norms.size());
 
         Float h_max_disp_norm = max_disp_norm;
-        return h_max_disp_norm == 0.0 ? 1.0 : std::min(0.5 * d_hat / h_max_disp_norm, 1.0);
+        const Float half = Float(0.5);
+        const Float one  = Float(1);
+        return h_max_disp_norm == Float(0) ? one
+                                           : std::min(half * d_hat / h_max_disp_norm, one);
     }
     else
     {
@@ -259,11 +325,8 @@ void GlobalContactManager::init()
 
 void GlobalContactManager::compute_adaptive_parameters()
 {
-    if(!m_impl.adaptive_contact_parameter_reporter)
-        return;
-
-    auto info = AdaptiveParameterInfo(&m_impl);
-    m_impl.adaptive_contact_parameter_reporter->compute_parameters(info);
+    m_impl.compute_d_hat();
+    m_impl.compute_adaptive_kappa();
 }
 
 Float GlobalContactManager::d_hat() const
