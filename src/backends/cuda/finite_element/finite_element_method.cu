@@ -1,8 +1,8 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 // ==============================================================================
 // Dual-source whole-file switch (#if Corex / #else NVIDIA upstream).
 // Reason: cudafit removed FEM external-force feature (NVIDIA-only); NVIDIA path needs the original declarations/code
 // ==============================================================================
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #include <finite_element/finite_element_method.h>
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
@@ -1168,7 +1168,7 @@ void FiniteElementMethod::overwrite_xs(muda::CBufferView<Vector3> xs)
 }
 }  // namespace uipc::backend::cuda
 
-#else  // !UIPC_COREX_CUDA10_COMPAT
+#else
 #include <finite_element/finite_element_method.h>
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
@@ -2336,5 +2336,4 @@ void FiniteElementMethod::overwrite_xs(muda::CBufferView<Vector3> xs)
     m_impl.xs.view().copy_from(xs);
 }
 }  // namespace uipc::backend::cuda
-
-#endif // UIPC_COREX_CUDA10_COMPAT
+#endif

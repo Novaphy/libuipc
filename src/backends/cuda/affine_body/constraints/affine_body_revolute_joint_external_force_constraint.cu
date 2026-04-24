@@ -1,3 +1,4 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #include <affine_body/constraints/affine_body_revolute_joint_external_force_constraint.h>
 #include <affine_body/inter_affine_body_constraint.h>
 #include <affine_body/affine_body_dynamics.h>
@@ -329,3 +330,5 @@ void AffineBodyRevoluteJointExternalForceConstraint::do_compute_gradient_hessian
 {
 }
 }  // namespace uipc::backend::cuda
+#else
+#endif

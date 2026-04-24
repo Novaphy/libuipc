@@ -1,5 +1,5 @@
-#pragma once
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+#pragma once
 // ===== Corex (CUDA 10.2 / single-precision) header =====
 #include <uipc/constitution/constitution.h>
 #include <uipc/geometry/simplicial_complex.h>
@@ -90,8 +90,8 @@ class UIPC_CONSTITUTION_API AffineBodyConstitution : public IConstitution
 };
 }  // namespace uipc::constitution
 
-#else // !UIPC_COREX_CUDA10_COMPAT
-// ===== NVIDIA / upstream header =====
+#else
+#pragma once
 #include <uipc/constitution/constitution.h>
 #include <uipc/geometry/simplicial_complex.h>
 #include <uipc/common/unit.h>
@@ -168,5 +168,4 @@ class UIPC_CONSTITUTION_API AffineBodyConstitution : public IConstitution
     Json m_config;
 };
 }  // namespace uipc::constitution
-
-#endif // UIPC_COREX_CUDA10_COMPAT
+#endif

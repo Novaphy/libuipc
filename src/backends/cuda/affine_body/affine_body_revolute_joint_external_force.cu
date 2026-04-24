@@ -1,3 +1,4 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #include <numbers>
 #include <affine_body/affine_body_external_force_reporter.h>
 #include <affine_body/constraints/affine_body_revolute_joint_external_force_constraint.h>
@@ -195,3 +196,5 @@ class AffineBodyRevoluteJointExternalForceTimeIntegrator : public TimeIntegrator
 REGISTER_SIM_SYSTEM(AffineBodyRevoluteJointExternalForceTimeIntegrator);
 
 }  // namespace uipc::backend::cuda
+#else
+#endif

@@ -1,10 +1,10 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 // ==============================================================================
 // Dual-source whole-file switch: NVIDIA upstream (#else) vs Corex compat (#if).
 // Reason: cudafit removed joint_dof_manager dependency; NVIDIA needs it
 // Surgical hunk-by-hunk merge would touch dozens of unrelated changes; this A/B
 // switch keeps each branch self-contained and easy to audit.
 // ==============================================================================
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #include <affine_body/affine_body_state_accessor_feature.h>
 #include <affine_body/affine_body_dynamics.h>
 #include <affine_body/affine_body_vertex_reporter.h>
@@ -110,7 +110,7 @@ void AffineBodyStateAccessorFeatureOverrider::do_copy_to(geometry::SimplicialCom
 }
 }  // namespace uipc::backend::cuda
 
-#else  // !UIPC_COREX_CUDA10_COMPAT — NVIDIA upstream code path
+#else
 #include <affine_body/affine_body_state_accessor_feature.h>
 #include <affine_body/affine_body_dynamics.h>
 #include <affine_body/affine_body_vertex_reporter.h>
@@ -236,5 +236,4 @@ void AffineBodyStateAccessorFeatureOverrider::do_copy_velocity_to(backend::Buffe
                { dst(i) = q_v_to_transform_v(q_in(i)); });
 }
 }  // namespace uipc::backend::cuda
-
-#endif // UIPC_COREX_CUDA10_COMPAT
+#endif

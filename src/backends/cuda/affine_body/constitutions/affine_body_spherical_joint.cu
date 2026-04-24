@@ -1,10 +1,10 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 // ==============================================================================
 // Dual-source whole-file switch: NVIDIA upstream (#else) vs Corex compat (#if).
 // Reason: different vertex-attr API: NVIDIA uses 4 separate IndexT vertex attrs; Corex uses Vector2i edge attrs
 // Surgical hunk-by-hunk merge would touch dozens of unrelated changes; this A/B
 // switch keeps each branch self-contained and easy to audit.
 // ==============================================================================
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #include <affine_body/inter_affine_body_constitution.h>
 #include <affine_body/constitutions/affine_body_spherical_joint_function.h>
 #include <uipc/builtin/attribute_name.h>
@@ -210,7 +210,7 @@ class AffineBodySphericalJoint final : public InterAffineBodyConstitution
 REGISTER_SIM_SYSTEM(AffineBodySphericalJoint);
 }  // namespace uipc::backend::cuda
 
-#else  // !UIPC_COREX_CUDA10_COMPAT — NVIDIA upstream code path
+#else
 #include <affine_body/inter_affine_body_constitution.h>
 #include <affine_body/constitutions/affine_body_spherical_joint_function.h>
 #include <uipc/builtin/attribute_name.h>
@@ -431,5 +431,4 @@ class AffineBodySphericalJoint final : public InterAffineBodyConstitution
 };
 REGISTER_SIM_SYSTEM(AffineBodySphericalJoint);
 }  // namespace uipc::backend::cuda
-
-#endif // UIPC_COREX_CUDA10_COMPAT
+#endif

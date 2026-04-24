@@ -1,3 +1,4 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #pragma once
 #if __has_include(<span>)
 #include <span>
@@ -30,4 +31,15 @@ using span = std::experimental::span<T, Extent>;
 }  // namespace uipc
 #else
 #error "Neither <span> nor <experimental/span> is available on this toolchain."
+#endif
+#else
+#pragma once
+#include <span>
+namespace uipc
+{
+/**
+ * @brief just an alias for std::span
+ */
+using std::span;
+}  // namespace uipc
 #endif

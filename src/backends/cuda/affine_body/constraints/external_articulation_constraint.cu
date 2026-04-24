@@ -1,10 +1,10 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 // ==============================================================================
 // Dual-source whole-file switch: NVIDIA upstream (#else) vs Corex compat (#if).
 // Reason: diverged constraint API + many removed includes/methods between branches
 // Surgical hunk-by-hunk merge would touch dozens of unrelated changes; this A/B
 // switch keeps each branch self-contained and easy to audit.
 // ==============================================================================
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #include <affine_body/inter_affine_body_constitution.h>
 #include <uipc/builtin/attribute_name.h>
 #include <affine_body/inter_affine_body_constraint.h>
@@ -1099,7 +1099,7 @@ class ExternalArticulationConstraintTimeIntegrator final : public TimeIntegrator
 REGISTER_SIM_SYSTEM(ExternalArticulationConstraintTimeIntegrator);
 }  // namespace uipc::backend::cuda
 
-#else  // !UIPC_COREX_CUDA10_COMPAT — NVIDIA upstream code path
+#else
 #include <affine_body/inter_affine_body_constitution.h>
 #include <uipc/builtin/attribute_name.h>
 #include <affine_body/inter_affine_body_constraint.h>
@@ -2245,5 +2245,4 @@ class ExternalArticulationConstraintTimeIntegrator final : public TimeIntegrator
 
 REGISTER_SIM_SYSTEM(ExternalArticulationConstraintTimeIntegrator);
 }  // namespace uipc::backend::cuda
-
-#endif // UIPC_COREX_CUDA10_COMPAT
+#endif

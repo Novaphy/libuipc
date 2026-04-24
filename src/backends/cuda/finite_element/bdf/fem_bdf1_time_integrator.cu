@@ -1,8 +1,8 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 // ==============================================================================
 // Dual-source whole-file switch (#if Corex / #else NVIDIA upstream).
 // Reason: cudafit removed FEM external-force feature (NVIDIA-only); NVIDIA path needs the original declarations/code
 // ==============================================================================
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #include <finite_element/fem_time_integrator.h>
 #include <time_integrator/bdf1_flag.h>
 
@@ -89,7 +89,7 @@ class FEMBDF1Integrator final : public FEMTimeIntegrator
 REGISTER_SIM_SYSTEM(FEMBDF1Integrator);
 }  // namespace uipc::backend::cuda
 
-#else  // !UIPC_COREX_CUDA10_COMPAT
+#else
 #include <finite_element/fem_time_integrator.h>
 #include <time_integrator/bdf1_flag.h>
 
@@ -177,5 +177,4 @@ class FEMBDF1Integrator final : public FEMTimeIntegrator
 
 REGISTER_SIM_SYSTEM(FEMBDF1Integrator);
 }  // namespace uipc::backend::cuda
-
-#endif // UIPC_COREX_CUDA10_COMPAT
+#endif

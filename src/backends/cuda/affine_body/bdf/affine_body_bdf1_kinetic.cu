@@ -1,3 +1,4 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #include <affine_body/affine_body_kinetic.h>
 #include <time_integrator/bdf1_flag.h>
 #include <muda/ext/eigen/evd.h>
@@ -7,8 +8,6 @@
 namespace uipc::backend::cuda
 {
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-#endif
 
 class AffineBodyBDF1Kinetic final : public AffineBodyKinetic
 {
@@ -23,7 +22,6 @@ class AffineBodyBDF1Kinetic final : public AffineBodyKinetic
     virtual void do_compute_energy(ComputeEnergyInfo& info) override
     {
         using namespace muda;
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
         int n = static_cast<int>(info.qs().size());
         if(n > 0)
         {
@@ -54,35 +52,6 @@ class AffineBodyBDF1Kinetic final : public AffineBodyKinetic
 
             cudaMemcpy((void*)info.energies().data(), h_e.data(), n*sizeof(Float), cudaMemcpyHostToDevice);
         }
-#else
-        ParallelFor()
-            .file_line(__FILE__, __LINE__)
-            .apply(info.qs().size(),
-                   [is_fixed   = info.is_fixed().cviewer().name("is_fixed"),
-                    is_dynamic = info.is_dynamic().cviewer().name("is_dynamic"),
-                    ext_kinetic = info.external_kinetic().cviewer().name("ext_kinetic"),
-                    qs        = info.qs().cviewer().name("qs"),
-                    q_prevs   = info.q_prevs().cviewer().name("q_tildes"),
-                    q_tildes  = info.q_tildes().cviewer().name("q_tildes"),
-                    gravities = info.gravities().cviewer().name("gravities"),
-                    masses    = info.masses().cviewer().name("masses"),
-                    Ks = info.energies().viewer().name("kinetic_energy")] __device__(int i) mutable
-                   {
-                       auto& K = Ks(i);
-                       if(is_fixed(i) || ext_kinetic(i))
-                       {
-                           K = 0.0;
-                       }
-                       else
-                       {
-                           const auto& q       = qs(i);
-                           const auto& q_tilde = q_tildes(i);
-                           const auto& M       = masses(i);
-                           Vector12    dq      = q - q_tilde;
-                           K                   = 0.5 * dq.dot(M * dq);
-                       }
-                   });
-#endif
     }
 
     virtual void do_compute_gradient_hessian(ComputeGradientHessianInfo& info) override
@@ -90,7 +59,6 @@ class AffineBodyBDF1Kinetic final : public AffineBodyKinetic
         using namespace muda;
         const int n = static_cast<int>(info.qs().size());
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
         if(n > 0)
         {
             std::vector<Vector12>            h_q(n), h_qt(n);
@@ -119,37 +87,106 @@ class AffineBodyBDF1Kinetic final : public AffineBodyKinetic
             if(!grad_only)
                 cudaMemcpy((void*)info.hessians().data(), h_hess.data(), n*sizeof(Matrix12x12), cudaMemcpyHostToDevice);
         }
-#else
-        const auto is_fixed = info.is_fixed().cviewer();
-        const auto qs       = info.qs().cviewer();
-        const auto q_tildes = info.q_tildes().cviewer();
-        const auto masses   = info.masses().cviewer();
-        const int  grad_only = info.gradient_only() ? 1 : 0;
-        auto       gradients = info.gradients().viewer();
-        auto       hessians  = info.hessians().viewer();
-
-        ParallelFor()
-            .file_line(__FILE__, __LINE__)
-            .apply(n,
-                   [is_fixed, qs, q_tildes, masses, gradients, hessians, grad_only] __device__(int i) mutable
-                   {
-                       const auto& q       = qs(i);
-                       const auto& q_tilde = q_tildes(i);
-                       auto&       G       = gradients(i);
-                       const auto& M       = masses(i);
-
-                       G = M * (q - q_tilde);
-                       if(is_fixed(i))
-                       {
-                           G = Vector12::Zero();
-                       }
-                       if(grad_only)
-                           return;
-                       hessians(i) = M.to_mat();
-                   });
-#endif
     }
 };
 
 REGISTER_SIM_SYSTEM(AffineBodyBDF1Kinetic);
 }  // namespace uipc::backend::cuda
+#else
+#include <affine_body/affine_body_kinetic.h>
+#include <time_integrator/bdf1_flag.h>
+#include <muda/ext/eigen/evd.h>
+#include <kernel_cout.h>
+
+namespace uipc::backend::cuda
+{
+class AffineBodyBDF1Kinetic final : public AffineBodyKinetic
+{
+  public:
+    using AffineBodyKinetic::AffineBodyKinetic;
+
+    virtual void do_build(BuildInfo& info) override
+    {
+        // need BDF1 flag for BDF1 time integration
+        require<BDF1Flag>();
+    }
+
+    virtual void do_compute_energy(ComputeEnergyInfo& info) override
+    {
+        using namespace muda;
+        ParallelFor()
+            .file_line(__FILE__, __LINE__)
+            .apply(info.qs().size(),
+                   [is_fixed   = info.is_fixed().cviewer().name("is_fixed"),
+                    is_dynamic = info.is_dynamic().cviewer().name("is_dynamic"),
+                    ext_kinetic = info.external_kinetic().cviewer().name("ext_kinetic"),
+                    qs        = info.qs().cviewer().name("qs"),
+                    q_prevs   = info.q_prevs().cviewer().name("q_tildes"),
+                    q_tildes  = info.q_tildes().cviewer().name("q_tildes"),
+                    gravities = info.gravities().cviewer().name("gravities"),
+                    masses    = info.masses().cviewer().name("masses"),
+                    Ks = info.energies().viewer().name("kinetic_energy")] __device__(int i) mutable
+                   {
+                       auto& K = Ks(i);
+                       if(is_fixed(i) || ext_kinetic(i))
+                       {
+                           K = 0.0;
+                       }
+                       else
+                       {
+                           const auto& q       = qs(i);
+                           const auto& q_tilde = q_tildes(i);
+                           const auto& M       = masses(i);
+                           Vector12    dq      = q - q_tilde;
+                           K                   = 0.5 * dq.dot(M * dq);
+                       }
+                   });
+    }
+
+    virtual void do_compute_gradient_hessian(ComputeGradientHessianInfo& info) override
+    {
+        using namespace muda;
+
+        ParallelFor()
+            .file_line(__FILE__, __LINE__)
+            .apply(info.qs().size(),
+                   [is_fixed   = info.is_fixed().cviewer().name("is_fixed"),
+                    is_dynamic = info.is_dynamic().cviewer().name("is_dynamic"),
+                    qs         = info.qs().cviewer().name("qs"),
+                    q_prevs    = info.q_prevs().cviewer().name("q_tildes"),
+                    q_tildes   = info.q_tildes().cviewer().name("q_tildes"),
+                    gravities  = info.gravities().cviewer().name("gravities"),
+                    masses     = info.masses().cviewer().name("masses"),
+                    hessians   = info.hessians().viewer().name("hessians"),
+                    gradients  = info.gradients().viewer().name("gradients"),
+                    dt         = info.dt(),
+                    gradient_only = info.gradient_only(),
+                    cout = KernelCout::viewer()] __device__(int i) mutable
+                   {
+                       const auto& q       = qs(i);
+                       const auto& q_prev  = q_prevs(i);
+                       const auto& q_tilde = q_tildes(i);
+                       auto&       G       = gradients(i);
+                       const auto& M       = masses(i);
+
+                       G = M * (q - q_tilde);
+
+
+                       if(is_fixed(i))
+                       {
+                           G = Vector12::Zero();
+                       }
+
+                       // cout << "KG(" << i << "): " << G.transpose().eval() << "\n";
+
+                       if(gradient_only)
+                           return;
+
+                       hessians(i) = M.to_mat();
+                   });
+    }
+};
+
+REGISTER_SIM_SYSTEM(AffineBodyBDF1Kinetic);
+}  // namespace uipc::backend::cuda
+#endif

@@ -1,10 +1,10 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 // ==============================================================================
 // Dual-source whole-file switch: NVIDIA upstream (#else) vs Corex compat (#if).
 // Reason: 1931-line diff in driving revolute symbolic kernel; flat code, no switcher in either branch
 // Surgical hunk-by-hunk merge would touch dozens of unrelated changes; this A/B
 // switch keeps each branch self-contained and easy to audit.
 // ==============================================================================
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
  
 // Mapping between ABD qi qj to F01
 
@@ -1265,7 +1265,7 @@ R(11,11) = x41*x52;
 
 // ---------
 
-#else  // !UIPC_COREX_CUDA10_COMPAT — NVIDIA upstream code path
+#else
  
 // Mapping between ABD qi qj to F01
 
@@ -2666,5 +2666,4 @@ R(11,11) = x101*x188 + x26*(F01_q(5)*x103*x16*x19 - x104*x83);
 }
 
 // ---------
-
-#endif // UIPC_COREX_CUDA10_COMPAT
+#endif

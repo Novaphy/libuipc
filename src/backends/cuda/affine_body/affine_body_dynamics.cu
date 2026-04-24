@@ -1,10 +1,10 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 // ==============================================================================
 // Dual-source whole-file switch: NVIDIA upstream (#else) vs Corex compat (#if).
 // Reason: 327-line diff with widely-divergent ABD dynamics implementation between branches
 // Surgical hunk-by-hunk merge would touch dozens of unrelated changes; this A/B
 // switch keeps each branch self-contained and easy to audit.
 // ==============================================================================
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #include <affine_body/affine_body_dynamics.h>
 #include <affine_body/utils.h>
 #include <affine_body/abd_line_search_reporter.h>
@@ -1086,7 +1086,7 @@ void AffineBodyDynamics::overwrite_qs(muda::CBufferView<Vector12> qs)
     m_impl.body_id_to_q.view().copy_from(qs);
 }
 }  // namespace uipc::backend::cuda
-#else  // !UIPC_COREX_CUDA10_COMPAT — NVIDIA upstream code path
+#else
 #include <affine_body/affine_body_dynamics.h>
 #include <affine_body/utils.h>
 #include <affine_body/abd_line_search_reporter.h>
@@ -1959,4 +1959,4 @@ void AffineBodyDynamics::overwrite_qs(muda::CBufferView<Vector12> qs)
     m_impl.body_id_to_q.view().copy_from(qs);
 }
 }  // namespace uipc::backend::cuda
-#endif // UIPC_COREX_CUDA10_COMPAT
+#endif

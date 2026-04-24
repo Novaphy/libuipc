@@ -198,8 +198,7 @@ Json AffineBodyConstitution::default_config() noexcept
 }
 }  // namespace uipc::constitution
 
-#else // !UIPC_COREX_CUDA10_COMPAT
-// ===== NVIDIA / upstream implementation =====
+#else
 #include <uipc/constitution/affine_body_constitution.h>
 #include <uipc/builtin/constitution_uid_auto_register.h>
 #include <uipc/builtin/attribute_name.h>
@@ -368,5 +367,4 @@ Json AffineBodyConstitution::default_config() noexcept
     return j;
 }
 }  // namespace uipc::constitution
-
-#endif // UIPC_COREX_CUDA10_COMPAT
+#endif

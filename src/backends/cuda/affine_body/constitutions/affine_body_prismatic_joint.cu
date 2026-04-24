@@ -1,10 +1,10 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 // ==============================================================================
 // Dual-source whole-file switch: NVIDIA upstream (#else) vs Corex compat (#if).
 // Reason: 1386-line diff in prismatic joint constitution; no _corex sidecar; flat code
 // Surgical hunk-by-hunk merge would touch dozens of unrelated changes; this A/B
 // switch keeps each branch self-contained and easy to audit.
 // ==============================================================================
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #include <affine_body/inter_affine_body_constraint.h>
 #include <affine_body/inter_affine_body_constitution.h>
 #include <affine_body/constitutions/affine_body_prismatic_joint_function.h>
@@ -1010,7 +1010,7 @@ REGISTER_SIM_SYSTEM(AffineBodyDrivingPrismaticJointTimeIntegrator);
 
 
 }  // namespace uipc::backend::cuda
-#else  // !UIPC_COREX_CUDA10_COMPAT — NVIDIA upstream code path
+#else
 #include <affine_body/inter_affine_body_constraint.h>
 #include <affine_body/inter_affine_body_constitution.h>
 #include <affine_body/constitutions/affine_body_prismatic_joint_function.h>
@@ -2448,5 +2448,4 @@ class AffineBodyPrismaticJointLimit final : public InterAffineBodyConstitution
 REGISTER_SIM_SYSTEM(AffineBodyPrismaticJointLimit);
 
 }  // namespace uipc::backend::cuda
-
-#endif // UIPC_COREX_CUDA10_COMPAT
+#endif

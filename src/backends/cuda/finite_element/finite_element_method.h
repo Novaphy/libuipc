@@ -1,9 +1,9 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #pragma once
 // ==============================================================================
 // Dual-source whole-file switch (#if Corex / #else NVIDIA upstream).
 // Reason: cudafit removed FEM external-force feature (NVIDIA-only); NVIDIA path needs the original declarations/code
 // ==============================================================================
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #include <sim_system.h>
 #include <muda/buffer.h>
 #include <uipc/geometry/simplicial_complex.h>
@@ -448,7 +448,8 @@ class FiniteElementMethod final : public SimSystem
 
 #include "details/finite_element_method.inl"
 
-#else  // !UIPC_COREX_CUDA10_COMPAT
+#else
+#pragma once
 #include <sim_system.h>
 #include <muda/buffer.h>
 #include <uipc/geometry/simplicial_complex.h>
@@ -899,5 +900,4 @@ class FiniteElementMethod final : public SimSystem
 }  // namespace uipc::backend::cuda
 
 #include "details/finite_element_method.inl"
-
-#endif // UIPC_COREX_CUDA10_COMPAT
+#endif

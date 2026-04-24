@@ -1,10 +1,10 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 // ==============================================================================
 // Dual-source whole-file switch: NVIDIA upstream (#else) vs Corex compat (#if).
 // Reason: 998-line diff in symbolic articulation kernel; flat code, no switcher in either branch
 // Surgical hunk-by-hunk merge would touch dozens of unrelated changes; this A/B
 // switch keeps each branch self-contained and easy to audit.
 // ==============================================================================
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
  
 // External Revolute Joint Constraint
 // Description: Symbolic expressions for revolute joint constraint between two affine bodies.
@@ -1601,7 +1601,7 @@ R(11,10) = x114*x217 + x15*(x215 + x216*x97);
 R(11,11) = x116*x217 + x15*(2*x103*x211 + x108*x216);
 }
 
-#else  // !UIPC_COREX_CUDA10_COMPAT — NVIDIA upstream code path
+#else
  
 // External Revolute Joint Constraint
 // Description: Symbolic expressions for revolute joint constraint between two affine bodies.
@@ -3161,5 +3161,4 @@ R(11,9) = x151*x183 + x173 + x184*x92 + x185*x92;
 R(11,10) = x164*x183 + x174 + x184*x96 + x185*x96;
 R(11,11) = x175 + x179*x183 + x184*x99 + x185*x99;
 }
-
-#endif // UIPC_COREX_CUDA10_COMPAT
+#endif
