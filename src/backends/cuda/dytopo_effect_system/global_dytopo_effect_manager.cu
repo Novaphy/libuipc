@@ -9,6 +9,7 @@
 #include <uipc/common/unit.h>
 #include <uipc/common/zip.h>
 #include <energy_component_flags.h>
+#include <utils/corex_phase_profile.h>
 
 namespace uipc::backend
 {
@@ -80,9 +81,20 @@ void GlobalDyTopoEffectManager::Impl::init(WorldVisitor& world)
 
 void GlobalDyTopoEffectManager::Impl::compute_dytopo_effect(ComputeDyTopoEffectInfo& info)
 {
-    _assemble(info);
-    _convert_matrix();
-    _distribute(info);
+    constexpr long long frame = -1;
+    constexpr long long newton = -1;
+    {
+        corex_profile::ScopedPhase phase{"dytopo", "assemble_total", frame, newton};
+        _assemble(info);
+    }
+    {
+        corex_profile::ScopedPhase phase{"dytopo", "convert_matrix", frame, newton};
+        _convert_matrix();
+    }
+    {
+        corex_profile::ScopedPhase phase{"dytopo", "distribute_total", frame, newton};
+        _distribute(info);
+    }
 }
 
 void GlobalDyTopoEffectManager::Impl::_assemble(ComputeDyTopoEffectInfo& info)
@@ -101,6 +113,10 @@ void GlobalDyTopoEffectManager::Impl::_assemble(ComputeDyTopoEffectInfo& info)
 
     {
         Timer timer{"Report Extent"};
+        corex_profile::ScopedPhase phase{"dytopo",
+                                         "report_extent",
+                                         -1,
+                                         -1};
         for(auto&& [i, reporter] : enumerate(dytopo_effect_reporters.view()))
         {
             reporter_gradient_counts[i] = 0;
@@ -124,6 +140,10 @@ void GlobalDyTopoEffectManager::Impl::_assemble(ComputeDyTopoEffectInfo& info)
 
     {
         Timer timer{"Scan and Allocate"};
+        corex_profile::ScopedPhase phase{"dytopo",
+                                         "scan_allocate",
+                                         -1,
+                                         -1};
         // scan
         reporter_gradient_offsets_counts.scan();
         reporter_hessian_offsets_counts.scan();
@@ -141,6 +161,7 @@ void GlobalDyTopoEffectManager::Impl::_assemble(ComputeDyTopoEffectInfo& info)
     }
 
     // collect
+    auto profile_collect_t0 = corex_profile::now_ms();
     for(auto&& [i, reporter] : enumerate(dytopo_effect_reporters.view()))
     {
         if(!has_flags(info.m_component_flags, reporter->component_flags()))
@@ -158,6 +179,12 @@ void GlobalDyTopoEffectManager::Impl::_assemble(ComputeDyTopoEffectInfo& info)
 
         reporter->assemble(info);
     }
+    corex_profile::log_phase("dytopo",
+                             "reporter_assemble",
+                             -1,
+                             -1,
+                             -1,
+                             corex_profile::now_ms() - profile_collect_t0);
 }
 
 void GlobalDyTopoEffectManager::Impl::_convert_matrix()
@@ -432,6 +459,47 @@ inline bool corex_matconv_trace()
 {
     return std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
 }
+
+inline bool corex_matconv_async_enabled()
+{
+    return std::getenv("UIPC_COREX_MATCONV_ASYNC") != nullptr;
+}
+
+inline bool corex_matconv_linear_reduce_enabled()
+{
+    return std::getenv("UIPC_COREX_MATCONV_LINEAR_REDUCE") != nullptr;
+}
+
+inline void corex_matconv_sync_if_needed(const char* name)
+{
+    if(corex_matconv_async_enabled() && !corex_matconv_trace())
+        return;
+
+    auto start = corex_profile::now_ms();
+    cudaDeviceSynchronize();
+    corex_profile::log_phase(
+        "matconv_sync", name, -1, -1, -1, corex_profile::now_ms() - start);
+}
+
+class MatconvPhase
+{
+  public:
+    explicit MatconvPhase(const char* name)
+        : m_name(name)
+        , m_start(corex_profile::now_ms())
+    {
+    }
+
+    ~MatconvPhase()
+    {
+        corex_profile::log_phase(
+            "matconv_kernel", m_name, -1, -1, -1, corex_profile::now_ms() - m_start);
+    }
+
+  private:
+    const char* m_name;
+    double      m_start;
+};
 }  // namespace
 
 static __global__ void kernel_hash_ij(int N, const int* row_indices, const int* col_indices,
@@ -510,10 +578,10 @@ static inline int grid_for(int n) { return (n + kBlock - 1) / kBlock; }
 void launch_hash_ij(int N, const int* row_indices, const int* col_indices,
                     uint64_t* ij_hash, int* sort_index)
 {
-    cudaError_t pre = cudaDeviceSynchronize();
+    if(!corex_matconv_async_enabled() || corex_matconv_trace())
+        corex_matconv_sync_if_needed("hash_ij_pre");
     if(corex_matconv_trace())
     {
-        fmt::println(stderr, "[corex_matconv] pre-sync={}", cudaGetErrorString(pre));
         cudaError_t pre2 = cudaGetLastError();
         fmt::println(stderr, "[corex_matconv] pre-err={}", cudaGetErrorString(pre2));
         std::fflush(stderr);
@@ -522,6 +590,7 @@ void launch_hash_ij(int N, const int* row_indices, const int* col_indices,
         std::fflush(stderr);
     }
 
+    MatconvPhase phase("hash_ij");
     kernel_hash_ij<<<grid_for(N), kBlock>>>(N, row_indices, col_indices, ij_hash, sort_index);
 
     if(corex_matconv_trace())
@@ -532,7 +601,7 @@ void launch_hash_ij(int N, const int* row_indices, const int* col_indices,
         fmt::println(stderr, "[corex_matconv] launch={}", cudaGetErrorString(e));
         std::fflush(stderr);
     }
-    cudaDeviceSynchronize();
+    corex_matconv_sync_if_needed("hash_ij_post");
     if(corex_matconv_trace())
     {
         fmt::println(stderr, "[corex_matconv] sync done");
@@ -542,43 +611,49 @@ void launch_hash_ij(int N, const int* row_indices, const int* col_indices,
 
 void launch_decode_hash(int N, const uint64_t* ij_hash, int* ij_pairs_xy)
 {
+    MatconvPhase phase("decode_hash");
     kernel_decode_hash<<<grid_for(N), kBlock>>>(N, ij_hash, reinterpret_cast<int2*>(ij_pairs_xy));
-    cudaDeviceSynchronize();
+    corex_matconv_sync_if_needed("decode_hash");
 }
 
 void launch_write_unique_ij(int N, const int* unique_ij_pairs_xy,
                             int* row_indices, int* col_indices)
 {
+    MatconvPhase phase("write_unique_ij");
     kernel_write_unique_ij<<<grid_for(N), kBlock>>>(
         N, reinterpret_cast<const int2*>(unique_ij_pairs_xy), row_indices, col_indices);
-    cudaDeviceSynchronize();
+    corex_matconv_sync_if_needed("write_unique_ij");
 }
 
 void launch_mark_partition(int N, const int* unique_counts,
                            const int* offsets, int* sorted_partition)
 {
+    MatconvPhase phase("mark_partition");
     kernel_mark_partition<<<grid_for(N), kBlock>>>(N, unique_counts, offsets, sorted_partition);
-    cudaDeviceSynchronize();
+    corex_matconv_sync_if_needed("mark_partition");
 }
 
 void launch_write_unique_indices(int N, const int* unique_indices, int* dst_indices)
 {
+    MatconvPhase phase("write_unique_indices");
     kernel_write_unique_indices<<<grid_for(N), kBlock>>>(N, unique_indices, dst_indices);
-    cudaDeviceSynchronize();
+    corex_matconv_sync_if_needed("write_unique_indices");
 }
 
 void launch_scatter_col_counts(int N, const int* unique_indices,
                                const int* counts, int* col_counts_per_row)
 {
+    MatconvPhase phase("scatter_col_counts");
     kernel_scatter_col_counts<<<grid_for(N), kBlock>>>(N, unique_indices, counts, col_counts_per_row);
-    cudaDeviceSynchronize();
+    corex_matconv_sync_if_needed("scatter_col_counts");
 }
 
 void launch_copy_sorted_blocks_3x3(int N, const BlockT3* src_blocks,
                                     const int* sort_index, BlockT3* dst_blocks)
 {
+    MatconvPhase phase("copy_sorted_blocks_3x3");
     kernel_copy_sorted_blocks_3x3<<<grid_for(N), kBlock>>>(N, src_blocks, sort_index, dst_blocks);
-    cudaDeviceSynchronize();
+    corex_matconv_sync_if_needed("copy_sorted_blocks_3x3");
 }
 
 void launch_copy_sorted_blocks_with_ij_3x3(int N, const BlockT3* src_blocks,
@@ -587,11 +662,12 @@ void launch_copy_sorted_blocks_with_ij_3x3(int N, const BlockT3* src_blocks,
                                             BlockT3* dst_blocks,
                                             int* dst_row, int* dst_col)
 {
+    MatconvPhase phase("copy_sorted_blocks_with_ij_3x3");
     kernel_copy_sorted_blocks_with_ij_3x3<<<grid_for(N), kBlock>>>(
         N, src_blocks, sort_index,
         reinterpret_cast<const int2*>(ij_pairs_xy),
         dst_blocks, dst_row, dst_col);
-    cudaDeviceSynchronize();
+    corex_matconv_sync_if_needed("copy_sorted_blocks_with_ij_3x3");
 }
 
 __device__ __forceinline__ void corex_atomic_add_double(double* address, double val)
@@ -630,6 +706,24 @@ static __global__ void kernel_segmental_reduce_3x3(int N, const int* segment_ids
         dst[j] = accum[j];
 }
 
+static __global__ void kernel_segmental_reduce_3x3_linear(int N,
+                                                          const int* segment_ids,
+                                                          const BlockT3* in_blocks,
+                                                          BlockT3* out_blocks,
+                                                          int out_count)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+
+    int seg = segment_ids[i];
+    if(seg < 0 || seg >= out_count) return;
+
+    const Float* src = reinterpret_cast<const Float*>(in_blocks + i);
+    Float*       dst = reinterpret_cast<Float*>(out_blocks + seg);
+    for(int j = 0; j < 9; ++j)
+        atomicAdd(dst + j, src[j]);
+}
+
 void launch_segmental_reduce_3x3(int N, const int* segment_ids,
                                   const BlockT3* in_blocks, BlockT3* out_blocks,
                                   int out_count)
@@ -639,8 +733,15 @@ void launch_segmental_reduce_3x3(int N, const int* segment_ids,
         fmt::println(stderr, "[corex_seg3x3] enter N={} out_count={}", N, out_count);
         std::fflush(stderr);
     }
-    cudaMemset(out_blocks, 0, out_count * sizeof(BlockT3));
-    cudaDeviceSynchronize();
+    auto memset_start = corex_profile::now_ms();
+    cudaMemsetAsync(out_blocks, 0, out_count * sizeof(BlockT3));
+    corex_profile::log_phase("matconv_kernel",
+                             "segmental_reduce_3x3_memset",
+                             -1,
+                             -1,
+                             -1,
+                             corex_profile::now_ms() - memset_start);
+    corex_matconv_sync_if_needed("segmental_reduce_3x3_memset");
     if(corex_matconv_trace())
     {
         fmt::println(stderr, "[corex_seg3x3] memset+sync done");
@@ -648,15 +749,26 @@ void launch_segmental_reduce_3x3(int N, const int* segment_ids,
     }
     if(out_count > 0)
     {
-        kernel_segmental_reduce_3x3<<<grid_for(out_count), kBlock>>>(
-            N, segment_ids, in_blocks, out_blocks, out_count);
+        MatconvPhase phase(corex_matconv_linear_reduce_enabled()
+                               ? "segmental_reduce_3x3_linear"
+                               : "segmental_reduce_3x3_scan");
+        if(corex_matconv_linear_reduce_enabled())
+        {
+            kernel_segmental_reduce_3x3_linear<<<grid_for(N), kBlock>>>(
+                N, segment_ids, in_blocks, out_blocks, out_count);
+        }
+        else
+        {
+            kernel_segmental_reduce_3x3<<<grid_for(out_count), kBlock>>>(
+                N, segment_ids, in_blocks, out_blocks, out_count);
+        }
         cudaError_t e = cudaGetLastError();
         if(corex_matconv_trace())
         {
             fmt::println(stderr, "[corex_seg3x3] kernel launch err={}", cudaGetErrorString(e));
             std::fflush(stderr);
         }
-        cudaDeviceSynchronize();
+        corex_matconv_sync_if_needed("segmental_reduce_3x3");
         if(corex_matconv_trace())
         {
             fmt::println(stderr, "[corex_seg3x3] kernel sync done");
@@ -689,6 +801,24 @@ static __global__ void kernel_segmental_reduce_3x1(int N, const int* segment_ids
         dst[j] = accum[j];
 }
 
+static __global__ void kernel_segmental_reduce_3x1_linear(int N,
+                                                          const int* segment_ids,
+                                                          const VecT3* in_vecs,
+                                                          VecT3* out_vecs,
+                                                          int out_count)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+
+    int seg = segment_ids[i];
+    if(seg < 0 || seg >= out_count) return;
+
+    const Float* src = reinterpret_cast<const Float*>(in_vecs + i);
+    Float*       dst = reinterpret_cast<Float*>(out_vecs + seg);
+    for(int j = 0; j < 3; ++j)
+        atomicAdd(dst + j, src[j]);
+}
+
 void launch_segmental_reduce_3x1(int N, const int* segment_ids,
                                   const VecT3* in_vecs, VecT3* out_vecs,
                                   int out_count)
@@ -698,8 +828,15 @@ void launch_segmental_reduce_3x1(int N, const int* segment_ids,
         fmt::println(stderr, "[corex_seg3x1] enter N={} out_count={}", N, out_count);
         std::fflush(stderr);
     }
-    cudaMemset(out_vecs, 0, out_count * sizeof(VecT3));
-    cudaDeviceSynchronize();
+    auto memset_start = corex_profile::now_ms();
+    cudaMemsetAsync(out_vecs, 0, out_count * sizeof(VecT3));
+    corex_profile::log_phase("matconv_kernel",
+                             "segmental_reduce_3x1_memset",
+                             -1,
+                             -1,
+                             -1,
+                             corex_profile::now_ms() - memset_start);
+    corex_matconv_sync_if_needed("segmental_reduce_3x1_memset");
     if(corex_matconv_trace())
     {
         fmt::println(stderr, "[corex_seg3x1] memset+sync done");
@@ -707,15 +844,26 @@ void launch_segmental_reduce_3x1(int N, const int* segment_ids,
     }
     if(out_count > 0)
     {
-        kernel_segmental_reduce_3x1<<<grid_for(out_count), kBlock>>>(
-            N, segment_ids, in_vecs, out_vecs, out_count);
+        MatconvPhase phase(corex_matconv_linear_reduce_enabled()
+                               ? "segmental_reduce_3x1_linear"
+                               : "segmental_reduce_3x1_scan");
+        if(corex_matconv_linear_reduce_enabled())
+        {
+            kernel_segmental_reduce_3x1_linear<<<grid_for(N), kBlock>>>(
+                N, segment_ids, in_vecs, out_vecs, out_count);
+        }
+        else
+        {
+            kernel_segmental_reduce_3x1<<<grid_for(out_count), kBlock>>>(
+                N, segment_ids, in_vecs, out_vecs, out_count);
+        }
         cudaError_t e = cudaGetLastError();
         if(corex_matconv_trace())
         {
             fmt::println(stderr, "[corex_seg3x1] kernel launch err={}", cudaGetErrorString(e));
             std::fflush(stderr);
         }
-        cudaDeviceSynchronize();
+        corex_matconv_sync_if_needed("segmental_reduce_3x1");
         if(corex_matconv_trace())
         {
             fmt::println(stderr, "[corex_seg3x1] kernel sync done");

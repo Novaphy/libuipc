@@ -13,6 +13,7 @@
 #include <fmt/core.h>
 #include <cstdio>
 #include <vector>
+#include <utils/corex_phase_profile.h>
 
 #include <thrust/device_ptr.h>
 #include <algorithm/corex_matrix_converter_kernels.h>
@@ -29,9 +30,18 @@ void MatrixConverter<T, N>::convert(const muda::DeviceTripletMatrix<T, N>& from,
     if(to.triplet_count() == 0)
         return;
 
-    _radix_sort_indices_and_blocks(from, to);
-    _make_unique_indices(from, to);
-    _make_unique_block_warp_reduction(from, to);
+    {
+        corex_profile::ScopedPhase phase("matconv", "triplet_radix_sort_indices_blocks");
+        _radix_sort_indices_and_blocks(from, to);
+    }
+    {
+        corex_profile::ScopedPhase phase("matconv", "triplet_make_unique_indices");
+        _make_unique_indices(from, to);
+    }
+    {
+        corex_profile::ScopedPhase phase("matconv", "triplet_segmental_reduce");
+        _make_unique_block_warp_reduction(from, to);
+    }
 }
 
 template <typename T, int N>
@@ -62,11 +72,14 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(
         thrust::raw_pointer_cast(ij_hash_input.data()),
         thrust::raw_pointer_cast(sort_index_input.data()));
 
-    DeviceRadixSort().SortPairs(ij_hash_input.data(),
-                                ij_hash.data(),
-                                sort_index_input.data(),
-                                sort_index.data(),
-                                ij_hash.size());
+    {
+        corex_profile::ScopedPhase phase("matconv", "triplet_sort_pairs");
+        DeviceRadixSort().SortPairs(ij_hash_input.data(),
+                                    ij_hash.data(),
+                                    sort_index_input.data(),
+                                    sort_index.data(),
+                                    ij_hash.size());
+    }
 
     corex_matconv::launch_decode_hash(
         n,
@@ -111,11 +124,14 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(muda::DeviceBCOOMatri
         thrust::raw_pointer_cast(ij_hash_input.data()),
         thrust::raw_pointer_cast(sort_index_input.data()));
 
-    DeviceRadixSort().SortPairs(ij_hash_input.data(),
-                                ij_hash.data(),
-                                sort_index_input.data(),
-                                sort_index.data(),
-                                ij_hash.size());
+    {
+        corex_profile::ScopedPhase phase("matconv", "bcoo_sort_pairs");
+        DeviceRadixSort().SortPairs(ij_hash_input.data(),
+                                    ij_hash.data(),
+                                    sort_index_input.data(),
+                                    sort_index.data(),
+                                    ij_hash.size());
+    }
 
     auto dst_row_indices = to.row_indices();
     auto dst_col_indices = to.col_indices();
@@ -155,11 +171,14 @@ void MatrixConverter<T, N>::_make_unique_indices(const muda::DeviceTripletMatrix
     loose_resize(unique_counts, ij_pairs.size());
 
 
-    DeviceRunLengthEncode().Encode(ij_pairs.data(),
-                                   unique_ij_pairs.data(),
-                                   unique_counts.data(),
-                                   count.data(),
-                                   ij_pairs.size());
+    {
+        corex_profile::ScopedPhase phase("matconv", "triplet_rle_ij");
+        DeviceRunLengthEncode().Encode(ij_pairs.data(),
+                                       unique_ij_pairs.data(),
+                                       unique_counts.data(),
+                                       count.data(),
+                                       ij_pairs.size());
+    }
 
     int h_count = count;
 
@@ -168,8 +187,11 @@ void MatrixConverter<T, N>::_make_unique_indices(const muda::DeviceTripletMatrix
 
     offsets.resize(unique_counts.size());
 
-    DeviceScan().ExclusiveSum(
-        unique_counts.data(), offsets.data(), unique_counts.size());
+    {
+        corex_profile::ScopedPhase phase("matconv", "triplet_unique_counts_scan");
+        DeviceScan().ExclusiveSum(
+            unique_counts.data(), offsets.data(), unique_counts.size());
+    }
 
 
     corex_matconv::launch_write_unique_ij(
@@ -190,8 +212,9 @@ void MatrixConverter<T, N>::_make_unique_block_warp_reduction(
     loose_resize(sorted_partition_input, ij_pairs.size());
     loose_resize(sorted_partition_output, ij_pairs.size());
 
-    cudaMemset(thrust::raw_pointer_cast(sorted_partition_input.data()), 0,
-               sorted_partition_input.size() * sizeof(int));
+    checkCudaErrors(cudaMemsetAsync(thrust::raw_pointer_cast(sorted_partition_input.data()),
+                                    0,
+                                    sorted_partition_input.size() * sizeof(int)));
     corex_matconv::launch_mark_partition(
         static_cast<int>(unique_counts.size()),
         thrust::raw_pointer_cast(unique_counts.data()),
@@ -199,9 +222,12 @@ void MatrixConverter<T, N>::_make_unique_block_warp_reduction(
         thrust::raw_pointer_cast(sorted_partition_input.data()));
 
     // scatter
-    DeviceScan().ExclusiveSum(sorted_partition_input.data(),
-                              sorted_partition_output.data(),
-                              sorted_partition_input.size());
+    {
+        corex_profile::ScopedPhase phase("matconv", "triplet_partition_scan");
+        DeviceScan().ExclusiveSum(sorted_partition_input.data(),
+                                  sorted_partition_output.data(),
+                                  sorted_partition_input.size());
+    }
 
     auto blocks = to.values();
 
@@ -223,15 +249,21 @@ void MatrixConverter<T, N>::convert(const muda::DeviceBCOOMatrix<T, N>& from,
                                     muda::DeviceBSRMatrix<T, N>&        to)
 {
     // calculate the row offsets
-    _calculate_block_offsets(from, to);
+    {
+        corex_profile::ScopedPhase phase("matconv", "bcoo_calculate_block_offsets");
+        _calculate_block_offsets(from, to);
+    }
 
     to.resize(from.non_zeros());
 
     auto vals        = to.values();
     auto col_indices = to.col_indices();
 
-    vals.copy_from(from.values());  // BCOO and BSR have the same block values
-    col_indices.copy_from(from.col_indices());  // BCOO and BSR have the same block col indices
+    {
+        corex_profile::ScopedPhase phase("matconv", "bcoo_to_bsr_copy");
+        vals.copy_from(from.values());  // BCOO and BSR have the same block values
+        col_indices.copy_from(from.col_indices());  // BCOO and BSR have the same block col indices
+    }
 }
 
 template <typename T, int N>
@@ -252,11 +284,14 @@ void MatrixConverter<T, N>::_calculate_block_offsets(const muda::DeviceBCOOMatri
 
 
     // run length encode the row
-    DeviceRunLengthEncode().Encode(from.row_indices().data(),
-                                   unique_indices.data(),
-                                   unique_counts.data(),
-                                   count.data(),
-                                   from.non_zeros());
+    {
+        corex_profile::ScopedPhase phase("matconv", "bcoo_row_rle");
+        DeviceRunLengthEncode().Encode(from.row_indices().data(),
+                                       unique_indices.data(),
+                                       unique_counts.data(),
+                                       count.data(),
+                                       from.non_zeros());
+    }
     int h_count = count;
 
     unique_indices.resize(h_count);
@@ -269,9 +304,12 @@ void MatrixConverter<T, N>::_calculate_block_offsets(const muda::DeviceBCOOMatri
         thrust::raw_pointer_cast(col_counts_per_row.data()));
 
     // calculate the offsets
-    DeviceScan().ExclusiveSum(col_counts_per_row.data(),
-                              dst_row_offsets.data(),
-                              col_counts_per_row.size());
+    {
+        corex_profile::ScopedPhase phase("matconv", "bcoo_row_offsets_scan");
+        DeviceScan().ExclusiveSum(col_counts_per_row.data(),
+                                  dst_row_offsets.data(),
+                                  col_counts_per_row.size());
+    }
 }
 
 template <typename T, int N>
@@ -284,9 +322,18 @@ void MatrixConverter<T, N>::convert(const muda::DeviceDoubletVector<T, N>& from,
     if(to.doublet_count() == 0)
         return;
 
-    _radix_sort_indices_and_segments(from, to);
-    _make_unique_indices(from, to);
-    _make_unique_segment_warp_reduction(from, to);
+    {
+        corex_profile::ScopedPhase phase("matconv", "doublet_radix_sort_indices_segments");
+        _radix_sort_indices_and_segments(from, to);
+    }
+    {
+        corex_profile::ScopedPhase phase("matconv", "doublet_make_unique_indices");
+        _make_unique_indices(from, to);
+    }
+    {
+        corex_profile::ScopedPhase phase("matconv", "doublet_segmental_reduce");
+        _make_unique_segment_warp_reduction(from, to);
+    }
 }
 
 template <typename T, int N>
@@ -301,11 +348,14 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_segments(
     loose_resize(indices_sorted, src_indices.size());
     loose_resize(segments_sorted, src_segments.size());
 
-    DeviceRadixSort().SortPairs(src_indices.data(),
-                                indices_sorted.data(),
-                                src_segments.data(),
-                                segments_sorted.data(),
-                                src_indices.size());
+    {
+        corex_profile::ScopedPhase phase("matconv", "doublet_sort_pairs");
+        DeviceRadixSort().SortPairs(src_indices.data(),
+                                    indices_sorted.data(),
+                                    src_segments.data(),
+                                    segments_sorted.data(),
+                                    src_indices.size());
+    }
 }
 
 template <typename T, int N>
@@ -319,11 +369,14 @@ void MatrixConverter<T, N>::_make_unique_indices(const muda::DeviceDoubletVector
     loose_resize(unique_indices, indices_sorted.size());
     loose_resize(unique_counts, indices_sorted.size());
 
-    DeviceRunLengthEncode().Encode(indices_sorted.data(),
-                                   unique_indices.data(),
-                                   unique_counts.data(),
-                                   count.data(),
-                                   indices_sorted.size());
+    {
+        corex_profile::ScopedPhase phase("matconv", "doublet_rle_indices");
+        DeviceRunLengthEncode().Encode(indices_sorted.data(),
+                                       unique_indices.data(),
+                                       unique_counts.data(),
+                                       count.data(),
+                                       indices_sorted.size());
+    }
 
     int h_count = count;
 
@@ -332,8 +385,11 @@ void MatrixConverter<T, N>::_make_unique_indices(const muda::DeviceDoubletVector
 
     offsets.resize(unique_counts.size());
 
-    DeviceScan().ExclusiveSum(
-        unique_counts.data(), offsets.data(), unique_counts.size());
+    {
+        corex_profile::ScopedPhase phase("matconv", "doublet_unique_counts_scan");
+        DeviceScan().ExclusiveSum(
+            unique_counts.data(), offsets.data(), unique_counts.size());
+    }
 
     corex_matconv::launch_write_unique_indices(
         static_cast<int>(unique_counts.size()),
@@ -352,8 +408,9 @@ void MatrixConverter<T, N>::_make_unique_segment_warp_reduction(
     loose_resize(sorted_partition_input, indices_sorted.size());
     loose_resize(sorted_partition_output, indices_sorted.size());
 
-    cudaMemset(thrust::raw_pointer_cast(sorted_partition_input.data()), 0,
-               sorted_partition_input.size() * sizeof(int));
+    checkCudaErrors(cudaMemsetAsync(thrust::raw_pointer_cast(sorted_partition_input.data()),
+                                    0,
+                                    sorted_partition_input.size() * sizeof(int)));
     corex_matconv::launch_mark_partition(
         static_cast<int>(unique_counts.size()),
         thrust::raw_pointer_cast(unique_counts.data()),
@@ -361,9 +418,12 @@ void MatrixConverter<T, N>::_make_unique_segment_warp_reduction(
         thrust::raw_pointer_cast(sorted_partition_input.data()));
 
     // scatter
-    DeviceScan().ExclusiveSum(sorted_partition_input.data(),
-                              sorted_partition_output.data(),
-                              sorted_partition_input.size());
+    {
+        corex_profile::ScopedPhase phase("matconv", "doublet_partition_scan");
+        DeviceScan().ExclusiveSum(sorted_partition_input.data(),
+                                  sorted_partition_output.data(),
+                                  sorted_partition_input.size());
+    }
 
     auto segments = to.values();
 
