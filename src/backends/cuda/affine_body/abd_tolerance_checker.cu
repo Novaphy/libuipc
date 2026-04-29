@@ -1,9 +1,36 @@
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #include <newton_tolerance/newton_tolerance_checker.h>
 #include <affine_body/affine_body_dynamics.h>
+#include <muda/atomic.h>
+#include <muda/check/check_cuda_errors.h>
+#include <cstdlib>
 
 namespace uipc::backend::cuda
 {
+
+__global__ void kernel_abd_tolerance_check(int n,
+                                            const Vector12* __restrict__ dqs,
+                                            Float abs_tol,
+                                            IndexT* __restrict__ success_flag)
+{
+    int I = blockIdx.x * blockDim.x + threadIdx.x;
+    if(I >= n)
+        return;
+    if(*success_flag == 0)
+        return;
+
+    const Vector12& dq = dqs[I];
+#pragma unroll
+    for(IndexT i = 3; i < 12; ++i)
+    {
+        if(abs(dq(i)) > abs_tol)
+        {
+            muda::atomic_exch(success_flag, IndexT(0));
+            break;
+        }
+    }
+}
+
 class ABDToleranceChecker final : public NewtonToleranceChecker
 {
   public:
@@ -25,9 +52,7 @@ class ABDToleranceChecker final : public NewtonToleranceChecker
         auto  transrate_tol_attr = config.find<Float>("newton/transrate_tol");
         Float transrate_tol      = transrate_tol_attr->view()[0];
         abs_tol                  = transrate_tol * dt;
-#if !defined(UIPC_COREX_CUDA10_COMPAT) || !UIPC_COREX_CUDA10_COMPAT
         success.resize(1);
-#endif
     }
 
     void do_init(InitInfo& info) override {}
@@ -39,10 +64,13 @@ class ABDToleranceChecker final : public NewtonToleranceChecker
         auto dqs = affine_body_dynamics->dqs();
         using namespace muda;
 
+        int n = static_cast<int>(dqs.size());
+
+        if(std::getenv("UIPC_COREX_ABD_TOLERANCE_HOST_FALLBACK")
+           || std::getenv("UIPC_COREX_ABD_TOLERANCE_GPU") == nullptr)
         {
-            int n = static_cast<int>(dqs.size());
             std::vector<Vector12> h_dq(n);
-            cudaMemcpy(h_dq.data(), dqs.data(), n*sizeof(Vector12), cudaMemcpyDeviceToHost);
+            cudaMemcpy(h_dq.data(), dqs.data(), n * sizeof(Vector12), cudaMemcpyDeviceToHost);
             bool converged = true;
             for(int I = 0; I < n && converged; ++I)
             {
@@ -57,7 +85,23 @@ class ABDToleranceChecker final : public NewtonToleranceChecker
             }
             h_success = converged ? 1 : 0;
             info.converged(converged);
+            return;
         }
+
+        success.fill(IndexT(1));
+
+        if(n > 0)
+        {
+            constexpr int block = 256;
+            int           grid  = (n + block - 1) / block;
+            kernel_abd_tolerance_check<<<grid, block>>>(
+                n, dqs.data(), abs_tol, success.data());
+            checkCudaErrors(cudaGetLastError());
+        }
+
+        checkCudaErrors(cudaMemcpy(&h_success, success.data(), sizeof(IndexT), cudaMemcpyDeviceToHost));
+        bool converged = h_success != 0;
+        info.converged(converged);
     }
 
     std::string do_report() override

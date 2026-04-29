@@ -1,8 +1,20 @@
 #include <affine_body/affine_body_body_reporter.h>
 #include <muda/launch/parallel_for.h>
+#include <muda/check/check_cuda_errors.h>
+#include <cstdlib>
 
 namespace uipc::backend::cuda
 {
+
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+__global__ void kernel_abd_body_coindices_iota(int n, IndexT* coindices)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i < n)
+        coindices[i] = i;
+}
+#endif
+
 REGISTER_SIM_SYSTEM(AffineBodyBodyReporter);
 
 void AffineBodyBodyReporter::do_build(BuildInfo& info)
@@ -39,10 +51,24 @@ void AffineBodyBodyReporter::Impl::report_attributes(BodyAttributeInfo& info)
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
     {
         int n = static_cast<int>(info.coindices().size());
-        std::vector<IndexT> h_iota(n);
-        for(int i = 0; i < n; ++i) h_iota[i] = i;
-        cudaMemcpy((void*)info.coindices().data(), h_iota.data(),
-                   n * sizeof(IndexT), cudaMemcpyHostToDevice);
+        if(std::getenv("UIPC_COREX_ABD_BODY_IOTA_HOST_FALLBACK")
+           || std::getenv("UIPC_COREX_ABD_BODY_IOTA_GPU") == nullptr)
+        {
+            std::vector<IndexT> h_iota(n);
+            for(int i = 0; i < n; ++i)
+                h_iota[i] = i;
+            checkCudaErrors(cudaMemcpy((void*)info.coindices().data(),
+                                       h_iota.data(),
+                                       n * sizeof(IndexT),
+                                       cudaMemcpyHostToDevice));
+        }
+        else if(n > 0)
+        {
+            constexpr int block = 256;
+            int           grid  = (n + block - 1) / block;
+            kernel_abd_body_coindices_iota<<<grid, block>>>(n, info.coindices().data());
+            checkCudaErrors(cudaGetLastError());
+        }
     }
 #else
     ParallelFor()

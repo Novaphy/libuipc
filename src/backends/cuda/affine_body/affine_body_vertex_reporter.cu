@@ -4,12 +4,59 @@
 #include <affine_body/affine_body_body_reporter.h>
 #include <uipc/builtin/attribute_name.h>
 #include <muda/check/check_cuda_errors.h>
+#include <cstdlib>
+#include <spdlog/spdlog.h>
 
 namespace uipc::backend::cuda
 {
 REGISTER_SIM_SYSTEM(AffineBodyVertexReporter);
 
 constexpr static U64 AffineBodyVertexReporterUID = 0;
+
+MUDA_DEVICE Vector3 corex_abd_point_x(const ABDJacobi& J, const Vector12& q)
+{
+    const Vector3& x = J.x_bar();
+    Vector3        ret;
+    ret[0] = x[0] * q[3] + x[1] * q[4] + x[2] * q[5] + q[0];
+    ret[1] = x[0] * q[6] + x[1] * q[7] + x[2] * q[8] + q[1];
+    ret[2] = x[0] * q[9] + x[1] * q[10] + x[2] * q[11] + q[2];
+    return ret;
+}
+
+__global__ void kernel_abd_init_vertex_attributes(int            n,
+                                                  IndexT         body_offset,
+                                                  const ABDJacobi* __restrict__ src_J,
+                                                  const IndexT* __restrict__ v2b,
+                                                  const Vector12* __restrict__ qs,
+                                                  IndexT* __restrict__     coindices,
+                                                  Vector3* __restrict__    dst_pos,
+                                                  Vector3* __restrict__    dst_rest,
+                                                  IndexT* __restrict__     dst_body_ids)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= n)
+        return;
+    coindices[i]   = i;
+    IndexT body_id = v2b[i];
+    dst_pos[i]     = corex_abd_point_x(src_J[i], qs[body_id]);
+    dst_rest[i]    = src_J[i].x_bar();
+    dst_body_ids[i] = body_id + body_offset;
+}
+
+__global__ void kernel_abd_update_vertex_positions(int            n,
+                                                   const ABDJacobi* __restrict__ src_J,
+                                                   const IndexT* __restrict__    v2b,
+                                                   const Vector12* __restrict__  qs,
+                                                   IndexT* __restrict__         coindices,
+                                                   Vector3* __restrict__        dst_pos)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= n)
+        return;
+    coindices[i]   = i;
+    IndexT body_id = v2b[i];
+    dst_pos[i]     = corex_abd_point_x(src_J[i], qs[body_id]);
+}
 
 __global__ void kernel_abd_report_displacements(int N,
                                                 const IndexT* v2b,
@@ -52,37 +99,64 @@ void AffineBodyVertexReporter::Impl::init_attributes(VertexAttributeInfo& info)
                 body_reporter->body_offset());
 
     {
-        int n = static_cast<int>(N);
+        int n           = static_cast<int>(N);
         int body_offset = body_reporter->body_offset();
 
-        std::vector<ABDJacobi> h_J(n);
-        std::vector<IndexT>    h_v2b(n);
-        std::vector<Vector12>  h_q(abd().body_count());
-
-        cudaMemcpy(h_J.data(), abd().vertex_id_to_J.data(), n*sizeof(ABDJacobi), cudaMemcpyDeviceToHost);
-        cudaMemcpy(h_v2b.data(), abd().vertex_id_to_body_id.data(), n*sizeof(IndexT), cudaMemcpyDeviceToHost);
-        cudaMemcpy(h_q.data(), abd().body_id_to_q.data(), abd().body_count()*sizeof(Vector12), cudaMemcpyDeviceToHost);
-
-        std::vector<IndexT>  h_coindices(n);
-        std::vector<Vector3> h_pos(n), h_rest(n);
-        std::vector<IndexT>  h_dst_v2b(n);
-
-        for(int i = 0; i < n; ++i)
+        if(std::getenv("UIPC_COREX_ABD_VERTEX_HOST_FALLBACK")
+           || std::getenv("UIPC_COREX_ABD_VERTEX_GPU") == nullptr)
         {
-            h_coindices[i] = i;
-            auto body_id = h_v2b[i];
-            h_pos[i] = h_J[i].point_x(h_q[body_id]);
-            h_rest[i] = h_J[i].x_bar();
-            h_dst_v2b[i] = body_id + body_offset;
-            spdlog::info("[INIT_ATTR] v{} body={} pos=({},{},{}) rest=({},{},{})",
-                i, body_id, h_pos[i][0], h_pos[i][1], h_pos[i][2],
-                h_rest[i][0], h_rest[i][1], h_rest[i][2]);
-        }
+            std::vector<ABDJacobi> h_J(n);
+            std::vector<IndexT>    h_v2b(n);
+            std::vector<Vector12>  h_q(abd().body_count());
 
-        cudaMemcpy((void*)info.coindices().data(), h_coindices.data(), n*sizeof(IndexT), cudaMemcpyHostToDevice);
-        cudaMemcpy((void*)info.positions().data(), h_pos.data(), n*sizeof(Vector3), cudaMemcpyHostToDevice);
-        cudaMemcpy((void*)info.rest_positions().data(), h_rest.data(), n*sizeof(Vector3), cudaMemcpyHostToDevice);
-        cudaMemcpy((void*)info.body_ids().data(), h_dst_v2b.data(), n*sizeof(IndexT), cudaMemcpyHostToDevice);
+            cudaMemcpy(h_J.data(), abd().vertex_id_to_J.data(), n * sizeof(ABDJacobi), cudaMemcpyDeviceToHost);
+            cudaMemcpy(h_v2b.data(), abd().vertex_id_to_body_id.data(), n * sizeof(IndexT), cudaMemcpyDeviceToHost);
+            cudaMemcpy(h_q.data(), abd().body_id_to_q.data(), abd().body_count() * sizeof(Vector12), cudaMemcpyDeviceToHost);
+
+            std::vector<IndexT>  h_coindices(n);
+            std::vector<Vector3> h_pos(n), h_rest(n);
+            std::vector<IndexT>  h_dst_v2b(n);
+
+            const bool trace_init = std::getenv("UIPC_COREX_TRACE_VERTEX_INIT") != nullptr;
+            for(int i = 0; i < n; ++i)
+            {
+                h_coindices[i] = i;
+                auto body_id   = h_v2b[i];
+                h_pos[i]       = h_J[i].point_x(h_q[body_id]);
+                h_rest[i]      = h_J[i].x_bar();
+                h_dst_v2b[i]   = body_id + body_offset;
+                if(trace_init)
+                    spdlog::info("[INIT_ATTR] v{} body={} pos=({},{},{}) rest=({},{},{})",
+                                   i,
+                                   body_id,
+                                   h_pos[i][0],
+                                   h_pos[i][1],
+                                   h_pos[i][2],
+                                   h_rest[i][0],
+                                   h_rest[i][1],
+                                   h_rest[i][2]);
+            }
+
+            cudaMemcpy((void*)info.coindices().data(), h_coindices.data(), n * sizeof(IndexT), cudaMemcpyHostToDevice);
+            cudaMemcpy((void*)info.positions().data(), h_pos.data(), n * sizeof(Vector3), cudaMemcpyHostToDevice);
+            cudaMemcpy((void*)info.rest_positions().data(), h_rest.data(), n * sizeof(Vector3), cudaMemcpyHostToDevice);
+            cudaMemcpy((void*)info.body_ids().data(), h_dst_v2b.data(), n * sizeof(IndexT), cudaMemcpyHostToDevice);
+        }
+        else
+        {
+            constexpr int block = 256;
+            int           grid  = (n + block - 1) / block;
+            kernel_abd_init_vertex_attributes<<<grid, block>>>(n,
+                                                               body_offset,
+                                                               abd().vertex_id_to_J.data(),
+                                                               abd().vertex_id_to_body_id.data(),
+                                                               abd().body_id_to_q.data(),
+                                                               info.coindices().data(),
+                                                               info.positions().data(),
+                                                               info.rest_positions().data(),
+                                                               info.body_ids().data());
+            checkCudaErrors(cudaGetLastError());
+        }
     }
 
     auto async_copy = []<typename T>(span<T> src, muda::BufferView<T> dst)
@@ -102,25 +176,41 @@ void AffineBodyVertexReporter::Impl::update_attributes(VertexAttributeInfo& info
 
     {
         int n = static_cast<int>(N);
-        std::vector<ABDJacobi> h_J(n);
-        std::vector<IndexT>    h_v2b(n);
-        std::vector<Vector12>  h_q(abd().body_count());
-        std::vector<IndexT>    h_coindices(n);
-        std::vector<Vector3>   h_pos(n);
-
-        cudaMemcpy(h_J.data(), abd().vertex_id_to_J.data(), n*sizeof(ABDJacobi), cudaMemcpyDeviceToHost);
-        cudaMemcpy(h_v2b.data(), abd().vertex_id_to_body_id.data(), n*sizeof(IndexT), cudaMemcpyDeviceToHost);
-        cudaMemcpy(h_q.data(), abd().body_id_to_q.data(), abd().body_count()*sizeof(Vector12), cudaMemcpyDeviceToHost);
-
-        for(int i = 0; i < n; ++i)
+        if(std::getenv("UIPC_COREX_ABD_VERTEX_HOST_FALLBACK")
+           || std::getenv("UIPC_COREX_ABD_VERTEX_GPU") == nullptr)
         {
-            h_coindices[i] = i;
-            auto body_id = h_v2b[i];
-            h_pos[i] = h_J[i].point_x(h_q[body_id]);
-        }
+            std::vector<ABDJacobi> h_J(n);
+            std::vector<IndexT>    h_v2b(n);
+            std::vector<Vector12>  h_q(abd().body_count());
+            std::vector<IndexT>    h_coindices(n);
+            std::vector<Vector3>   h_pos(n);
 
-        cudaMemcpy((void*)info.coindices().data(), h_coindices.data(), n*sizeof(IndexT), cudaMemcpyHostToDevice);
-        cudaMemcpy((void*)info.positions().data(), h_pos.data(), n*sizeof(Vector3), cudaMemcpyHostToDevice);
+            cudaMemcpy(h_J.data(), abd().vertex_id_to_J.data(), n * sizeof(ABDJacobi), cudaMemcpyDeviceToHost);
+            cudaMemcpy(h_v2b.data(), abd().vertex_id_to_body_id.data(), n * sizeof(IndexT), cudaMemcpyDeviceToHost);
+            cudaMemcpy(h_q.data(), abd().body_id_to_q.data(), abd().body_count() * sizeof(Vector12), cudaMemcpyDeviceToHost);
+
+            for(int i = 0; i < n; ++i)
+            {
+                h_coindices[i] = i;
+                auto body_id   = h_v2b[i];
+                h_pos[i]       = h_J[i].point_x(h_q[body_id]);
+            }
+
+            cudaMemcpy((void*)info.coindices().data(), h_coindices.data(), n * sizeof(IndexT), cudaMemcpyHostToDevice);
+            cudaMemcpy((void*)info.positions().data(), h_pos.data(), n * sizeof(Vector3), cudaMemcpyHostToDevice);
+        }
+        else
+        {
+            constexpr int block = 256;
+            int           grid  = (n + block - 1) / block;
+            kernel_abd_update_vertex_positions<<<grid, block>>>(n,
+                                                                  abd().vertex_id_to_J.data(),
+                                                                  abd().vertex_id_to_body_id.data(),
+                                                                  abd().body_id_to_q.data(),
+                                                                  info.coindices().data(),
+                                                                  info.positions().data());
+            checkCudaErrors(cudaGetLastError());
+        }
     }
 
     info.require_discard_friction();
@@ -141,7 +231,8 @@ void AffineBodyVertexReporter::Impl::report_displacements(VertexDisplacementInfo
                                                           abd().body_id_to_dq.data(),
                                                           info.displacements().data());
         checkCudaErrors(cudaGetLastError());
-        checkCudaErrors(cudaDeviceSynchronize());
+        if(std::getenv("UIPC_COREX_ABD_VERTEX_REPORT_ASYNC") == nullptr)
+            checkCudaErrors(cudaDeviceSynchronize());
     }
 }
 

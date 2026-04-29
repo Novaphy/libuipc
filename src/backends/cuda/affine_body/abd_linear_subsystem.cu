@@ -10,6 +10,7 @@
 #include <affine_body/abd_linear_subsystem_reporter.h>
 #include <affine_body/affine_body_kinetic.h>
 #include <affine_body/affine_body_constitution.h>
+#include <affine_body/abd_jacobi_matrix_corex.h>
 #include <utils/report_extent_check.h>
 #include <cstdlib>
 #include <vector>
@@ -34,6 +35,24 @@ REGISTER_SIM_SYSTEM(ABDLinearSubsystem);
 
 // ref: https://github.com/spiriMirror/libuipc/issues/271
 constexpr U64 ABDLinearSubsystemUID = 0ull;
+
+static bool corex_abd_assemble_sync_enabled()
+{
+    return std::getenv("UIPC_COREX_ABD_ASSEMBLE_ASYNC") == nullptr
+           || std::getenv("UIPC_COREX_ABD_ASSEMBLE_SYNC") != nullptr
+           || std::getenv("UIPC_COREX_TRACE_ABD_ASSEMBLE") != nullptr
+           || std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+}
+
+static void corex_abd_assemble_sync_if_requested(const char* where)
+{
+    if(!corex_abd_assemble_sync_enabled())
+        return;
+    checkCudaErrors(cudaDeviceSynchronize());
+    if(std::getenv("UIPC_COREX_TRACE_ABD_ASSEMBLE")
+       || std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM"))
+        logger::info("[corex_trace][abd] sync ok at {}", where);
+}
 
 static __global__ void kernel_abd_assemble_gradients(int n,
                                                      const IndexT* is_fixed,
@@ -136,6 +155,242 @@ static __global__ void kernel_abd_assemble_hessians(int n,
             for(int r = 0; r < BLK; ++r)
                 for(int c = 0; c < BLK; ++c)
                     block_ptr[c * BLK + r] = local_h[(jj * BLK + c) * 12 + (ii * BLK + r)];
+        }
+    }
+}
+
+static __device__ void corex_abd_mass_mul_values(const ABDJacobiDyadicMass& mass,
+                                                 const Float*               p,
+                                                 Float*                     ret)
+{
+    const Float      m = mass.mass();
+    const Vector3&   x = mass.mass_times_x_bar();
+    const Matrix3x3& D = mass.mass_times_dyadic_x_bar();
+
+    ret[0] = x[0] * p[3] + x[1] * p[4] + x[2] * p[5] + m * p[0];
+    ret[1] = x[0] * p[6] + x[1] * p[7] + x[2] * p[8] + m * p[1];
+    ret[2] = x[0] * p[9] + x[1] * p[10] + x[2] * p[11] + m * p[2];
+
+    for(int r = 0; r < 3; ++r)
+    {
+        ret[3 + r] = D(r, 0) * p[3] + D(r, 1) * p[4] + D(r, 2) * p[5] + x[r] * p[0];
+        ret[6 + r] = D(r, 0) * p[6] + D(r, 1) * p[7] + D(r, 2) * p[8] + x[r] * p[1];
+        ret[9 + r] = D(r, 0) * p[9] + D(r, 1) * p[10] + D(r, 2) * p[11] + x[r] * p[2];
+    }
+}
+
+static __device__ void corex_abd_add_mass_to_local_h(const ABDJacobiDyadicMass& mass,
+                                                     Float*                     local_h)
+{
+    const Float      m = mass.mass();
+    const Vector3&   x = mass.mass_times_x_bar();
+    const Matrix3x3& D = mass.mass_times_dyadic_x_bar();
+
+    local_h[0 * 12 + 0] += m;
+    local_h[1 * 12 + 1] += m;
+    local_h[2 * 12 + 2] += m;
+
+    for(int k = 0; k < 3; ++k)
+    {
+        local_h[(3 + k) * 12 + 0] += x[k];
+        local_h[0 * 12 + (3 + k)] += x[k];
+        local_h[(6 + k) * 12 + 1] += x[k];
+        local_h[1 * 12 + (6 + k)] += x[k];
+        local_h[(9 + k) * 12 + 2] += x[k];
+        local_h[2 * 12 + (9 + k)] += x[k];
+    }
+
+    for(int r = 0; r < 3; ++r)
+    {
+        for(int c = 0; c < 3; ++c)
+        {
+            local_h[(3 + c) * 12 + (3 + r)] += D(r, c);
+            local_h[(6 + c) * 12 + (6 + r)] += D(r, c);
+            local_h[(9 + c) * 12 + (9 + r)] += D(r, c);
+        }
+    }
+}
+
+static __global__ void kernel_abd_assemble_gradients_direct_kinetic(
+    int n,
+    const IndexT* is_fixed,
+    const IndexT* is_external_kinetic,
+    const Vector12* shape_gradient,
+    const Vector12* qs,
+    const Vector12* q_tildes,
+    const ABDJacobiDyadicMass* masses,
+    Float* gradients)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= n) return;
+
+    int base = i * 12;
+    if(is_fixed[i])
+    {
+        for(int k = 0; k < 12; ++k)
+            gradients[base + k] = 0;
+        return;
+    }
+
+    Float kin[12] = {};
+    if(!is_external_kinetic[i])
+    {
+        Float dq[12];
+        for(int k = 0; k < 12; ++k)
+            dq[k] = qs[i](k) - q_tildes[i](k);
+        corex_abd_mass_mul_values(masses[i], dq, kin);
+    }
+
+    const auto& shape = shape_gradient[i];
+    for(int k = 0; k < 12; ++k)
+        gradients[base + k] = shape(k) + kin[k];
+}
+
+static __global__ void kernel_abd_assemble_hessians_direct_kinetic(
+    int n,
+    const IndexT* is_fixed,
+    const IndexT* is_external_kinetic,
+    const Matrix12x12* shape_hessian,
+    const ABDJacobiDyadicMass* masses,
+    Matrix12x12* diag_hessian,
+    int* dst_rows,
+    int* dst_cols,
+    Matrix3x3* dst_vals)
+{
+    int I = blockIdx.x * blockDim.x + threadIdx.x;
+    if(I >= n) return;
+
+    const Float* shape_ptr = reinterpret_cast<const Float*>(shape_hessian + I);
+    Float local_h[12 * 12];
+    for(int c = 0; c < 12; ++c)
+    {
+        for(int r = 0; r < 12; ++r)
+        {
+            int cm_idx = c * 12 + r;
+            if(is_fixed[I])
+                local_h[cm_idx] = (r == c) ? Float(1) : Float(0);
+            else
+                local_h[cm_idx] = shape_ptr[cm_idx];
+        }
+    }
+
+    if(!is_fixed[I] && !is_external_kinetic[I])
+        corex_abd_add_mass_to_local_h(masses[I], local_h);
+
+    Float* diag_ptr = reinterpret_cast<Float*>(diag_hessian + I);
+    for(int idx = 0; idx < 12 * 12; ++idx)
+        diag_ptr[idx] = local_h[idx];
+
+    for(int jj = 0; jj < 4; ++jj)
+        for(int ii = jj + 1; ii < 4; ++ii)
+            for(int c = 0; c < 3; ++c)
+                for(int r = 0; r < 3; ++r)
+                    local_h[(jj * 3 + c) * 12 + (ii * 3 + r)] = Float(0);
+
+    int base_triplet = I * 16;
+    for(int ii = 0; ii < 4; ++ii)
+    {
+        for(int jj = 0; jj < 4; ++jj)
+        {
+            int idx       = base_triplet + ii * 4 + jj;
+            dst_rows[idx] = I * 4 + ii;
+            dst_cols[idx] = I * 4 + jj;
+            Float* block_ptr = reinterpret_cast<Float*>(dst_vals + idx);
+            for(int r = 0; r < 3; ++r)
+                for(int c = 0; c < 3; ++c)
+                    block_ptr[c * 3 + r] =
+                        local_h[(jj * 3 + c) * 12 + (ii * 3 + r)];
+        }
+    }
+}
+
+static __global__ void kernel_abd_assemble_bdf1_direct(int n,
+                                                       const IndexT* is_fixed,
+                                                       const IndexT* is_external_kinetic,
+                                                       const Vector12* qs,
+                                                       const Vector12* q_tildes,
+                                                       const ABDJacobiDyadicMass* masses,
+                                                       const Vector12* shape_gradient,
+                                                       const Matrix12x12* shape_hessian,
+                                                       Float* gradients,
+                                                       Matrix12x12* diag_hessian,
+                                                       int* dst_rows,
+                                                       int* dst_cols,
+                                                       Matrix3x3* dst_vals)
+{
+    int I = blockIdx.x * blockDim.x + threadIdx.x;
+    if(I >= n) return;
+
+    const bool fixed            = is_fixed[I] != 0;
+    const bool external_kinetic = is_external_kinetic[I] != 0;
+    const int  grad_base        = I * 12;
+
+    Float dq[12];
+    Float kinetic_g[12];
+    for(int k = 0; k < 12; ++k)
+    {
+        dq[k]        = qs[I](k) - q_tildes[I](k);
+        kinetic_g[k] = 0;
+    }
+
+    if(!fixed && !external_kinetic)
+        corex_abd_mass_mul_values(masses[I], dq, kinetic_g);
+
+    const Vector12& shape_g = shape_gradient[I];
+    for(int k = 0; k < 12; ++k)
+        gradients[grad_base + k] = fixed ? Float(0) : shape_g(k) + kinetic_g[k];
+
+    Float        local_h[12 * 12];
+    const Float* shape_ptr = reinterpret_cast<const Float*>(shape_hessian + I);
+    for(int c = 0; c < 12; ++c)
+    {
+        for(int r = 0; r < 12; ++r)
+        {
+            int cm_idx = c * 12 + r;
+            if(fixed)
+                local_h[cm_idx] = (r == c) ? Float(1) : Float(0);
+            else
+                local_h[cm_idx] = shape_ptr[cm_idx];
+        }
+    }
+
+    if(!fixed && !external_kinetic)
+        corex_abd_add_mass_to_local_h(masses[I], local_h);
+
+    Float* diag_ptr = reinterpret_cast<Float*>(diag_hessian + I);
+    for(int idx = 0; idx < 12 * 12; ++idx)
+        diag_ptr[idx] = local_h[idx];
+
+    for(int jj = 0; jj < 4; ++jj)
+    {
+        for(int ii = jj + 1; ii < 4; ++ii)
+        {
+            for(int c = 0; c < 3; ++c)
+            {
+                for(int r = 0; r < 3; ++r)
+                {
+                    int row = ii * 3 + r;
+                    int col = jj * 3 + c;
+                    local_h[col * 12 + row] = Float(0);
+                }
+            }
+        }
+    }
+
+    constexpr int BLK = 3;
+    int           base_triplet = I * 16;
+    for(int ii = 0; ii < 4; ++ii)
+    {
+        for(int jj = 0; jj < 4; ++jj)
+        {
+            int idx = base_triplet + ii * 4 + jj;
+            dst_rows[idx] = I * 4 + ii;
+            dst_cols[idx] = I * 4 + jj;
+            Float* block_ptr = reinterpret_cast<Float*>(dst_vals + idx);
+            for(int r = 0; r < BLK; ++r)
+                for(int c = 0; c < BLK; ++c)
+                    block_ptr[c * BLK + r] =
+                        local_h[(jj * BLK + c) * 12 + (ii * BLK + r)];
         }
     }
 }
@@ -469,14 +724,24 @@ void ABDLinearSubsystem::Impl::_assemble_kinetic_shape(IndexT& hess_offset,
                     cudaGetErrorString(err));
         logger::info("[corex_trace][abd] kinetic_shape: sync ok at {}", where);
     };
+    const bool direct_bdf1_assembly =
+        std::getenv("UIPC_COREX_ABD_BDF1_DIRECT_ASSEMBLY") != nullptr
+        && !info.gradient_only();
 
     // Collect Kinetic
-    trace("collect kinetic begin");
-    ABDLinearSubsystem::ComputeGradientHessianInfo this_info{
-        info.gradient_only(), body_id_to_kinetic_gradient, body_id_to_kinetic_hessian, dt};
-    abd().kinetic->compute_gradient_hessian(this_info);
-    sync_dbg("after kinetic");
-    trace("collect kinetic end");
+    if(!direct_bdf1_assembly)
+    {
+        trace("collect kinetic begin");
+        ABDLinearSubsystem::ComputeGradientHessianInfo this_info{
+            info.gradient_only(), body_id_to_kinetic_gradient, body_id_to_kinetic_hessian, dt};
+        abd().kinetic->compute_gradient_hessian(this_info);
+        sync_dbg("after kinetic");
+        trace("collect kinetic end");
+    }
+    else
+    {
+        trace("collect kinetic skipped for direct BDF1 assembly");
+    }
 
     // Collect Shape
     trace("collect constitutions begin");
@@ -522,6 +787,40 @@ void ABDLinearSubsystem::Impl::_assemble_kinetic_shape(IndexT& hess_offset,
     }
     trace("collect constitutions end");
 
+    if(direct_bdf1_assembly)
+    {
+        auto body_count = body_id_to_shape_hessian.size();
+        auto H3x3_count = body_count * (4 * 4);
+        auto body_H3x3  = info.hessians().subview(hess_offset, H3x3_count);
+
+        int n = static_cast<int>(body_count);
+        if(n > 0)
+        {
+            int block = 128;
+            int grid  = (n + block - 1) / block;
+            kernel_abd_assemble_bdf1_direct<<<grid, block>>>(
+                n,
+                abd().body_id_to_is_fixed.data(),
+                abd().body_id_to_external_kinetic.data(),
+                abd().body_id_to_q.data(),
+                abd().body_id_to_q_tilde.data(),
+                abd().body_id_to_abd_mass.data(),
+                body_id_to_shape_gradient.data(),
+                body_id_to_shape_hessian.data(),
+                info.gradients().data(),
+                this->diag_hessian.data(),
+                body_H3x3.row_indices().data(),
+                body_H3x3.col_indices().data(),
+                body_H3x3.values().data());
+            checkCudaErrors(cudaGetLastError());
+            corex_abd_assemble_sync_if_requested("after direct BDF1 assembly");
+        }
+
+        hess_offset += H3x3_count;
+        trace("direct BDF1 assembly done");
+        return;
+    }
+
     trace("assemble gradients kernel begin");
     {
         int n = static_cast<int>(abd().body_count());
@@ -537,7 +836,7 @@ void ABDLinearSubsystem::Impl::_assemble_kinetic_shape(IndexT& hess_offset,
                 body_id_to_kinetic_gradient.data(),
                 info.gradients().data());
             checkCudaErrors(cudaGetLastError());
-            checkCudaErrors(cudaDeviceSynchronize());
+            corex_abd_assemble_sync_if_requested("after assemble gradients");
         }
     }
     trace("assemble gradients kernel end");
@@ -583,7 +882,7 @@ void ABDLinearSubsystem::Impl::_assemble_kinetic_shape(IndexT& hess_offset,
             checkCudaErrors(cudaGetLastError());
             if(std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM"))
                 logger::info("[corex_trace][abd] hess kernel launch ok, syncing...");
-            checkCudaErrors(cudaDeviceSynchronize());
+            corex_abd_assemble_sync_if_requested("after assemble hessians");
             if(std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM"))
                 logger::info("[corex_trace][abd] hess kernel sync done");
         }
@@ -711,7 +1010,7 @@ void ABDLinearSubsystem::Impl::_assemble_dytopo_effect(IndexT& offset,
             abd().body_id_to_is_fixed.data(),
             info.gradients().data());
         checkCudaErrors(cudaGetLastError());
-        checkCudaErrors(cudaDeviceSynchronize());
+        corex_abd_assemble_sync_if_requested("after dytopo gradients");
 
     }
 
@@ -744,7 +1043,7 @@ void ABDLinearSubsystem::Impl::_assemble_dytopo_effect(IndexT& offset,
             dytopo_effect_H3x3.col_indices().data(),
             dytopo_effect_H3x3.values().data());
         checkCudaErrors(cudaGetLastError());
-        checkCudaErrors(cudaDeviceSynchronize());
+        corex_abd_assemble_sync_if_requested("after dytopo hessians");
 
     }
 
@@ -777,7 +1076,7 @@ void ABDLinearSubsystem::Impl::retrieve_solution(GlobalLinearSystem::SolutionInf
         kernel_retrieve_solution<<<grid, block>>>(
             n, (Vector12*)dq.data(), (const Float*)info.solution().data());
         checkCudaErrors(cudaGetLastError());
-        checkCudaErrors(cudaDeviceSynchronize());
+        corex_abd_assemble_sync_if_requested("after retrieve solution");
     }
 }
 
