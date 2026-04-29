@@ -271,21 +271,47 @@ AABB GlobalVertexManager::Impl::compute_vertex_bounding_box()
         return vertex_bounding_box;
     }
 
-    std::vector<Vector3> h_positions(n);
-    positions.copy_to(h_positions);
-
     Float max_float = std::numeric_limits<Float>::max();
-    Vector3 min_pos_host{max_float, max_float, max_float};
-    Vector3 max_pos_host{-max_float, -max_float, -max_float};
+    Vector3 min_pos_host;
+    Vector3 max_pos_host;
 
-    for(const auto& p : h_positions)
+    if(std::getenv("UIPC_COREX_BBOX_HOST_FALLBACK") != nullptr)
     {
-        min_pos_host[0] = std::min(min_pos_host[0], p[0]);
-        min_pos_host[1] = std::min(min_pos_host[1], p[1]);
-        min_pos_host[2] = std::min(min_pos_host[2], p[2]);
-        max_pos_host[0] = std::max(max_pos_host[0], p[0]);
-        max_pos_host[1] = std::max(max_pos_host[1], p[1]);
-        max_pos_host[2] = std::max(max_pos_host[2], p[2]);
+        std::vector<Vector3> h_positions(n);
+        positions.copy_to(h_positions);
+
+        min_pos_host = Vector3{max_float, max_float, max_float};
+        max_pos_host = Vector3{-max_float, -max_float, -max_float};
+        for(const auto& p : h_positions)
+        {
+            min_pos_host[0] = std::min(min_pos_host[0], p[0]);
+            min_pos_host[1] = std::min(min_pos_host[1], p[1]);
+            min_pos_host[2] = std::min(min_pos_host[2], p[2]);
+            max_pos_host[0] = std::max(max_pos_host[0], p[0]);
+            max_pos_host[1] = std::max(max_pos_host[1], p[1]);
+            max_pos_host[2] = std::max(max_pos_host[2], p[2]);
+        }
+    }
+    else
+    {
+        muda::DeviceReduce()
+            .Reduce(
+                positions.data(),
+                min_pos.data(),
+                positions.size(),
+                [] CUB_RUNTIME_FUNCTION(const Vector3& L, const Vector3& R) -> Vector3
+                { return L.cwiseMin(R); },
+                Vector3{max_float, max_float, max_float})
+            .Reduce(
+                positions.data(),
+                max_pos.data(),
+                positions.size(),
+                [] CUB_RUNTIME_FUNCTION(const Vector3& L, const Vector3& R) -> Vector3
+                { return L.cwiseMax(R); },
+                Vector3{-max_float, -max_float, -max_float});
+
+        min_pos_host = min_pos;
+        max_pos_host = max_pos;
     }
 
     vertex_bounding_box = AABB{min_pos_host.cast<float>(), max_pos_host.cast<float>()};

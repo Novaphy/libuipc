@@ -10,6 +10,7 @@
 #include <utils/simplex_contact_mask_utils.h>
 #include <uipc/common/zip.h>
 #include <utils/primitive_d_hat.h>
+#include <utils/corex_phase_profile.h>
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
@@ -488,6 +489,21 @@ static __global__ void kernel_invalidate_pe_if_point_marked(
 
 namespace uipc::backend::cuda
 {
+namespace
+{
+bool corex_contact_allpe_off()
+{
+    const char* mode = std::getenv("UIPC_COREX_CONTACT_ALLPE_MODE");
+    return mode && std::string{mode} == "off";
+}
+
+bool corex_contact_allpe_fallback_only()
+{
+    const char* mode = std::getenv("UIPC_COREX_CONTACT_ALLPE_MODE");
+    return mode && std::string{mode} == "fallback_only";
+}
+}  // namespace
+
 constexpr bool PrintDebugInfo = false;
 constexpr bool PrintKernelZeroDistance = false;
 
@@ -805,59 +821,66 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
     triangle_aabbs.resize(Fs.size());
     edge_aabbs.resize(Es.size());
 
-    // build AABBs for codim vertices
-    if(codimVs.size() > 0)
     {
-        codim_point_aabbs.resize(codimVs.size());
-
-        int block = 256, grid = ((int)codimVs.size() + block - 1) / block;
-        corex_filter::kernel_build_point_aabbs<<<grid, block>>>(
-            codimVs.size(), (const IndexT*)codimVs.data(), (const Vector3*)Ps.data(),
-            (const Vector3*)dxs.data(), (const Float*)info.thicknesses().data(),
-            (const Float*)info.d_hats().data(), alpha, codim_point_aabbs.data());
-        cudaDeviceSynchronize();
-    }
-
-    // build AABBs for surf vertices (including codim vertices)
-    if(Vs.size() > 0)
-    {
-        int block = 256, grid = ((int)Vs.size() + block - 1) / block;
-        corex_filter::kernel_build_point_aabbs<<<grid, block>>>(
-            Vs.size(), (const IndexT*)Vs.data(), (const Vector3*)Ps.data(),
-            (const Vector3*)dxs.data(), (const Float*)info.thicknesses().data(),
-            (const Float*)info.d_hats().data(), alpha, point_aabbs.data());
-        cudaDeviceSynchronize();
-    }
-
-    // build AABBs for edges
-    if(Es.size() > 0)
-    {
-        int block = 256, grid = ((int)Es.size() + block - 1) / block;
-        corex_filter::kernel_build_edge_aabbs<<<grid, block>>>(
-            Es.size(), (const Vector2i*)Es.data(), (const Vector3*)Ps.data(),
-            (const Vector3*)dxs.data(), (const Float*)info.thicknesses().data(),
-            (const Float*)info.d_hats().data(), alpha, edge_aabbs.data());
-        cudaDeviceSynchronize();
-    }
-
-    // build AABBs for triangles
-    if(Fs.size() > 0)
-    {
-        int block = 256, grid = ((int)Fs.size() + block - 1) / block;
-        corex_filter::kernel_build_triangle_aabbs<<<grid, block>>>(
-            Fs.size(), (const Vector3i*)Fs.data(), (const Vector3*)Ps.data(),
-            (const Vector3*)dxs.data(), (const Float*)info.thicknesses().data(),
-            (const Float*)info.d_hats().data(), alpha, triangle_aabbs.data());
-        cudaDeviceSynchronize();
-    }
-
-    lbvh_E.build(edge_aabbs);
-    lbvh_T.build(triangle_aabbs);
-
-    if(codimVs.size() > 0)
-    {
-        // Use AllP to query CodimP
+        corex_profile::ScopedPhase phase("contact_detect_detail", "build_aabbs");
+        // build AABBs for codim vertices
+        if(codimVs.size() > 0)
         {
+            codim_point_aabbs.resize(codimVs.size());
+
+            int block = 256, grid = ((int)codimVs.size() + block - 1) / block;
+            corex_filter::kernel_build_point_aabbs<<<grid, block>>>(
+                codimVs.size(), (const IndexT*)codimVs.data(), (const Vector3*)Ps.data(),
+                (const Vector3*)dxs.data(), (const Float*)info.thicknesses().data(),
+                (const Float*)info.d_hats().data(), alpha, codim_point_aabbs.data());
+            cudaDeviceSynchronize();
+        }
+
+        // build AABBs for surf vertices (including codim vertices)
+        if(Vs.size() > 0)
+        {
+            int block = 256, grid = ((int)Vs.size() + block - 1) / block;
+            corex_filter::kernel_build_point_aabbs<<<grid, block>>>(
+                Vs.size(), (const IndexT*)Vs.data(), (const Vector3*)Ps.data(),
+                (const Vector3*)dxs.data(), (const Float*)info.thicknesses().data(),
+                (const Float*)info.d_hats().data(), alpha, point_aabbs.data());
+            cudaDeviceSynchronize();
+        }
+
+        // build AABBs for edges
+        if(Es.size() > 0)
+        {
+            int block = 256, grid = ((int)Es.size() + block - 1) / block;
+            corex_filter::kernel_build_edge_aabbs<<<grid, block>>>(
+                Es.size(), (const Vector2i*)Es.data(), (const Vector3*)Ps.data(),
+                (const Vector3*)dxs.data(), (const Float*)info.thicknesses().data(),
+                (const Float*)info.d_hats().data(), alpha, edge_aabbs.data());
+            cudaDeviceSynchronize();
+        }
+
+        // build AABBs for triangles
+        if(Fs.size() > 0)
+        {
+            int block = 256, grid = ((int)Fs.size() + block - 1) / block;
+            corex_filter::kernel_build_triangle_aabbs<<<grid, block>>>(
+                Fs.size(), (const Vector3i*)Fs.data(), (const Vector3*)Ps.data(),
+                (const Vector3*)dxs.data(), (const Float*)info.thicknesses().data(),
+                (const Float*)info.d_hats().data(), alpha, triangle_aabbs.data());
+            cudaDeviceSynchronize();
+        }
+    }
+
+    {
+        corex_profile::ScopedPhase phase("contact_detect_detail", "bvh_build_edge_tri");
+        lbvh_E.build(edge_aabbs);
+        lbvh_T.build(triangle_aabbs);
+    }
+
+    if(codimVs.size() > 0)
+    {
+        {
+            corex_profile::ScopedPhase phase("contact_detect_detail", "query_allp_codimp");
+            // Use AllP to query CodimP
             lbvh_CodimP.build(codim_point_aabbs);
 
             muda::KernelLabel label{__FUNCTION__, __FILE__, __LINE__};
@@ -922,8 +945,9 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
                 candidate_AllP_CodimP_pairs);
         }
 
-        // Use CodimP to query AllE
         {
+            corex_profile::ScopedPhase phase("contact_detect_detail", "query_codimp_alle");
+            // Use CodimP to query AllE
             muda::KernelLabel label{__FUNCTION__, __FILE__, __LINE__};
             lbvh_E.query(
                 codim_point_aabbs,
@@ -999,8 +1023,9 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
         // Exact "0" disables narrow-phase tightening (broadphase-only, legacy behavior).
         allpe_detect_dim3_only = !(env[0] == '0' && env[1] == '\0');
     }
-    if(Vs.size() > 0 && Es.size() > 0)
+    if(!corex_contact_allpe_off() && Vs.size() > 0 && Es.size() > 0)
     {
+        corex_profile::ScopedPhase phase("contact_detect_detail", "query_allp_alle");
         muda::KernelLabel label{__FUNCTION__, __FILE__, __LINE__};
         lbvh_E.query(
             point_aabbs,
@@ -1083,6 +1108,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
     // Use AllE to query AllE
     if(Es.size() > 0)
     {
+        corex_profile::ScopedPhase phase("contact_detect_detail", "query_alle_alle");
         muda::KernelLabel label{__FUNCTION__, __FILE__, __LINE__};
         lbvh_E.detect(
             [Es          = Es.viewer().name("Es"),
@@ -1159,6 +1185,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
     // Use AllP to query AllT
     if(Fs.size() > 0)
     {
+        corex_profile::ScopedPhase phase("contact_detect_detail", "query_allp_allt");
         muda::KernelLabel label{__FUNCTION__, __FILE__, __LINE__};
         lbvh_T.query(
             point_aabbs,
@@ -1287,6 +1314,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
     // AllP and CodimP
     if(N_PCoimP > 0)
     {
+        corex_profile::ScopedPhase phase("contact_filter_detail", "filter_pp");
         auto PP_view = temp_PPs.view(temp_PP_offset, N_PCoimP);
 
         {
@@ -1309,6 +1337,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
     // CodimP and AllE
     if(N_CodimPE > 0)
     {
+        corex_profile::ScopedPhase phase("contact_filter_detail", "filter_codimpe");
         auto PP_view = temp_PPs.view(temp_PP_offset, N_CodimPE);
         auto PE_view = temp_PEs.view(temp_PE_offset, N_CodimPE);
 
@@ -1335,6 +1364,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
     // AllP and AllE (independent PE channel)
     if(N_AllPE > 0)
     {
+        corex_profile::ScopedPhase phase("contact_filter_detail", "filter_allpe");
         auto PP_view = temp_PPs.view(temp_PP_offset, N_AllPE);
         auto PE_view = temp_PEs.view(temp_PE_offset, N_AllPE);
 
@@ -1360,6 +1390,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
 
     // AllP and AllT
     {
+        corex_profile::ScopedPhase phase("contact_filter_detail", "filter_pt");
         auto PP_view = temp_PPs.view(temp_PP_offset, N_PTs);
         auto PE_view = temp_PEs.view(temp_PE_offset, N_PTs);
 
@@ -1389,6 +1420,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
     }
     // AllE and AllE
     {
+        corex_profile::ScopedPhase phase("contact_filter_detail", "filter_ee");
         auto PP_view = temp_PPs.view(temp_PP_offset, N_EEs);
         auto PE_view = temp_PEs.view(temp_PE_offset, N_EEs);
 
@@ -1443,6 +1475,8 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
     bool allpe_fallback_only = false;
     bool allpe_pointwise_dedup = false;
     bool allpe_fill_missing_only = false;
+    if(corex_contact_allpe_fallback_only())
+        allpe_fallback_only = true;
     if(const char* env = std::getenv("UIPC_COREX_ALLPE_FALLBACK_ONLY"))
         allpe_fallback_only = (env[0] != '0');
     if(const char* env = std::getenv("UIPC_COREX_ALLPE_POINTWISE_DEDUP"))
@@ -1723,6 +1757,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
     }
 
     {  // select the valid ones
+        corex_profile::ScopedPhase phase("contact_filter_detail", "select_valid_all");
         PPs.resize(temp_PPs.size());
         PEs.resize(temp_PEs.size());
         PTs.resize(temp_PTs.size());

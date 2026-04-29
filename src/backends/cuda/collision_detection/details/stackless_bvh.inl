@@ -427,7 +427,7 @@ MUDA_INLINE void StacklessBVH::Impl::calcMCsFromBox(muda::CBufferView<AABB> aabb
     int block = 256;
     int grid = (N + block - 1) / block;
     corex_bvh::kernel_calcMCs<<<grid, block>>>(N, (const AABB*)aabbs.data(), (const AABB*)scene_box.data(), (uint32_t*)codes.data());
-    cudaDeviceSynchronize();
+    checkCudaErrors(cudaGetLastError());
 }
 
 /// incoherent access, thus poor performance
@@ -439,7 +439,7 @@ MUDA_INLINE void StacklessBVH::Impl::calcInverseMapping()
 
     int block = 256, grid = (N + block - 1) / block;
     corex_bvh::kernel_calcInverseMapping<<<grid, block>>>(N, RAW_PTR(sorted_id), RAW_PTR(primMap));
-    cudaDeviceSynchronize();
+    checkCudaErrors(cudaGetLastError());
 }
 
 MUDA_INLINE void StacklessBVH::Impl::buildPrimitivesFromBox(muda::CBufferView<AABB> aabbs)
@@ -451,7 +451,7 @@ MUDA_INLINE void StacklessBVH::Impl::buildPrimitivesFromBox(muda::CBufferView<AA
     int block = 256, grid = (N + block - 1) / block;
     corex_bvh::kernel_buildPrimitives<<<grid, block>>>(N, RAW_PTR(primMap), (const AABB*)aabbs.data(),
                                                         RAW_PTR(ext_idx), RAW_PTR(ext_aabb));
-    cudaDeviceSynchronize();
+    checkCudaErrors(cudaGetLastError());
 }
 
 
@@ -463,7 +463,7 @@ MUDA_INLINE void StacklessBVH::Impl::calcExtNodeSplitMetrics()
 
     int block = 256, grid = (N + block - 1) / block;
     corex_bvh::kernel_calcSplitMetrics<<<grid, block>>>(N, RAW_PTR(mtcode), RAW_PTR(metric));
-    cudaDeviceSynchronize();
+    checkCudaErrors(cudaGetLastError());
 }
 
 MUDA_INLINE void StacklessBVH::Impl::buildIntNodes(int size)
@@ -607,7 +607,7 @@ MUDA_INLINE void StacklessBVH::Impl::calcIntNodeOrders(int size)
     int block = 256, grid = (size + block - 1) / block;
     corex_bvh::kernel_calcIntNodeOrders<<<grid, block>>>(size, RAW_PTR(int_lc), RAW_PTR(ext_lca),
                                                           RAW_PTR(count), RAW_PTR(offsetTable), RAW_PTR(tkMap));
-    cudaDeviceSynchronize();
+    checkCudaErrors(cudaGetLastError());
 }
 
 MUDA_INLINE void StacklessBVH::Impl::updateBvhExtNodeLinks(int size)
@@ -620,7 +620,7 @@ MUDA_INLINE void StacklessBVH::Impl::updateBvhExtNodeLinks(int size)
 
     int block = 256, grid = (size + block - 1) / block;
     corex_bvh::kernel_updateBvhExtNodeLinks<<<grid, block>>>(size, RAW_PTR(tkMap), RAW_PTR(ext_lca), RAW_PTR(ext_par));
-    cudaDeviceSynchronize();
+    checkCudaErrors(cudaGetLastError());
 }
 
 MUDA_INLINE void StacklessBVH::Impl::reorderNode(int intSize)
@@ -635,7 +635,7 @@ MUDA_INLINE void StacklessBVH::Impl::reorderNode(int intSize)
         RAW_PTR(ext_lca), RAW_PTR(ext_aabb),
         RAW_PTR(tkMap), RAW_PTR(int_lc), RAW_PTR(int_mark), RAW_PTR(int_range_y),
         RAW_PTR(int_aabb), RAW_PTR(nodes));
-    cudaDeviceSynchronize();
+    checkCudaErrors(cudaGetLastError());
 }
 
 inline void StacklessBVH::Impl::build(muda::CBufferView<AABB> aabbs)

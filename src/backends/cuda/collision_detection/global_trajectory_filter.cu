@@ -3,6 +3,10 @@
 #include <collision_detection/trajectory_filter.h>
 #include <contact_system/global_contact_manager.h>
 #include <sim_engine.h>
+#include <utils/corex_phase_profile.h>
+#include <muda/check/check_cuda_errors.h>
+#include <algorithm>
+#include <cstdlib>
 
 namespace uipc::backend
 {
@@ -24,6 +28,37 @@ class SimSystemCreator<cuda::GlobalTrajectoryFilter>
 namespace uipc::backend::cuda
 {
 REGISTER_SIM_SYSTEM(GlobalTrajectoryFilter);
+
+namespace
+{
+__global__ void kernel_min_toi(int n, const Float* tois, Float* out)
+{
+    __shared__ Float block_min[256];
+    int tid = threadIdx.x;
+    int i   = blockIdx.x * blockDim.x + threadIdx.x;
+
+    Float local = 1.0f;
+    while(i < n)
+    {
+        Float v = tois[i];
+        if(v == 0.0f)
+            v = 1.0f;
+        local = min(local, v);
+        i += blockDim.x * gridDim.x;
+    }
+
+    block_min[tid] = local;
+    __syncthreads();
+    for(int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+    {
+        if(tid < stride)
+            block_min[tid] = min(block_min[tid], block_min[tid + stride]);
+        __syncthreads();
+    }
+    if(tid == 0)
+        atomicMin(reinterpret_cast<int*>(out), __float_as_int(block_min[0]));
+}
+}  // namespace
 
 void GlobalTrajectoryFilter::do_build()
 {
@@ -48,6 +83,7 @@ void GlobalTrajectoryFilter::Impl::init()
 {
     auto filter_view = filters.view();
     tois.resize(filter_view.size());
+    min_toi.resize(1);
     h_tois.resize(filter_view.size());
     // Default to "no restriction": toi = 1.0.
     // Individual filters may reduce it when they detect upcoming impacts.
@@ -57,16 +93,33 @@ void GlobalTrajectoryFilter::Impl::init()
 
 void GlobalTrajectoryFilter::detect(Float alpha)
 {
+    auto profile_t0 = corex_profile::now_ms();
+    int  filter_idx = 0;
     for(auto filter : m_impl.filters.view())
     {
+        auto profile_filter_t0 = corex_profile::now_ms();
         DetectInfo info;
         info.m_alpha = alpha;
         filter->detect(info);
+        corex_profile::log_phase("contact",
+                                 "detect_filter",
+                                 engine().frame(),
+                                 engine().newton_iter(),
+                                 filter_idx,
+                                 corex_profile::now_ms() - profile_filter_t0);
+        ++filter_idx;
     }
+    corex_profile::log_phase("contact",
+                             "detect",
+                             engine().frame(),
+                             engine().newton_iter(),
+                             -1,
+                             corex_profile::now_ms() - profile_t0);
 }
 
 void GlobalTrajectoryFilter::filter_active()
 {
+    auto profile_t0 = corex_profile::now_ms();
     if(m_impl.global_contact_manager->cfl_enabled())
     {
         auto is_acitive =
@@ -74,15 +127,31 @@ void GlobalTrajectoryFilter::filter_active()
         is_acitive.fill(0);  // clear the active flag
     }
 
+    int filter_idx = 0;
     for(auto filter : m_impl.filters.view())
     {
+        auto profile_filter_t0 = corex_profile::now_ms();
         FilterActiveInfo info(&m_impl);
         filter->filter_active(info);
+        corex_profile::log_phase("contact",
+                                 "filter_active_filter",
+                                 engine().frame(),
+                                 engine().newton_iter(),
+                                 filter_idx,
+                                 corex_profile::now_ms() - profile_filter_t0);
+        ++filter_idx;
     }
+    corex_profile::log_phase("contact",
+                             "filter_active",
+                             engine().frame(),
+                             engine().newton_iter(),
+                             -1,
+                             corex_profile::now_ms() - profile_t0);
 }
 
 Float GlobalTrajectoryFilter::Impl::filter_toi(Float alpha)
 {
+    auto profile_t0 = corex_profile::now_ms();
     // Reset tois for this evaluation. Some filters may early-out and not write toi,
     // so we must keep a valid default (1.0) to avoid bogus min-toi=0.
     tois.fill(1.0f);
@@ -90,15 +159,23 @@ Float GlobalTrajectoryFilter::Impl::filter_toi(Float alpha)
     auto filter_view = filters.view();
     for(auto&& [i, filter] : enumerate(filter_view))
     {
+        auto profile_filter_t0 = corex_profile::now_ms();
         FilterTOIInfo info;
         info.m_toi   = muda::VarView<Float>{tois.data() + i};
         info.m_alpha = alpha;
         filter->filter_toi(info);
+        corex_profile::log_phase("contact",
+                                 "filter_toi_filter",
+                                 -1,
+                                 -1,
+                                 i,
+                                 corex_profile::now_ms() - profile_filter_t0);
     }
-    tois.view().copy_to(h_tois.data());
+    Float h_min_toi = 1.0f;
 
     if constexpr(uipc::RUNTIME_CHECK)
     {
+        tois.view().copy_to(h_tois.data());
         for(auto&& [i, toi] : enumerate(h_tois))
         {
             // Some filters may output toi=0 when no candidates exist (meaning "no restriction").
@@ -107,11 +184,33 @@ Float GlobalTrajectoryFilter::Impl::filter_toi(Float alpha)
             if(toi == 0.0f)
                 toi = 1.0f;
         }
+        h_min_toi = *std::min_element(h_tois.begin(), h_tois.end());
+    }
+    else if(std::getenv("UIPC_COREX_TOI_DEVICE_MIN") == nullptr)
+    {
+        tois.view().copy_to(h_tois.data());
+        h_min_toi = *std::min_element(h_tois.begin(), h_tois.end());
+    }
+    else
+    {
+        Float init = 1.0f;
+        checkCudaErrors(cudaMemcpy(min_toi.data(), &init, sizeof(Float), cudaMemcpyHostToDevice));
+        constexpr int block = 256;
+        int n = static_cast<int>(filter_view.size());
+        int grid = std::max(1, std::min((n + block - 1) / block, 8));
+        kernel_min_toi<<<grid, block>>>(n, tois.data(), min_toi.data());
+        checkCudaErrors(cudaGetLastError());
+        checkCudaErrors(cudaMemcpy(&h_min_toi, min_toi.data(), sizeof(Float), cudaMemcpyDeviceToHost));
     }
 
-    auto min_toi = *std::min_element(h_tois.begin(), h_tois.end());
-
-    return min_toi < 1.0 ? min_toi : 1.0;
+    auto ret = h_min_toi < 1.0 ? h_min_toi : 1.0;
+    corex_profile::log_phase("contact",
+                             "filter_toi",
+                             -1,
+                             -1,
+                             -1,
+                             corex_profile::now_ms() - profile_t0);
+    return ret;
 }
 
 Float GlobalTrajectoryFilter::filter_toi(Float alpha)
