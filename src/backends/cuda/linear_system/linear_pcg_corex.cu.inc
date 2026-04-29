@@ -3,6 +3,7 @@
 #include <linear_system/global_linear_system.h>
 #include <cuda_device/builtin.h>
 #include <utils/matrix_market.h>
+#include <utils/corex_phase_profile.h>
 #include <backends/common/backend_path_tool.h>
 #include <uipc/common/timer.h>
 #include <cstdlib>
@@ -27,6 +28,19 @@ constexpr Float pcg_tol_floor()
     return Float(1e-3);
 #else
     return Float(1e-6);
+#endif
+}
+
+int corex_pcg_norm_check_interval()
+{
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    const char* env = std::getenv("UIPC_COREX_PCG_NORM_CHECK_INTERVAL");
+    if(!env)
+        return 1;
+    int interval = std::atoi(env);
+    return interval > 0 ? interval : 1;
+#else
+    return 1;
 #endif
 }
 }  // namespace
@@ -105,7 +119,14 @@ void LinearPCG::do_solve(GlobalLinearSystem::SolvingInfo& info)
     max_iter  = std::max(max_iter, SizeT{1});
     if(corex_trace_pcg)
         logger::info("[corex_trace][PCG] do_solve: entering pcg(), dof={} max_iter={}", x.size(), max_iter);
+    auto solve_profile_start = corex_profile::now_ms();
     auto iter = pcg(x, b, max_iter);
+    corex_profile::log_phase("pcg",
+                             "solve_total",
+                             engine().frame(),
+                             engine().newton_iter(),
+                             iter,
+                             corex_profile::now_ms() - solve_profile_start);
     if(corex_trace_pcg)
         logger::info("[corex_trace][PCG] do_solve: pcg() returned iters={}", iter);
 
@@ -297,6 +318,12 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
 {
     Timer pcg_timer{"PCG"};
     auto  stream = ctx().stream();
+    const auto profile_frame  = static_cast<long long>(engine().frame());
+    const auto profile_newton = static_cast<long long>(engine().newton_iter());
+    double profile_spmv_ms = 0.0;
+    double profile_spmv_sync_ms = 0.0;
+    double profile_precond_ms = 0.0;
+    double profile_dotnorm_ms = 0.0;
 
     SizeT k = 0;
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
@@ -316,31 +343,17 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
         //spmv(-1.0, x.as_const(), 1.0, r.view());
     }
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    {
-        checkCudaErrors(cudaDeviceSynchronize());
-        auto n = static_cast<int>(b.size());
-        std::vector<Float> hb(n);
-        checkCudaErrors(cudaMemcpy(hb.data(), b.data(), sizeof(Float) * n, cudaMemcpyDeviceToHost));
-        Float hnorm_b = 0;
-        for(int i = 0; i < n; ++i)
-            hnorm_b += hb[i] * hb[i];
-        if(hnorm_b <= pcg_zero_tol())
-        {
-            logger::info("[corex] PCG: b==0, trivial solution x=0");
-            return 0;
-        }
-    }
-#endif
-
     Float alpha, beta, rz, abs_rz0;
+    const int norm_check_interval = corex_pcg_norm_check_interval();
 
     if(corex_trace_pcg)
         logger::info("[corex_trace][PCG] apply_preconditioner begin");
     // z = P * r (apply preconditioner)
     {
         Timer timer{"Apply Preconditioner"};
+        auto profile_t0 = corex_profile::now_ms();
         apply_preconditioner(z, r, d_converged_false.view());
+        profile_precond_ms += corex_profile::now_ms() - profile_t0;
     }
     if(corex_trace_pcg)
         logger::info("[corex_trace][PCG] apply_preconditioner done");
@@ -357,10 +370,21 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
 
     if(corex_trace_pcg)
         logger::info("[corex_trace][PCG] dot(r,z) begin");
+    auto profile_dot_t0 = corex_profile::now_ms();
     rz = ctx().dot(r.cview(), z.cview());
+    profile_dotnorm_ms += corex_profile::now_ms() - profile_dot_t0;
     if(corex_trace_pcg)
         logger::info("[corex_trace][PCG] dot(r,z) done, rz={}", rz);
     check_init_rz_nan_inf(rz);
+
+    profile_dot_t0 = corex_profile::now_ms();
+    Float norm_b = ctx().norm(b);
+    profile_dotnorm_ms += corex_profile::now_ms() - profile_dot_t0;
+    if(norm_b <= pcg_zero_tol())
+    {
+        logger::info("[corex] PCG: b==0, trivial solution x=0");
+        return 0;
+    }
 
     abs_rz0 = std::abs(rz);
     // Textbook PCG relative-residual convergence: ||r|| <= max(tol_rate*||b||, pcg_zero_tol).
@@ -371,11 +395,12 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
     // the simulation freezes. Below we keep the legacy criterion only as a
     // shadow log so we can observe how often the old bug would have fired.
     {
-        Float norm_b   = ctx().norm(b);
+        profile_dot_t0 = corex_profile::now_ms();
         Float norm_r   = ctx().norm(r.cview());
+        profile_dotnorm_ms += corex_profile::now_ms() - profile_dot_t0;
         Float r_tol    = std::max(global_tol_rate * norm_b, pcg_zero_tol());
         bool  legacy_exit = (abs_rz0 <= pcg_zero_tol());
-        if(legacy_exit && norm_r > r_tol)
+        if(corex_trace_pcg && legacy_exit && norm_r > r_tol)
         {
             logger::info("[pcg_legacy_would_exit] init: norm(b)={}, norm(r)={}, norm(z)={}, |r.z|={} (kept iterating)",
                          norm_b, norm_r, ctx().norm(z.cview()), abs_rz0);
@@ -394,11 +419,16 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
             logger::info("[corex_trace][PCG] iter {} begin (spmv)", k);
         {
             Timer timer{"SpMV"};
+            auto profile_t0 = corex_profile::now_ms();
             spmv(p.cview(), Ap.view());
+            profile_spmv_ms += corex_profile::now_ms() - profile_t0;
         }
 
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-        checkCudaErrors(cudaDeviceSynchronize());
+        auto profile_sync_t0 = corex_profile::now_ms();
+        if(std::getenv("UIPC_COREX_PCG_SKIP_SPMV_SYNC") == nullptr)
+            checkCudaErrors(cudaDeviceSynchronize());
+        profile_spmv_sync_ms += corex_profile::now_ms() - profile_sync_t0;
 #endif
         if(corex_trace_pcg && (k <= 3 || k == max_iter - 1))
             logger::info("[corex_trace][PCG] iter {} spmv done", k);
@@ -407,7 +437,9 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
             dump_p_Ap(k);
 
         // alpha = rz / p^T * Ap
+        profile_dot_t0 = corex_profile::now_ms();
         Float pAp = ctx().dot(p.cview(), Ap.cview());
+        profile_dotnorm_ms += corex_profile::now_ms() - profile_dot_t0;
         alpha = rz / pAp;
 
         if(corex_trace_pcg && (k <= 3 || k == max_iter - 1))
@@ -420,25 +452,31 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
         // z = P * r (apply preconditioner)
         {
             Timer timer{"Apply Preconditioner"};
+            auto profile_t0 = corex_profile::now_ms();
             apply_preconditioner(z, r, d_converged_false.view());
+            profile_precond_ms += corex_profile::now_ms() - profile_t0;
         }
 
         if(need_debug_dump) [[unlikely]]
             dump_r_z(k);
 
         // rz_new = r^T * z
+        profile_dot_t0 = corex_profile::now_ms();
         Float rz_new = ctx().dot(r.cview(), z.cview());
+        profile_dotnorm_ms += corex_profile::now_ms() - profile_dot_t0;
         check_iter_rz_nan_inf(rz_new, k);
 
         // Textbook PCG iter convergence: ||r|| <= max(tol_rate*||b||, pcg_zero_tol).
         // See the init-block comment above for why we cannot trust |r.z| on Corex.
+        if(k % norm_check_interval == 0)
         {
-            Float norm_b      = ctx().norm(b);
+            profile_dot_t0 = corex_profile::now_ms();
             Float norm_r      = ctx().norm(r.cview());
+            profile_dotnorm_ms += corex_profile::now_ms() - profile_dot_t0;
             Float r_tol       = std::max(global_tol_rate * norm_b, pcg_zero_tol());
             auto  rz_tol      = std::max(global_tol_rate * abs_rz0, pcg_zero_tol());
             bool  legacy_exit = (std::abs(rz_new) <= rz_tol);
-            if(legacy_exit && norm_r > r_tol)
+            if(corex_trace_pcg && legacy_exit && norm_r > r_tol)
             {
                 logger::info("[pcg_legacy_would_exit] iter {}: norm(r)={}, |r.z_new|={} (kept iterating)",
                              k, norm_r, std::abs(rz_new));
@@ -456,6 +494,13 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
         rz = rz_new;
     }
 
+    corex_profile::log_phase("pcg", "spmv", profile_frame, profile_newton, k, profile_spmv_ms);
+    corex_profile::log_phase(
+        "pcg", "spmv_sync", profile_frame, profile_newton, k, profile_spmv_sync_ms);
+    corex_profile::log_phase(
+        "pcg", "preconditioner", profile_frame, profile_newton, k, profile_precond_ms);
+    corex_profile::log_phase(
+        "pcg", "dotnorm", profile_frame, profile_newton, k, profile_dotnorm_ms);
     return k;
 }
 }  // namespace uipc::backend::cuda

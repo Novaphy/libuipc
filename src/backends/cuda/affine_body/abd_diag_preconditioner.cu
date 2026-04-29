@@ -6,6 +6,7 @@
 #include <muda/ext/eigen/inverse.h>
 #include <kernel_cout.h>
 #include <muda/check/check_cuda_errors.h>
+#include <cstdlib>
 
 namespace uipc::backend::cuda
 {
@@ -85,7 +86,9 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
                     n,
                     (const Float*)diag_hessian.data(),
                     (Float*)jacobi_recip.data());
-                checkCudaErrors(cudaDeviceSynchronize());
+                checkCudaErrors(cudaGetLastError());
+                if(std::getenv("UIPC_COREX_ABD_PRECOND_SKIP_SYNC") == nullptr)
+                    checkCudaErrors(cudaDeviceSynchronize());
             }
         }
     }
@@ -106,7 +109,9 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
                     (const Float*)info.r().data(),
                     (Float*)info.z().data(),
                     (const IndexT*)converged.data());
-                checkCudaErrors(cudaDeviceSynchronize());
+                checkCudaErrors(cudaGetLastError());
+                if(std::getenv("UIPC_COREX_ABD_PRECOND_SKIP_SYNC") == nullptr)
+                    checkCudaErrors(cudaDeviceSynchronize());
             }
         }
     }

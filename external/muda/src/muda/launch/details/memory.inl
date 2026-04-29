@@ -1,9 +1,123 @@
 #pragma once
+#include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <muda/compute_graph/compute_graph.h>
 #include "memory.h"
 namespace muda
 {
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+namespace details
+{
+struct CorexMemcpyStats
+{
+    std::atomic<unsigned long long> h2d_count{0};
+    std::atomic<unsigned long long> h2d_bytes{0};
+    std::atomic<unsigned long long> d2h_count{0};
+    std::atomic<unsigned long long> d2h_bytes{0};
+    std::atomic<unsigned long long> d2d_count{0};
+    std::atomic<unsigned long long> d2d_bytes{0};
+};
+
+MUDA_INLINE CorexMemcpyStats& corex_memcpy_stats()
+{
+    static CorexMemcpyStats stats;
+    return stats;
+}
+
+MUDA_INLINE bool corex_memcpy_trace_enabled()
+{
+    return std::getenv("UIPC_COREX_TRACE_MEMCPY") != nullptr;
+}
+
+MUDA_INLINE bool corex_memcpy_stats_enabled()
+{
+    return std::getenv("UIPC_COREX_MEMCPY_STATS") != nullptr;
+}
+
+MUDA_INLINE const char* corex_memcpy_kind_name(cudaMemcpyKind kind)
+{
+    switch(kind)
+    {
+        case cudaMemcpyHostToDevice: return "H2D";
+        case cudaMemcpyDeviceToHost: return "D2H";
+        case cudaMemcpyDeviceToDevice: return "D2D";
+        case cudaMemcpyHostToHost: return "H2H";
+        default: return "Other";
+    }
+}
+
+MUDA_INLINE void corex_print_memcpy_stats()
+{
+    auto& stats = corex_memcpy_stats();
+    std::fprintf(stderr,
+                 "[corex_memcpy_stats] H2D count=%llu bytes=%llu, D2H count=%llu bytes=%llu, D2D count=%llu bytes=%llu\n",
+                 stats.h2d_count.load(std::memory_order_relaxed),
+                 stats.h2d_bytes.load(std::memory_order_relaxed),
+                 stats.d2h_count.load(std::memory_order_relaxed),
+                 stats.d2h_bytes.load(std::memory_order_relaxed),
+                 stats.d2d_count.load(std::memory_order_relaxed),
+                 stats.d2d_bytes.load(std::memory_order_relaxed));
+}
+
+MUDA_INLINE void corex_ensure_memcpy_stats_registered()
+{
+    static bool registered = []()
+    {
+        std::atexit(corex_print_memcpy_stats);
+        return true;
+    }();
+    (void)registered;
+}
+
+MUDA_INLINE void corex_record_memcpy(cudaMemcpyKind kind, size_t byte_size)
+{
+    const bool stats_enabled = corex_memcpy_stats_enabled();
+    const bool trace_enabled = corex_memcpy_trace_enabled();
+    if(!stats_enabled && !trace_enabled)
+        return;
+
+    if(stats_enabled)
+        corex_ensure_memcpy_stats_registered();
+
+    auto& stats = corex_memcpy_stats();
+    std::atomic<unsigned long long>* count = nullptr;
+    std::atomic<unsigned long long>* bytes = nullptr;
+    switch(kind)
+    {
+        case cudaMemcpyHostToDevice:
+            count = &stats.h2d_count;
+            bytes = &stats.h2d_bytes;
+            break;
+        case cudaMemcpyDeviceToHost:
+            count = &stats.d2h_count;
+            bytes = &stats.d2h_bytes;
+            break;
+        case cudaMemcpyDeviceToDevice:
+            count = &stats.d2d_count;
+            bytes = &stats.d2d_bytes;
+            break;
+        default:
+            break;
+    }
+
+    if(count && bytes)
+    {
+        auto current = count->fetch_add(1, std::memory_order_relaxed) + 1;
+        bytes->fetch_add(static_cast<unsigned long long>(byte_size), std::memory_order_relaxed);
+        if(trace_enabled && (current <= 32 || (current % 1024) == 0))
+        {
+            std::fprintf(stderr,
+                         "[corex_memcpy] kind=%s count=%llu bytes=%zu\n",
+                         corex_memcpy_kind_name(kind),
+                         current,
+                         byte_size);
+        }
+    }
+}
+}  // namespace details
+#endif
+
 template <typename T>
 MUDA_HOST Memory& Memory::alloc_1d(T** ptr, size_t byte_size, bool async)
 {
@@ -103,7 +217,11 @@ MUDA_INLINE MUDA_HOST Memory& Memory::copy(void* dst, const void* src, size_t by
     else
     {
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-        checkCudaErrors(cudaMemcpy(dst, src, byte_size, kind));
+        details::corex_record_memcpy(kind, byte_size);
+        if(kind == cudaMemcpyDeviceToDevice)
+            checkCudaErrors(cudaMemcpyAsync(dst, src, byte_size, kind, stream()));
+        else
+            checkCudaErrors(cudaMemcpy(dst, src, byte_size, kind));
 #else
         checkCudaErrors(cudaMemcpyAsync(dst, src, byte_size, kind, stream()));
 #endif

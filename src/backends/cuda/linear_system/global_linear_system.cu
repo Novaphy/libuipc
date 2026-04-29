@@ -12,6 +12,7 @@
 #include <sim_engine.h>
 #include <backends/common/backend_path_tool.h>
 #include <utils/matrix_market.h>
+#include <utils/corex_phase_profile.h>
 #include <cstdlib>
 
 namespace uipc::backend::cuda
@@ -234,7 +235,14 @@ void GlobalLinearSystem::Impl::build_linear_system()
     };
     trace("build_linear_system: begin");
     trace("update_subsystem_extent: begin");
+    auto profile_t0 = corex_profile::now_ms();
     empty_system = !_update_subsystem_extent();
+    corex_profile::log_phase("linear",
+                             "update_subsystem_extent",
+                             -1,
+                             -1,
+                             -1,
+                             corex_profile::now_ms() - profile_t0);
     trace("update_subsystem_extent: end");
 
     if(empty_system) [[unlikely]]
@@ -244,7 +252,14 @@ void GlobalLinearSystem::Impl::build_linear_system()
     }
 
     trace("assemble_linear_system: begin");
+    profile_t0 = corex_profile::now_ms();
     _assemble_linear_system();
+    corex_profile::log_phase("linear",
+                             "assemble_linear_system",
+                             -1,
+                             -1,
+                             -1,
+                             corex_profile::now_ms() - profile_t0);
     trace("assemble_linear_system: end");
 
     // Default CoreX path now prefers device conversion to avoid host fallback.
@@ -253,10 +268,24 @@ void GlobalLinearSystem::Impl::build_linear_system()
     if(!force_host_ge2sym)
     {
         trace("converter.ge2sym: begin");
+        profile_t0 = corex_profile::now_ms();
         converter.ge2sym(triplet_A);
+        corex_profile::log_phase("linear",
+                                 "converter_ge2sym",
+                                 -1,
+                                 -1,
+                                 -1,
+                                 corex_profile::now_ms() - profile_t0);
         trace("converter.ge2sym: end");
         trace("converter.convert: begin");
+        profile_t0 = corex_profile::now_ms();
         converter.convert(triplet_A, bcoo_A);
+        corex_profile::log_phase("linear",
+                                 "converter_convert",
+                                 -1,
+                                 -1,
+                                 -1,
+                                 corex_profile::now_ms() - profile_t0);
         trace("converter.convert: end");
     }
     else
@@ -350,20 +379,41 @@ void GlobalLinearSystem::Impl::build_linear_system()
     if(corex_trace)
         logger::info("[corex_trace][precond_asm] pre-precond sync begin");
     trace("pre-precond sync: begin");
+    profile_t0 = corex_profile::now_ms();
     checkCudaErrors(cudaDeviceSynchronize());
+    corex_profile::log_phase("linear",
+                             "pre_preconditioner_sync",
+                             -1,
+                             -1,
+                             -1,
+                             corex_profile::now_ms() - profile_t0);
     trace("pre-precond sync: end");
     if(corex_trace)
         logger::info("[corex_trace][precond_asm] pre-precond sync end");
     if(corex_trace)
         logger::info("[corex_trace][precond_asm] _assemble_preconditioner call begin");
+    profile_t0 = corex_profile::now_ms();
     _assemble_preconditioner();
+    corex_profile::log_phase("linear",
+                             "assemble_preconditioner",
+                             -1,
+                             -1,
+                             -1,
+                             corex_profile::now_ms() - profile_t0);
     if(corex_trace)
         logger::info("[corex_trace][precond_asm] _assemble_preconditioner call end");
     trace("assemble_preconditioner: end");
 
     if(corex_trace)
         logger::info("[corex_trace][precond_asm] post-precond sync begin");
+    profile_t0 = corex_profile::now_ms();
     checkCudaErrors(cudaDeviceSynchronize());
+    corex_profile::log_phase("linear",
+                             "post_preconditioner_sync",
+                             -1,
+                             -1,
+                             -1,
+                             corex_profile::now_ms() - profile_t0);
     if(corex_trace)
         logger::info("[corex_trace][precond_asm] post-precond sync end");
 
@@ -606,7 +656,15 @@ void GlobalLinearSystem::Impl::solve_linear_system()
     const bool corex_trace = std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
     if(corex_trace)
         logger::info("[corex_trace] solve_linear_system: pre-sync");
-    checkCudaErrors(cudaDeviceSynchronize());
+    auto profile_t0 = corex_profile::now_ms();
+    if(std::getenv("UIPC_COREX_SKIP_PRE_PCG_SYNC") == nullptr)
+        checkCudaErrors(cudaDeviceSynchronize());
+    corex_profile::log_phase("linear",
+                             "pre_pcg_sync",
+                             -1,
+                             -1,
+                             -1,
+                             corex_profile::now_ms() - profile_t0);
     if(corex_trace)
         logger::info("[corex_trace] solve_linear_system: post-sync, calling PCG");
     if(iterative_solver)
