@@ -494,7 +494,10 @@ namespace
 bool corex_contact_allpe_off()
 {
     const char* mode = std::getenv("UIPC_COREX_CONTACT_ALLPE_MODE");
-    return mode && std::string{mode} == "off";
+    if(!mode || mode[0] == '\0')
+        return true;
+    std::string mode_str{mode};
+    return mode_str == "off";
 }
 
 bool corex_contact_allpe_fallback_only()

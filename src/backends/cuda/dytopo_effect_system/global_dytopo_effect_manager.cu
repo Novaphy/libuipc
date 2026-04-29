@@ -467,7 +467,7 @@ inline bool corex_matconv_async_enabled()
 
 inline bool corex_matconv_linear_reduce_enabled()
 {
-    return std::getenv("UIPC_COREX_MATCONV_LINEAR_REDUCE") != nullptr;
+    return std::getenv("UIPC_COREX_MATCONV_SCAN_REDUCE") == nullptr;
 }
 
 inline void corex_matconv_sync_if_needed(const char* name)
