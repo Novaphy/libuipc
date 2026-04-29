@@ -240,6 +240,15 @@ int main(int argc, char** argv)
     config["linear_system"]["solver"]        = "linear_pcg";
     config["linear_system"]["tol_rate"]      = 1e-3;
     config["linear_system"]["check_interval"] = 1;
+    if(const char* solver = std::getenv("UIPC_COREX_LINEAR_SOLVER");
+       solver && solver[0] != '\0')
+    {
+        config["linear_system"]["solver"] = std::string{solver};
+        fmt::println(stderr, "[corex_demo] override linear_system/solver = {}", solver);
+        std::fflush(stderr);
+    }
+    if(auto interval = env_int("UIPC_COREX_LINEAR_CHECK_INTERVAL"))
+        config["linear_system"]["check_interval"] = *interval;
     config["sanity_check"]["enable"]       = 1;
     // Dump linear system to check whether the solver is producing updates.
     config["extras"]["debug"]["dump_linear_system"] = 0;
@@ -596,17 +605,19 @@ int main(int argc, char** argv)
             // --- Domino chain test (tuned for full chain propagation) ---
             std::string tetmesh_dir{AssetDir::tetmesh_path()};
 
-            // Tuned defaults so the chain fully propagates; all overridable via env.
+            // Tuned defaults so D1 topples under gravity onto D2; all overridable via env.
             Float domino_mu    = Float(0.25);
             Float domino_kappa = 40.0_GPa;
             Float spacing      = Float(0.55);
-            Float tilt_deg     = Float(0);
+            // A 15 degree lean puts D1's center of mass past its front-bottom edge,
+            // so gravity tips it forward instead of relying on a horizontal kick.
+            Float tilt_deg     = Float(15);
             Float abd_mpa      = Float(1000.0);
-            Float d1_vx        = Float(3.0);  // initial +X translational velocity on D1 (m/s)
+            Float d1_vx        = Float(0.0);  // optional +X translational velocity on D1 (m/s)
             // Ground-vs-domino friction, independent of domino-domino friction.
             // Defaults to domino_mu (isotropic). Set UIPC_GROUND_MU to raise it so
             // a struck domino's base sticks and is forced to rotate instead of slide.
-            Float ground_mu    = Float(-1);  // sentinel: "use domino_mu"
+            Float ground_mu    = Float(0.8);
             // Optional density override. 1e3 kg/m^3 gives m=80kg per domino; try
             // 100 to verify rotational DoF response (10x lower inertia -> bigger
             // dq_r per Newton step).
@@ -689,9 +700,7 @@ int main(int argc, char** argv)
                 Transform t = Transform::Identity();
                 if(di == 0 && tilt_deg > Float(0))
                 {
-                    // Optional: tilt D1 about its FRONT-BOTTOM edge so gravity can tip it forward.
-                    // (Kept here so tilt_deg>0 is still honored; for the velocity-driven mode we
-                    //  keep D1 upright and rely on the initial linear velocity to strike D2.)
+                    // Tilt D1 about its front-bottom edge so gravity tips it forward.
                     const Float   half_w   = domino_scale.x() * Float(0.5);
                     const Vector3 pivot_local{half_w, -half_h, Float(0)};
                     const Vector3 world_pivot{x + half_w, gap, Float(0)};
@@ -914,7 +923,8 @@ int main(int argc, char** argv)
         sio.write_surface(fmt::format("{}scene_surface_{:04d}.obj", output, i));
         auto t4 = std::chrono::steady_clock::now();
 
-        if(i <= 3 || i == frames - 1)
+        const bool profile_all_frames = std::getenv("UIPC_COREX_PHASE_PROFILE") != nullptr;
+        if(profile_all_frames || i <= 3 || i == frames - 1)
         {
             auto ms = [](auto a, auto b)
             {
