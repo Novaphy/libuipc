@@ -465,11 +465,6 @@ inline bool corex_matconv_async_enabled()
     return std::getenv("UIPC_COREX_MATCONV_ASYNC") != nullptr;
 }
 
-inline bool corex_matconv_linear_reduce_enabled()
-{
-    return std::getenv("UIPC_COREX_MATCONV_SCAN_REDUCE") == nullptr;
-}
-
 inline void corex_matconv_sync_if_needed(const char* name)
 {
     if(corex_matconv_async_enabled() && !corex_matconv_trace())
@@ -682,30 +677,6 @@ __device__ __forceinline__ void corex_atomic_add_double(double* address, double 
     } while(assumed != old_val);
 }
 
-static __global__ void kernel_segmental_reduce_3x3(int N, const int* segment_ids,
-                                                    const BlockT3* in_blocks,
-                                                    BlockT3* out_blocks,
-                                                    int out_count)
-{
-    int seg = blockIdx.x * blockDim.x + threadIdx.x;
-    if(seg >= out_count) return;
-
-    Float accum[9] = {};
-    for(int i = 0; i < N; ++i)
-    {
-        if(segment_ids[i] != seg)
-            continue;
-
-        const Float* src = reinterpret_cast<const Float*>(in_blocks + i);
-        for(int j = 0; j < 9; ++j)
-            accum[j] += src[j];
-    }
-
-    Float* dst = reinterpret_cast<Float*>(out_blocks + seg);
-    for(int j = 0; j < 9; ++j)
-        dst[j] = accum[j];
-}
-
 static __global__ void kernel_segmental_reduce_3x3_linear(int N,
                                                           const int* segment_ids,
                                                           const BlockT3* in_blocks,
@@ -749,19 +720,9 @@ void launch_segmental_reduce_3x3(int N, const int* segment_ids,
     }
     if(out_count > 0)
     {
-        MatconvPhase phase(corex_matconv_linear_reduce_enabled()
-                               ? "segmental_reduce_3x3_linear"
-                               : "segmental_reduce_3x3_scan");
-        if(corex_matconv_linear_reduce_enabled())
-        {
-            kernel_segmental_reduce_3x3_linear<<<grid_for(N), kBlock>>>(
-                N, segment_ids, in_blocks, out_blocks, out_count);
-        }
-        else
-        {
-            kernel_segmental_reduce_3x3<<<grid_for(out_count), kBlock>>>(
-                N, segment_ids, in_blocks, out_blocks, out_count);
-        }
+        MatconvPhase phase("segmental_reduce_3x3_linear");
+        kernel_segmental_reduce_3x3_linear<<<grid_for(N), kBlock>>>(
+            N, segment_ids, in_blocks, out_blocks, out_count);
         cudaError_t e = cudaGetLastError();
         if(corex_matconv_trace())
         {
@@ -775,30 +736,6 @@ void launch_segmental_reduce_3x3(int N, const int* segment_ids,
             std::fflush(stderr);
         }
     }
-}
-
-static __global__ void kernel_segmental_reduce_3x1(int N, const int* segment_ids,
-                                                    const VecT3* in_vecs,
-                                                    VecT3* out_vecs,
-                                                    int out_count)
-{
-    int seg = blockIdx.x * blockDim.x + threadIdx.x;
-    if(seg >= out_count) return;
-
-    Float accum[3] = {};
-    for(int i = 0; i < N; ++i)
-    {
-        if(segment_ids[i] != seg)
-            continue;
-
-        const Float* src = reinterpret_cast<const Float*>(in_vecs + i);
-        for(int j = 0; j < 3; ++j)
-            accum[j] += src[j];
-    }
-
-    Float* dst = reinterpret_cast<Float*>(out_vecs + seg);
-    for(int j = 0; j < 3; ++j)
-        dst[j] = accum[j];
 }
 
 static __global__ void kernel_segmental_reduce_3x1_linear(int N,
@@ -844,19 +781,9 @@ void launch_segmental_reduce_3x1(int N, const int* segment_ids,
     }
     if(out_count > 0)
     {
-        MatconvPhase phase(corex_matconv_linear_reduce_enabled()
-                               ? "segmental_reduce_3x1_linear"
-                               : "segmental_reduce_3x1_scan");
-        if(corex_matconv_linear_reduce_enabled())
-        {
-            kernel_segmental_reduce_3x1_linear<<<grid_for(N), kBlock>>>(
-                N, segment_ids, in_vecs, out_vecs, out_count);
-        }
-        else
-        {
-            kernel_segmental_reduce_3x1<<<grid_for(out_count), kBlock>>>(
-                N, segment_ids, in_vecs, out_vecs, out_count);
-        }
+        MatconvPhase phase("segmental_reduce_3x1_linear");
+        kernel_segmental_reduce_3x1_linear<<<grid_for(N), kBlock>>>(
+            N, segment_ids, in_vecs, out_vecs, out_count);
         cudaError_t e = cudaGetLastError();
         if(corex_matconv_trace())
         {

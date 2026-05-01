@@ -240,15 +240,6 @@ int main(int argc, char** argv)
     config["linear_system"]["solver"]        = "linear_pcg";
     config["linear_system"]["tol_rate"]      = 1e-3;
     config["linear_system"]["check_interval"] = 1;
-    if(const char* solver = std::getenv("UIPC_COREX_LINEAR_SOLVER");
-       solver && solver[0] != '\0')
-    {
-        config["linear_system"]["solver"] = std::string{solver};
-        fmt::println(stderr, "[corex_demo] override linear_system/solver = {}", solver);
-        std::fflush(stderr);
-    }
-    if(auto interval = env_int("UIPC_COREX_LINEAR_CHECK_INTERVAL"))
-        config["linear_system"]["check_interval"] = *interval;
     config["sanity_check"]["enable"]       = 1;
     // Dump linear system to check whether the solver is producing updates.
     config["extras"]["debug"]["dump_linear_system"] = 0;

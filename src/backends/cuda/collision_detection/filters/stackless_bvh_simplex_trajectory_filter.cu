@@ -448,65 +448,10 @@ static __global__ void kernel_filter_active_EE(
     }
 }
 
-static __global__ void kernel_invalidate_vector3i(int N, Vector3i* data)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if(i >= N) return;
-    data[i].setConstant(-1);
-}
-
-static __global__ void kernel_count_valid_vector3i(int N, const Vector3i* data, IndexT* out_count)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if(i >= N) return;
-    if(data[i](0) != -1)
-        atomicAdd(out_count, static_cast<IndexT>(1));
-}
-
-static __global__ void kernel_mark_point_from_pe(int N, const Vector3i* data, IndexT* point_flags)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if(i >= N) return;
-    auto pe = data[i];
-    if(pe(0) == -1)
-        return;
-    point_flags[pe(0)] = 1;
-}
-
-static __global__ void kernel_invalidate_pe_if_point_marked(
-    int N, Vector3i* data, const IndexT* point_flags)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if(i >= N) return;
-    auto pe = data[i];
-    if(pe(0) == -1)
-        return;
-    if(point_flags[pe(0)] != 0)
-        data[i].setConstant(-1);
-}
-
 }  // namespace uipc::backend::cuda::corex_filter
 
 namespace uipc::backend::cuda
 {
-namespace
-{
-bool corex_contact_allpe_off()
-{
-    const char* mode = std::getenv("UIPC_COREX_CONTACT_ALLPE_MODE");
-    if(!mode || mode[0] == '\0')
-        return true;
-    std::string mode_str{mode};
-    return mode_str == "off";
-}
-
-bool corex_contact_allpe_fallback_only()
-{
-    const char* mode = std::getenv("UIPC_COREX_CONTACT_ALLPE_MODE");
-    return mode && std::string{mode} == "fallback_only";
-}
-}  // namespace
-
 constexpr bool PrintDebugInfo = false;
 constexpr bool PrintKernelZeroDistance = false;
 
@@ -550,8 +495,7 @@ muda::CBufferView<Vector2i> StacklessBVHSimplexTrajectoryFilter::candidate_EEs()
 muda::CBufferView<Float> StacklessBVHSimplexTrajectoryFilter::toi_PTs() const noexcept
 {
     auto pp_size = m_impl.candidate_AllP_CodimP_pairs.size();
-    auto pe_size = m_impl.candidate_CodimP_AllE_pairs.size()
-                 + m_impl.candidate_AllP_AllE_pairs.size();
+    auto pe_size = m_impl.candidate_CodimP_AllE_pairs.size();
     auto pt_size = m_impl.candidate_AllP_AllT_pairs.size();
     return m_impl.tois.view(pp_size + pe_size, pt_size);
 }
@@ -559,8 +503,7 @@ muda::CBufferView<Float> StacklessBVHSimplexTrajectoryFilter::toi_PTs() const no
 muda::CBufferView<Float> StacklessBVHSimplexTrajectoryFilter::toi_EEs() const noexcept
 {
     auto pp_size = m_impl.candidate_AllP_CodimP_pairs.size();
-    auto pe_size = m_impl.candidate_CodimP_AllE_pairs.size()
-                 + m_impl.candidate_AllP_AllE_pairs.size();
+    auto pe_size = m_impl.candidate_CodimP_AllE_pairs.size();
     auto pt_size = m_impl.candidate_AllP_AllT_pairs.size();
     auto ee_size = m_impl.candidate_AllE_AllE_pairs.size();
     return m_impl.tois.view(pp_size + pe_size + pt_size, ee_size);
@@ -1019,95 +962,6 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
         }
     }
 
-    // Use AllP to query AllE (independent PE channel to avoid relying only on PT/EE degeneration)
-    bool allpe_detect_dim3_only = true;
-    if(const char* env = std::getenv("UIPC_COREX_ALLPE_DETECT_DIM3_ONLY"))
-    {
-        // Exact "0" disables narrow-phase tightening (broadphase-only, legacy behavior).
-        allpe_detect_dim3_only = !(env[0] == '0' && env[1] == '\0');
-    }
-    if(!corex_contact_allpe_off() && Vs.size() > 0 && Es.size() > 0)
-    {
-        corex_profile::ScopedPhase phase("contact_detect_detail", "query_allp_alle");
-        muda::KernelLabel label{__FUNCTION__, __FILE__, __LINE__};
-        lbvh_E.query(
-            point_aabbs,
-            [Vs          = Vs.viewer().name("Vs"),
-             Es          = Es.viewer().name("Es"),
-             Ps          = Ps.viewer().name("Ps"),
-             dxs         = dxs.viewer().name("dxs"),
-             thicknesses = info.thicknesses().viewer().name("thicknesses"),
-             contact_element_ids = info.contact_element_ids().viewer().name("contact_element_ids"),
-             contact_mask_tabular = info.contact_mask_tabular().viewer().name("contact_mask_tabular"),
-             subscene_element_ids = info.subscene_element_ids().viewer().name("subscene_element_ids"),
-             subscene_mask_tabular = info.subscene_mask_tabular().viewer().name("subscene_mask_tabular"),
-             v2b = info.v2b().viewer().name("v2b"),
-             body_self_collision = info.body_self_collision().viewer().name("body_self_collision"),
-             d_hats = info.d_hats().viewer().name("d_hats"),
-             alpha  = alpha,
-             allpe_detect_dim3_only = allpe_detect_dim3_only] __device__(IndexT i, IndexT j)
-            {
-                const auto& V = Vs(i);
-                const auto& E = Es(j);
-
-                Vector3i cids = {contact_element_ids(V),
-                                 contact_element_ids(E[0]),
-                                 contact_element_ids(E[1])};
-
-                Vector3i scids = {subscene_element_ids(V),
-                                  subscene_element_ids(E[0]),
-                                  subscene_element_ids(E[1])};
-
-                if(!allow_PE_contact(subscene_mask_tabular, scids))
-                    return false;
-                if(!allow_PE_contact(contact_mask_tabular, cids))
-                    return false;
-
-                if(E[0] == V || E[1] == V)
-                    return false;
-
-                auto body_i = v2b(V);
-                auto body_j = v2b(E[0]);
-                if(body_i == body_j && !body_self_collision(body_i))
-                    return false;
-
-                Vector3 E0  = Ps(E[0]);
-                Vector3 E1  = Ps(E[1]);
-                Vector3 dE0 = alpha * dxs(E[0]);
-                Vector3 dE1 = alpha * dxs(E[1]);
-
-                Vector3 P  = Ps(V);
-                Vector3 dP = alpha * dxs(V);
-
-                Float thickness = PE_thickness(thicknesses(V),
-                                               thicknesses(E[0]),
-                                               thicknesses(E[1]));
-                Float d_hat = PE_d_hat(d_hats(V), d_hats(E[0]), d_hats(E[1]));
-
-                Float expand = d_hat + thickness;
-
-                if(!distance::point_edge_ccd_broadphase(P, E0, E1, dP, dE0, dE1, expand))
-                    return false;
-
-                if(!allpe_detect_dim3_only)
-                    return true;
-
-                Vector3 Ps_arr[] = {P, E0, E1};
-                Vector3i flag =
-                    distance::point_edge_distance_flag(Ps_arr[0], Ps_arr[1], Ps_arr[2]);
-                Vector2 range = D_range(thickness, d_hat);
-                Float D;
-                distance::point_edge_distance2(
-                    flag, Ps_arr[0], Ps_arr[1], Ps_arr[2], D);
-                if(!is_active_D(range, D))
-                    return false;
-                Vector3i offsets;
-                auto dim = distance::degenerate_point_edge(flag, offsets);
-                return dim == 3;
-            },
-            candidate_AllP_AllE_pairs);
-    }
-
     // Use AllE to query AllE
     if(Es.size() > 0)
     {
@@ -1266,11 +1120,10 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
     }
 
     if(trace_simplex_filter)
-        spdlog::info("[corex_trace][detect] alpha={} PP_cands={} CodimPE_cands={} AllPE_cands={} PT_cands={} EE_cands={}",
+        spdlog::info("[corex_trace][detect] alpha={} PP_cands={} CodimPE_cands={} PT_cands={} EE_cands={}",
                      alpha,
                      (int)candidate_AllP_CodimP_pairs.size(),
                      (int)candidate_CodimP_AllE_pairs.size(),
-                     (int)candidate_AllP_AllE_pairs.size(),
                      (int)candidate_AllP_AllT_pairs.size(),
                      (int)candidate_AllE_AllE_pairs.size());
 }
@@ -1288,25 +1141,18 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
         if(end != env && v >= 0.0 && v <= 0.5)
             pt_pe_hyst_scale = static_cast<Float>(v);
     }
-    bool suppress_degenerate_pe_when_allpe = false;
-    if(const char* env = std::getenv("UIPC_COREX_ALLPE_SUPPRESS_DEGENERATE_PE"))
-    {
-        suppress_degenerate_pe_when_allpe = (env[0] != '0');
-    }
-
     // we will filter-out the active pairs
     auto positions = info.positions();
 
     SizeT N_PCoimP  = candidate_AllP_CodimP_pairs.size();
     SizeT N_CodimPE = candidate_CodimP_AllE_pairs.size();
-    SizeT N_AllPE   = candidate_AllP_AllE_pairs.size();
     SizeT N_PTs     = candidate_AllP_AllT_pairs.size();
     SizeT N_EEs     = candidate_AllE_AllE_pairs.size();
 
     // PT, EE, PT, PP can degenerate to PP
-    temp_PPs.resize(N_PCoimP + N_CodimPE + N_AllPE + N_PTs + N_EEs);
+    temp_PPs.resize(N_PCoimP + N_CodimPE + N_PTs + N_EEs);
     // PT, EE, PT can degenerate to PE
-    temp_PEs.resize(N_CodimPE + N_AllPE + N_PTs + N_EEs);
+    temp_PEs.resize(N_CodimPE + N_PTs + N_EEs);
 
     temp_PTs.resize(N_PTs);
     temp_EEs.resize(N_EEs);
@@ -1362,33 +1208,6 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
 
         temp_PP_offset += N_CodimPE;
         temp_PE_offset += N_CodimPE;
-    }
-
-    // AllP and AllE (independent PE channel)
-    if(N_AllPE > 0)
-    {
-        corex_profile::ScopedPhase phase("contact_filter_detail", "filter_allpe");
-        auto PP_view = temp_PPs.view(temp_PP_offset, N_AllPE);
-        auto PE_view = temp_PEs.view(temp_PE_offset, N_AllPE);
-
-        {
-            int n = (int)candidate_AllP_AllE_pairs.size();
-            int block = 256, grid = (n + block - 1) / block;
-            corex_filter::kernel_filter_active_CodimPE<<<grid, block>>>(
-                n,
-                (const Vector2i*)candidate_AllP_AllE_pairs.view().data(),
-                (const IndexT*)info.surf_vertices().data(),
-                (const Vector2i*)info.surf_edges().data(),
-                (const Vector3*)positions.data(),
-                (const Float*)info.thicknesses().data(),
-                (const Float*)info.d_hats().data(),
-                PP_view.data(),
-                PE_view.data());
-            cudaDeviceSynchronize();
-        }
-
-        temp_PP_offset += N_AllPE;
-        temp_PE_offset += N_AllPE;
     }
 
     // AllP and AllT
@@ -1449,133 +1268,6 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
 
         temp_PP_offset += N_EEs;
         temp_PE_offset += N_EEs;
-    }
-
-    if(suppress_degenerate_pe_when_allpe && N_AllPE > 0)
-    {
-        // temp_PEs layout: [CodimPE][AllPE][PT][EE]
-        SizeT pt_pe_offset = N_CodimPE + N_AllPE;
-        SizeT ee_pe_offset = pt_pe_offset + N_PTs;
-        if(N_PTs > 0)
-        {
-            int n = static_cast<int>(N_PTs);
-            int block = 256, grid = (n + block - 1) / block;
-            corex_filter::kernel_invalidate_vector3i<<<grid, block>>>(
-                n, temp_PEs.view(pt_pe_offset, N_PTs).data());
-        }
-        if(N_EEs > 0)
-        {
-            int n = static_cast<int>(N_EEs);
-            int block = 256, grid = (n + block - 1) / block;
-            corex_filter::kernel_invalidate_vector3i<<<grid, block>>>(
-                n, temp_PEs.view(ee_pe_offset, N_EEs).data());
-        }
-        cudaDeviceSynchronize();
-    }
-
-    // If other PE sources are already active, suppress AllP-AllE PE block to avoid
-    // over-constraining the same contact region via multiple generation paths.
-    bool allpe_fallback_only = false;
-    bool allpe_pointwise_dedup = false;
-    bool allpe_fill_missing_only = false;
-    if(corex_contact_allpe_fallback_only())
-        allpe_fallback_only = true;
-    if(const char* env = std::getenv("UIPC_COREX_ALLPE_FALLBACK_ONLY"))
-        allpe_fallback_only = (env[0] != '0');
-    if(const char* env = std::getenv("UIPC_COREX_ALLPE_POINTWISE_DEDUP"))
-        allpe_pointwise_dedup = (env[0] != '0');
-    if(const char* env = std::getenv("UIPC_COREX_ALLPE_FILL_MISSING_ONLY"))
-        allpe_fill_missing_only = (env[0] != '0');
-    if(allpe_fallback_only && N_AllPE > 0)
-    {
-        muda::DeviceVar<IndexT> pe_other_valid_count;
-        cudaMemset(pe_other_valid_count.data(), 0, sizeof(IndexT));
-        const int block = 256;
-        if(N_CodimPE > 0)
-        {
-            int grid = (static_cast<int>(N_CodimPE) + block - 1) / block;
-            corex_filter::kernel_count_valid_vector3i<<<grid, block>>>(
-                static_cast<int>(N_CodimPE),
-                temp_PEs.view(0, N_CodimPE).data(),
-                pe_other_valid_count.data());
-        }
-        if((N_PTs + N_EEs) > 0)
-        {
-            SizeT tail_offset = N_CodimPE + N_AllPE;
-            SizeT tail_size   = N_PTs + N_EEs;
-            int grid = (static_cast<int>(tail_size) + block - 1) / block;
-            corex_filter::kernel_count_valid_vector3i<<<grid, block>>>(
-                static_cast<int>(tail_size),
-                temp_PEs.view(tail_offset, tail_size).data(),
-                pe_other_valid_count.data());
-        }
-        cudaDeviceSynchronize();
-        IndexT other_valid = pe_other_valid_count;
-        if(other_valid > 0)
-        {
-            int grid = (static_cast<int>(N_AllPE) + block - 1) / block;
-            corex_filter::kernel_invalidate_vector3i<<<grid, block>>>(
-                static_cast<int>(N_AllPE),
-                temp_PEs.view(N_CodimPE, N_AllPE).data());
-            cudaDeviceSynchronize();
-        }
-    }
-
-    if(allpe_pointwise_dedup && N_AllPE > 0 && (N_PTs + N_EEs) > 0)
-    {
-        allpe_point_flags.resize(positions.size());
-        cudaMemset(allpe_point_flags.data(), 0, sizeof(IndexT) * positions.size());
-        const int block = 256;
-        {
-            int grid = (static_cast<int>(N_AllPE) + block - 1) / block;
-            corex_filter::kernel_mark_point_from_pe<<<grid, block>>>(
-                static_cast<int>(N_AllPE),
-                temp_PEs.view(N_CodimPE, N_AllPE).data(),
-                allpe_point_flags.data());
-        }
-        {
-            SizeT tail_offset = N_CodimPE + N_AllPE;
-            SizeT tail_size   = N_PTs + N_EEs;
-            int grid = (static_cast<int>(tail_size) + block - 1) / block;
-            corex_filter::kernel_invalidate_pe_if_point_marked<<<grid, block>>>(
-                static_cast<int>(tail_size),
-                temp_PEs.view(tail_offset, tail_size).data(),
-                allpe_point_flags.data());
-        }
-        cudaDeviceSynchronize();
-    }
-
-    if(allpe_fill_missing_only && N_AllPE > 0)
-    {
-        allpe_point_flags.resize(positions.size());
-        cudaMemset(allpe_point_flags.data(), 0, sizeof(IndexT) * positions.size());
-        const int block = 256;
-        if(N_CodimPE > 0)
-        {
-            int grid = (static_cast<int>(N_CodimPE) + block - 1) / block;
-            corex_filter::kernel_mark_point_from_pe<<<grid, block>>>(
-                static_cast<int>(N_CodimPE),
-                temp_PEs.view(0, N_CodimPE).data(),
-                allpe_point_flags.data());
-        }
-        if((N_PTs + N_EEs) > 0)
-        {
-            SizeT tail_offset = N_CodimPE + N_AllPE;
-            SizeT tail_size   = N_PTs + N_EEs;
-            int grid = (static_cast<int>(tail_size) + block - 1) / block;
-            corex_filter::kernel_mark_point_from_pe<<<grid, block>>>(
-                static_cast<int>(tail_size),
-                temp_PEs.view(tail_offset, tail_size).data(),
-                allpe_point_flags.data());
-        }
-        {
-            int grid = (static_cast<int>(N_AllPE) + block - 1) / block;
-            corex_filter::kernel_invalidate_pe_if_point_marked<<<grid, block>>>(
-                static_cast<int>(N_AllPE),
-                temp_PEs.view(N_CodimPE, N_AllPE).data(),
-                allpe_point_flags.data());
-        }
-        cudaDeviceSynchronize();
     }
 
     UIPC_ASSERT(temp_PP_offset == temp_PPs.size(), "size mismatch");
@@ -2138,10 +1830,8 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_toi(FilterTOIInfo& info)
 {
     using namespace muda;
 
-    auto toi_size =
-        candidate_AllP_CodimP_pairs.size() + candidate_CodimP_AllE_pairs.size()
-        + candidate_AllP_AllE_pairs.size()
-        + candidate_AllP_AllT_pairs.size() + candidate_AllE_AllE_pairs.size();
+    auto toi_size = candidate_AllP_CodimP_pairs.size() + candidate_CodimP_AllE_pairs.size()
+                    + candidate_AllP_AllT_pairs.size() + candidate_AllE_AllE_pairs.size();
 
     tois.resize(toi_size);
 
@@ -2150,8 +1840,6 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_toi(FilterTOIInfo& info)
     offset += candidate_AllP_CodimP_pairs.size();
     auto PE_codim_tois = tois.view(offset, candidate_CodimP_AllE_pairs.size());
     offset += candidate_CodimP_AllE_pairs.size();
-    auto PE_allp_tois = tois.view(offset, candidate_AllP_AllE_pairs.size());
-    offset += candidate_AllP_AllE_pairs.size();
     auto PT_tois = tois.view(offset, candidate_AllP_AllT_pairs.size());
     offset += candidate_AllP_AllT_pairs.size();
     auto EE_tois = tois.view(offset, candidate_AllE_AllE_pairs.size());
@@ -2215,27 +1903,6 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_toi(FilterTOIInfo& info)
         }
         toi_seg += static_cast<SizeT>(n_pe_codim);
 
-        const int n_pe_allp = static_cast<int>(candidate_AllP_AllE_pairs.size());
-        if(n_pe_allp > 0)
-        {
-            const int grid = (n_pe_allp + block_dim - 1) / block_dim;
-            corex_filter::kernel_filter_toi_PE<<<grid, block_dim>>>(
-                n_pe_allp,
-                candidate_AllP_AllE_pairs.view().data(),
-                info.surf_vertices().data(),
-                info.surf_edges().data(),
-                info.thicknesses().data(),
-                info.positions().data(),
-                info.displacements().data(),
-                info.d_hats().data(),
-                info.alpha(),
-                eta,
-                max_iter,
-                large_enough_toi,
-                d_tois + toi_seg);
-        }
-        toi_seg += static_cast<SizeT>(n_pe_allp);
-
         const int n_pt = static_cast<int>(candidate_AllP_AllT_pairs.size());
         if(n_pt > 0)
         {
@@ -2276,7 +1943,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_toi(FilterTOIInfo& info)
                 d_tois + toi_seg);
         }
 
-        UIPC_ASSERT(static_cast<SizeT>(n_pp + n_pe_codim + n_pe_allp + n_pt + n_ee)
+        UIPC_ASSERT(static_cast<SizeT>(n_pp + n_pe_codim + n_pt + n_ee)
                         == static_cast<SizeT>(toi_size),
                     "filter_toi segment size mismatch");
 
