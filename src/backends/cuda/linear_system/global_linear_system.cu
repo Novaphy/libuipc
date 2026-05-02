@@ -517,10 +517,14 @@ void GlobalLinearSystem::Impl::_assemble_linear_system()
         if(corex_trace)
             logger::info("[corex_trace][linear] {}", msg);
     };
+    double profile_clear_ms = 0.0;
+    double profile_diag_ms = 0.0;
+    double profile_offdiag_ms = 0.0;
     auto HA = triplet_A.view();
 
     // Clear and invalidate previous values
     // BufferView::fill() uses ParallelFor device lambda which silently fails on CoreX
+    auto profile_t0 = corex_profile::now_ms();
     checkCudaErrors(cudaMemset(triplet_A.values().data(),
                                0,
                                sizeof(Matrix3x3) * triplet_A.triplet_count()));
@@ -532,6 +536,7 @@ void GlobalLinearSystem::Impl::_assemble_linear_system()
                                sizeof(int) * triplet_A.triplet_count()));
     auto B = b.view();
     checkCudaErrors(cudaMemset(B.buffer_view().data(), 0, sizeof(Float) * b.size()));
+    profile_clear_ms += corex_profile::now_ms() - profile_t0;
 
     auto diag_subsystem_view     = diag_subsystems.view();
     auto off_diag_subsystem_view = off_diag_subsystems.view();
@@ -569,7 +574,9 @@ void GlobalLinearSystem::Impl::_assemble_linear_system()
                 logger::info("[corex_trace][linear] diag assemble begin: index={}, local={}",
                              triplet_i,
                              dof_i);
+            profile_t0 = corex_profile::now_ms();
             diag_subsystem->assemble(info);
+            profile_diag_ms += corex_profile::now_ms() - profile_t0;
             if(corex_trace)
                 logger::info("[corex_trace][linear] diag assemble end: index={}, local={}",
                              triplet_i,
@@ -614,13 +621,19 @@ void GlobalLinearSystem::Impl::_assemble_linear_system()
                 logger::info("[corex_trace][linear] offdiag assemble begin: index={}, local={}",
                              triplet_i,
                              local_index);
+            profile_t0 = corex_profile::now_ms();
             off_diag_subsystem->assemble(info);
+            profile_offdiag_ms += corex_profile::now_ms() - profile_t0;
             if(corex_trace)
                 logger::info("[corex_trace][linear] offdiag assemble end: index={}, local={}",
                              triplet_i,
                              local_index);
         }
     }
+    corex_profile::log_phase("linear", "assemble_clear", -1, -1, -1, profile_clear_ms);
+    corex_profile::log_phase("linear", "assemble_diag_subsystems", -1, -1, -1, profile_diag_ms);
+    corex_profile::log_phase(
+        "linear", "assemble_offdiag_subsystems", -1, -1, -1, profile_offdiag_ms);
     trace("_assemble_linear_system: done");
 }
 
