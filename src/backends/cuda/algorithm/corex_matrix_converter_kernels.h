@@ -38,11 +38,25 @@ void launch_segmental_reduce_3x3(int N, const int* segment_ids,
                                   const BlockT3* in_blocks, BlockT3* out_blocks,
                                   int out_count);
 
+void launch_segmental_reduce_3x3_blocked(int N, const int* segment_ids,
+                                         const int* unique_counts,
+                                         const int* offsets,
+                                         const BlockT3* in_blocks,
+                                         BlockT3* out_blocks,
+                                         int out_count);
+
 using VecT3 = Eigen::Matrix<Float, 3, 1>;
 
 void launch_segmental_reduce_3x1(int N, const int* segment_ids,
                                   const VecT3* in_vecs, VecT3* out_vecs,
                                   int out_count);
+
+void launch_segmental_reduce_3x1_blocked(int N, const int* segment_ids,
+                                         const int* unique_counts,
+                                         const int* offsets,
+                                         const VecT3* in_vecs,
+                                         VecT3* out_vecs,
+                                         int out_count);
 
 }  // namespace uipc::backend::cuda::corex_matconv
 

@@ -43,6 +43,18 @@ bool corex_contact_spd_diag_enabled()
     return env[0] != '\0' && env[0] != '0';
 }
 
+bool corex_contact_input_diag_enabled()
+{
+    const char* env = std::getenv("UIPC_COREX_CONTACT_INPUT_DIAG");
+    return env && env[0] != '\0' && env[0] != '0';
+}
+
+bool corex_pe_outlier_diag_enabled()
+{
+    const char* env = std::getenv("UIPC_COREX_PE_OUTLIER_DIAG");
+    return env && env[0] != '\0' && env[0] != '0';
+}
+
 Float corex_pe_diag_reg()
 {
     const char* env = std::getenv("UIPC_COREX_PE_DIAG_REG");
@@ -67,8 +79,35 @@ Float corex_pe_kappa_scale()
     return static_cast<Float>(v);
 }
 
+Float corex_env_float(const char* name, Float fallback)
+{
+    const char* env = std::getenv(name);
+    if(!env || env[0] == '\0')
+        return fallback;
+    char*  end = nullptr;
+    double v   = std::strtod(env, &end);
+    if(end == env)
+        return fallback;
+    return static_cast<Float>(v);
+}
+
+bool corex_contact_spd_condition_enabled()
+{
+    const char* env = std::getenv("UIPC_COREX_CONTACT_SPD_CONDITION");
+    return env && env[0] != '\0' && env[0] != '0';
+}
+
+bool corex_contact_spd_condition_pt_enabled()
+{
+    const char* env = std::getenv("UIPC_COREX_CONTACT_SPD_CONDITION_PT");
+    return env && env[0] != '\0' && env[0] != '0';
+}
+
 struct CorexContactSpdStats
 {
+    unsigned int input_diag_enabled;
+    unsigned int pe_outlier_diag_enabled;
+    Float pe_outlier_ratio_trigger;
     unsigned int count[4];
     unsigned int projected[4];
     Float lower_sum[4];
@@ -77,6 +116,25 @@ struct CorexContactSpdStats
     Float correction_diag_ratio_sum[4];
     Float max_correction[4];
     Float max_correction_diag_ratio[4];
+    unsigned int input_count[4];
+    Float kt2_sum[4];
+    Float d_hat_sum[4];
+    Float thickness_sum[4];
+    Float kt2_max[4];
+    Float d_hat_max[4];
+    Float thickness_max[4];
+    unsigned int pe_outlier_count;
+    Float pe_outlier_ratio_max;
+    Float pe_outlier_corr_max;
+    Float pe_outlier_diag_abs;
+    Float pe_outlier_lower;
+    int pe_outlier_i;
+    int pe_outlier_v0;
+    int pe_outlier_v1;
+    int pe_outlier_v2;
+    int pe_outlier_b0;
+    int pe_outlier_b1;
+    int pe_outlier_b2;
 };
 
 enum CorexContactSpdType : int
@@ -171,6 +229,120 @@ __device__ void corex_record_spd_projection(CorexContactSpdStats* stats,
     corex_atomic_max_float(&stats->max_correction_diag_ratio[t], correction_diag_ratio);
 }
 
+template <int N>
+__device__ void corex_record_pe_outlier(CorexContactSpdStats* stats,
+                                        int                    contact_i,
+                                        const Vector3i&        PE,
+                                        const Vector3i&        body_ids,
+                                        const Matrix<Float, N, N>& before,
+                                        const Matrix<Float, N, N>& after)
+{
+    if(!stats || !stats->pe_outlier_diag_enabled)
+        return;
+
+    Float lower = corex_gershgorin_lower(before);
+    Float diag_abs = static_cast<Float>(0);
+    Float correction = static_cast<Float>(0);
+    for(int i = 0; i < N; ++i)
+    {
+        diag_abs += corex_abs_float(before(i, i));
+        for(int j = 0; j < N; ++j)
+            correction += corex_abs_float(after(i, j) - before(i, j));
+    }
+    Float ratio = diag_abs > static_cast<Float>(0)
+                    ? correction / diag_abs
+                    : static_cast<Float>(0);
+    if(ratio >= stats->pe_outlier_ratio_trigger)
+        atomicAdd(&stats->pe_outlier_count, 1u);
+
+#if defined(UIPC_FLOAT_SCALAR) && UIPC_FLOAT_SCALAR
+    int* address_as_i = reinterpret_cast<int*>(&stats->pe_outlier_ratio_max);
+    int  old          = *address_as_i;
+    int  assumed;
+    do
+    {
+        assumed = old;
+        Float old_v = __int_as_float(assumed);
+        if(old_v >= ratio)
+            return;
+        old = atomicCAS(address_as_i, assumed, __float_as_int(ratio));
+    } while(assumed != old);
+#else
+    unsigned long long int* address_as_i =
+        reinterpret_cast<unsigned long long int*>(&stats->pe_outlier_ratio_max);
+    unsigned long long int old = *address_as_i;
+    unsigned long long int assumed;
+    do
+    {
+        assumed = old;
+        Float old_v = __longlong_as_double(assumed);
+        if(old_v >= ratio)
+            return;
+        old = atomicCAS(address_as_i, assumed, __double_as_longlong(ratio));
+    } while(assumed != old);
+#endif
+    stats->pe_outlier_corr_max = correction;
+    stats->pe_outlier_diag_abs = diag_abs;
+    stats->pe_outlier_lower = lower;
+    stats->pe_outlier_i = contact_i;
+    stats->pe_outlier_v0 = PE(0);
+    stats->pe_outlier_v1 = PE(1);
+    stats->pe_outlier_v2 = PE(2);
+    stats->pe_outlier_b0 = body_ids(0);
+    stats->pe_outlier_b1 = body_ids(1);
+    stats->pe_outlier_b2 = body_ids(2);
+}
+
+__device__ inline void corex_record_contact_inputs(CorexContactSpdStats* stats,
+                                                   CorexContactSpdType   type,
+                                                   Float                 kt2,
+                                                   Float                 d_hat,
+                                                   Float                 thickness)
+{
+    if(!stats || !stats->input_diag_enabled)
+        return;
+
+    int t = static_cast<int>(type);
+    atomicAdd(&stats->input_count[t], 1u);
+    atomicAdd(&stats->kt2_sum[t], kt2);
+    atomicAdd(&stats->d_hat_sum[t], d_hat);
+    atomicAdd(&stats->thickness_sum[t], thickness);
+    corex_atomic_max_float(&stats->kt2_max[t], corex_abs_float(kt2));
+    corex_atomic_max_float(&stats->d_hat_max[t], corex_abs_float(d_hat));
+    corex_atomic_max_float(&stats->thickness_max[t], corex_abs_float(thickness));
+}
+
+template <int N>
+__device__ void corex_apply_spd_conditioning(const Matrix<Float, N, N>& before,
+                                             Matrix<Float, N, N>&       after,
+                                             Float                      ratio_trigger,
+                                             Float                      diag_scale)
+{
+    if(diag_scale <= static_cast<Float>(0))
+        return;
+
+    Float diag_abs = static_cast<Float>(0);
+    Float correction = static_cast<Float>(0);
+    for(int i = 0; i < N; ++i)
+    {
+        diag_abs += corex_abs_float(before(i, i));
+        for(int j = 0; j < N; ++j)
+            correction += corex_abs_float(after(i, j) - before(i, j));
+    }
+    Float ratio = diag_abs > static_cast<Float>(0)
+                    ? correction / diag_abs
+                    : static_cast<Float>(0);
+    if(ratio < ratio_trigger)
+        return;
+
+    Float base = diag_abs / static_cast<Float>(N);
+    if(base < static_cast<Float>(1))
+        base = static_cast<Float>(1);
+    Float shift = base * diag_scale;
+    for(int i = 0; i < N; ++i)
+        after(i, i) += shift;
+}
+
 template <typename EnergyBuffer>
 Float host_sum_energy(const EnergyBuffer& energies)
 {
@@ -215,7 +387,9 @@ __global__ void kernel_PP_contact_assemble(
     muda::CDense1D<Vector2i> PPs,
     muda::DoubletVectorViewer<Float, 3> PP_Gs,
     muda::TripletMatrixViewer<Float, 3> PP_Hs,
-    CorexContactSpdStats* spd_stats)
+    CorexContactSpdStats* spd_stats,
+    Float spd_ratio_trigger,
+    Float pp_diag_scale)
 {
     using namespace sym::codim_ipc_simplex_contact;
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -243,9 +417,11 @@ __global__ void kernel_PP_contact_assemble(
     else
     {
         Matrix6x6 H;
+        corex_record_contact_inputs(spd_stats, CorexSpdPP, kt2, d_hat, thickness);
         PP_barrier_gradient_hessian(G, H, flag, kt2, d_hat, thickness, P0, P1);
         Matrix6x6 H_before = H;
         make_spd(H);
+        corex_apply_spd_conditioning(H_before, H, spd_ratio_trigger, pp_diag_scale);
         corex_record_spd_projection(spd_stats, CorexSpdPP, H_before, H);
         DoubletVectorAssembler DVA{PP_Gs};
         DVA.segment<2>(i * 2).write(PP, G);
@@ -258,6 +434,7 @@ __global__ void kernel_PE_contact_assemble(
     int pe_count, bool gradient_only,
     muda::CDense2D<ContactCoeff> table,
     muda::CDense1D<int> contact_ids,
+    muda::CDense1D<IndexT> body_ids,
     muda::CDense1D<Vector3> Ps,
     muda::CDense1D<Float> thicknesses,
     muda::CDense1D<Float> d_hats,
@@ -267,7 +444,9 @@ __global__ void kernel_PE_contact_assemble(
     muda::TripletMatrixViewer<Float, 3> PE_Hs,
     CorexContactSpdStats* spd_stats,
     Float pe_diag_reg,
-    Float pe_kappa_scale)
+    Float pe_kappa_scale,
+    Float spd_ratio_trigger,
+    Float pe_diag_scale)
 {
     using namespace sym::codim_ipc_simplex_contact;
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -275,6 +454,7 @@ __global__ void kernel_PE_contact_assemble(
 
     Vector3i PE = PEs(i);
     Vector3i cids = {contact_ids(PE[0]), contact_ids(PE[1]), contact_ids(PE[2])};
+    Vector3i bids = {body_ids(PE[0]), body_ids(PE[1]), body_ids(PE[2])};
     Float kt2 = PE_kappa(table, cids) * dt * dt;
     kt2 *= pe_kappa_scale;
 
@@ -297,13 +477,16 @@ __global__ void kernel_PE_contact_assemble(
     else
     {
         Matrix9x9 H;
+        corex_record_contact_inputs(spd_stats, CorexSpdPE, kt2, d_hat, thickness);
         PE_barrier_gradient_hessian(G, H, flag, kt2, d_hat, thickness, P, E0, E1);
         if(pe_diag_reg > static_cast<Float>(0))
             for(int d = 0; d < 9; ++d)
                 H(d, d) += pe_diag_reg;
         Matrix9x9 H_before = H;
         make_spd(H);
+        corex_apply_spd_conditioning(H_before, H, spd_ratio_trigger, pe_diag_scale);
         corex_record_spd_projection(spd_stats, CorexSpdPE, H_before, H);
+        corex_record_pe_outlier(spd_stats, i, PE, bids, H_before, H);
         DoubletVectorAssembler DVA{PE_Gs};
         DVA.segment<3>(i * 3).write(PE, G);
         TripletMatrixAssembler TMA{PE_Hs};
@@ -323,7 +506,9 @@ __global__ void kernel_EE_contact_assemble(
     muda::CDense1D<Vector4i> EEs,
     muda::DoubletVectorViewer<Float, 3> EE_Gs,
     muda::TripletMatrixViewer<Float, 3> EE_Hs,
-    CorexContactSpdStats* spd_stats)
+    CorexContactSpdStats* spd_stats,
+    Float spd_ratio_trigger,
+    Float ee_diag_scale)
 {
     using namespace sym::codim_ipc_simplex_contact;
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -363,11 +548,13 @@ __global__ void kernel_EE_contact_assemble(
     else
     {
         Matrix12x12 H;
+        corex_record_contact_inputs(spd_stats, CorexSpdEE, kt2, d_hat, thickness);
         mollified_EE_barrier_gradient_hessian(G, H, flag, kt2, d_hat, thickness,
                                                t0_Ea0, t0_Ea1, t0_Eb0, t0_Eb1,
                                                Ea0, Ea1, Eb0, Eb1);
         Matrix12x12 H_before = H;
         make_spd(H);
+        corex_apply_spd_conditioning(H_before, H, spd_ratio_trigger, ee_diag_scale);
         corex_record_spd_projection(spd_stats, CorexSpdEE, H_before, H);
         DoubletVectorAssembler DVA{EE_Gs};
         DVA.segment<4>(i * 4).write(EE, G);
@@ -387,7 +574,9 @@ __global__ void kernel_PT_contact_assemble(
     muda::CDense1D<Vector4i> PTs,
     muda::DoubletVectorViewer<Float, 3> PT_Gs,
     muda::TripletMatrixViewer<Float, 3> PT_Hs,
-    CorexContactSpdStats* spd_stats)
+    CorexContactSpdStats* spd_stats,
+    Float spd_ratio_trigger,
+    Float pt_diag_scale)
 {
     using namespace sym::codim_ipc_simplex_contact;
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -420,10 +609,12 @@ __global__ void kernel_PT_contact_assemble(
     else
     {
         Matrix12x12 H;
+        corex_record_contact_inputs(spd_stats, CorexSpdPT, kt2, d_hat, thickness);
         PT_barrier_gradient_hessian(G, H, flag, kt2, d_hat, thickness,
                                     P, T0, T1, T2);
         Matrix12x12 H_before = H;
         make_spd(H);
+        corex_apply_spd_conditioning(H_before, H, spd_ratio_trigger, pt_diag_scale);
         corex_record_spd_projection(spd_stats, CorexSpdPT, H_before, H);
         DoubletVectorAssembler DVA{PT_Gs};
         DVA.segment<4>(i * 4).write(PT, G);
@@ -666,17 +857,41 @@ class IPCSimplexNormalContact final : public SimplexNormalContact
         auto total    = pt_count + ee_count + pe_count + pp_count;
         Float pe_diag_reg = corex_pe_diag_reg();
         Float pe_kappa_scale = corex_pe_kappa_scale();
+        const bool spd_condition = corex_contact_spd_condition_enabled() && !info.gradient_only();
+        Float spd_ratio_trigger =
+            corex_env_float("UIPC_COREX_CONTACT_SPD_RATIO_TRIGGER", static_cast<Float>(0.25));
+        Float spd_diag_scale =
+            spd_condition
+                ? corex_env_float("UIPC_COREX_CONTACT_SPD_DIAG_SCALE", static_cast<Float>(1e-4))
+                : static_cast<Float>(0);
+        Float pp_diag_scale = corex_env_float("UIPC_COREX_CONTACT_SPD_PP_DIAG_SCALE", spd_diag_scale);
+        Float pe_cond_diag_scale = corex_env_float("UIPC_COREX_CONTACT_SPD_PE_DIAG_SCALE", spd_diag_scale);
+        Float ee_diag_scale = corex_env_float("UIPC_COREX_CONTACT_SPD_EE_DIAG_SCALE", spd_diag_scale);
+        Float pt_diag_scale =
+            corex_contact_spd_condition_pt_enabled()
+                ? corex_env_float("UIPC_COREX_CONTACT_SPD_PT_DIAG_SCALE", spd_diag_scale)
+                : static_cast<Float>(0);
         if(pe_diag_reg > static_cast<Float>(0) && !info.gradient_only())
             spdlog::info("[corex_pe_diag_reg] value={}", static_cast<double>(pe_diag_reg));
         if(pe_kappa_scale != static_cast<Float>(1) && !info.gradient_only())
             spdlog::info("[corex_pe_kappa_scale] value={}",
                          static_cast<double>(pe_kappa_scale));
+        if(spd_condition)
+            spdlog::info("[corex_contact_spd_condition] ratio_trigger={} diag_scale={} PT={} EE={} PE={} PP={}",
+                         static_cast<double>(spd_ratio_trigger),
+                         static_cast<double>(spd_diag_scale),
+                         static_cast<double>(pt_diag_scale),
+                         static_cast<double>(ee_diag_scale),
+                         static_cast<double>(pe_cond_diag_scale),
+                         static_cast<double>(pp_diag_scale));
 
         // CoreX: use explicit __global__ kernels (lambdas miscompile)
         const bool spd_diag_enabled =
             corex_contact_spd_diag_enabled() && !info.gradient_only();
+        const bool pe_outlier_diag_enabled =
+            corex_pe_outlier_diag_enabled() && !info.gradient_only();
         CorexContactSpdStats* spd_stats = nullptr;
-        if(corex_contact_spd_diag_enabled())
+        if(corex_contact_spd_diag_enabled() || pe_outlier_diag_enabled)
             spdlog::info("[corex_spd_contact_begin] total={} PT={} EE={} PE={} PP={} gradient_only={} enabled={}",
                          total,
                          pt_count,
@@ -685,10 +900,32 @@ class IPCSimplexNormalContact final : public SimplexNormalContact
                          pp_count,
                          info.gradient_only() ? 1 : 0,
                          spd_diag_enabled ? 1 : 0);
-        if(spd_diag_enabled)
+        if(spd_diag_enabled || pe_outlier_diag_enabled)
         {
             cudaMalloc(reinterpret_cast<void**>(&spd_stats), sizeof(CorexContactSpdStats));
             cudaMemset(spd_stats, 0, sizeof(CorexContactSpdStats));
+            if(corex_contact_input_diag_enabled())
+            {
+                unsigned int enabled = 1u;
+                cudaMemcpy(&spd_stats->input_diag_enabled,
+                           &enabled,
+                           sizeof(enabled),
+                           cudaMemcpyHostToDevice);
+            }
+            if(pe_outlier_diag_enabled)
+            {
+                unsigned int enabled = 1u;
+                Float ratio_trigger = corex_env_float("UIPC_COREX_PE_OUTLIER_RATIO_TRIGGER",
+                                                      static_cast<Float>(0.5));
+                cudaMemcpy(&spd_stats->pe_outlier_diag_enabled,
+                           &enabled,
+                           sizeof(enabled),
+                           cudaMemcpyHostToDevice);
+                cudaMemcpy(&spd_stats->pe_outlier_ratio_trigger,
+                           &ratio_trigger,
+                           sizeof(ratio_trigger),
+                           cudaMemcpyHostToDevice);
+            }
         }
 
         if(pp_count > 0)
@@ -703,13 +940,16 @@ class IPCSimplexNormalContact final : public SimplexNormalContact
                 info.PPs().viewer(),
                 info.PP_gradients().viewer(),
                 info.PP_hessians().viewer(),
-                spd_stats);
+                spd_stats,
+                spd_ratio_trigger,
+                pp_diag_scale);
 
         if(pe_count > 0)
             kernel_PE_contact_assemble<<<grid(pe_count), kBlk>>>(
                 pe_count, info.gradient_only(),
                 info.contact_tabular().viewer(),
                 info.contact_element_ids().viewer(),
+                info.body_ids().viewer(),
                 info.positions().viewer(),
                 info.thicknesses().viewer(),
                 info.d_hats().viewer(),
@@ -719,7 +959,9 @@ class IPCSimplexNormalContact final : public SimplexNormalContact
                 info.PE_hessians().viewer(),
                 spd_stats,
                 pe_diag_reg,
-                pe_kappa_scale);
+                pe_kappa_scale,
+                spd_ratio_trigger,
+                pe_cond_diag_scale);
 
         if(ee_count > 0)
             kernel_EE_contact_assemble<<<grid(ee_count), kBlk>>>(
@@ -734,7 +976,9 @@ class IPCSimplexNormalContact final : public SimplexNormalContact
                 info.EEs().viewer(),
                 info.EE_gradients().viewer(),
                 info.EE_hessians().viewer(),
-                spd_stats);
+                spd_stats,
+                spd_ratio_trigger,
+                ee_diag_scale);
 
         if(pt_count > 0)
             kernel_PT_contact_assemble<<<grid(pt_count), kBlk>>>(
@@ -748,34 +992,74 @@ class IPCSimplexNormalContact final : public SimplexNormalContact
                 info.PTs().viewer(),
                 info.PT_gradients().viewer(),
                 info.PT_hessians().viewer(),
-                spd_stats);
+                spd_stats,
+                spd_ratio_trigger,
+                pt_diag_scale);
 
-        if(spd_diag_enabled)
+        if(spd_diag_enabled || pe_outlier_diag_enabled)
         {
             cudaDeviceSynchronize();
             CorexContactSpdStats h_stats{};
             cudaMemcpy(&h_stats, spd_stats, sizeof(CorexContactSpdStats), cudaMemcpyDeviceToHost);
             const char* names[4] = {"PT", "EE", "PE", "PP"};
-            for(int t = 0; t < 4; ++t)
+            if(spd_diag_enabled)
             {
-                auto count = h_stats.count[t];
-                double inv_count = count > 0 ? 1.0 / static_cast<double>(count) : 0.0;
-                spdlog::info("[corex_spd_contact] type={} count={} "
-                             "projected={} projected_rate={:.3f} "
-                             "gershgorin_lower_avg={:.9g} correction_avg={:.9g} "
-                             "correction_max={:.9g} diag_abs_avg={:.9g} "
-                             "correction_diag_ratio_avg={:.9g} correction_diag_ratio_max={:.9g}",
-                             names[t],
-                             count,
-                             h_stats.projected[t],
-                             100.0 * static_cast<double>(h_stats.projected[t]) * inv_count,
-                             static_cast<double>(h_stats.lower_sum[t]) * inv_count,
-                             static_cast<double>(h_stats.correction_sum[t]) * inv_count,
-                             static_cast<double>(h_stats.max_correction[t]),
-                             static_cast<double>(h_stats.diag_abs_sum[t]) * inv_count,
-                             static_cast<double>(h_stats.correction_diag_ratio_sum[t]) * inv_count,
-                             static_cast<double>(h_stats.max_correction_diag_ratio[t]));
+                for(int t = 0; t < 4; ++t)
+                {
+                    auto count = h_stats.count[t];
+                    double inv_count = count > 0 ? 1.0 / static_cast<double>(count) : 0.0;
+                    spdlog::info("[corex_spd_contact] type={} count={} "
+                                 "projected={} projected_rate={:.3f} "
+                                 "gershgorin_lower_avg={:.9g} correction_avg={:.9g} "
+                                 "correction_max={:.9g} diag_abs_avg={:.9g} "
+                                 "correction_diag_ratio_avg={:.9g} correction_diag_ratio_max={:.9g}",
+                                 names[t],
+                                 count,
+                                 h_stats.projected[t],
+                                 100.0 * static_cast<double>(h_stats.projected[t]) * inv_count,
+                                 static_cast<double>(h_stats.lower_sum[t]) * inv_count,
+                                 static_cast<double>(h_stats.correction_sum[t]) * inv_count,
+                                 static_cast<double>(h_stats.max_correction[t]),
+                                 static_cast<double>(h_stats.diag_abs_sum[t]) * inv_count,
+                                 static_cast<double>(h_stats.correction_diag_ratio_sum[t]) * inv_count,
+                                 static_cast<double>(h_stats.max_correction_diag_ratio[t]));
+                    if(corex_contact_input_diag_enabled())
+                    {
+                        auto input_count = h_stats.input_count[t];
+                        double inv_input =
+                            input_count > 0 ? 1.0 / static_cast<double>(input_count) : 0.0;
+                        spdlog::info("[corex_contact_input] type={} count={} "
+                                     "kt2_avg={:.9g} kt2_max_abs={:.9g} "
+                                     "d_hat_avg={:.9g} d_hat_max_abs={:.9g} "
+                                     "thickness_avg={:.9g} thickness_max_abs={:.9g}",
+                                     names[t],
+                                     input_count,
+                                     static_cast<double>(h_stats.kt2_sum[t]) * inv_input,
+                                     static_cast<double>(h_stats.kt2_max[t]),
+                                     static_cast<double>(h_stats.d_hat_sum[t]) * inv_input,
+                                     static_cast<double>(h_stats.d_hat_max[t]),
+                                     static_cast<double>(h_stats.thickness_sum[t]) * inv_input,
+                                     static_cast<double>(h_stats.thickness_max[t]));
+                    }
+                }
             }
+            if(pe_outlier_diag_enabled)
+                spdlog::info("[corex_pe_outlier] count_ge_trigger={} ratio_trigger={:.9g} "
+                             "max_ratio={:.9g} correction={:.9g} diag_abs={:.9g} lower={:.9g} "
+                             "contact_i={} PE=({},{},{}) body=({},{},{})",
+                             h_stats.pe_outlier_count,
+                             static_cast<double>(h_stats.pe_outlier_ratio_trigger),
+                             static_cast<double>(h_stats.pe_outlier_ratio_max),
+                             static_cast<double>(h_stats.pe_outlier_corr_max),
+                             static_cast<double>(h_stats.pe_outlier_diag_abs),
+                             static_cast<double>(h_stats.pe_outlier_lower),
+                             h_stats.pe_outlier_i,
+                             h_stats.pe_outlier_v0,
+                             h_stats.pe_outlier_v1,
+                             h_stats.pe_outlier_v2,
+                             h_stats.pe_outlier_b0,
+                             h_stats.pe_outlier_b1,
+                             h_stats.pe_outlier_b2);
             cudaFree(spd_stats);
         }
 

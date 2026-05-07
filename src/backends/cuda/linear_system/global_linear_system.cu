@@ -13,11 +13,29 @@
 #include <backends/common/backend_path_tool.h>
 #include <utils/matrix_market.h>
 #include <utils/corex_phase_profile.h>
+#include <uipc/common/demangle.h>
 #include <cstdlib>
+#include <cmath>
+#include <typeinfo>
 
 namespace uipc::backend::cuda
 {
 REGISTER_SIM_SYSTEM(GlobalLinearSystem);
+
+namespace
+{
+bool corex_matrix_quality_diag_enabled()
+{
+    const char* env = std::getenv("UIPC_COREX_MATRIX_QUALITY_DIAG");
+    return env && env[0] != '\0' && env[0] != '0';
+}
+
+bool corex_matrix_row_hotspot_diag_enabled()
+{
+    const char* env = std::getenv("UIPC_COREX_MATRIX_ROW_HOTSPOT_DIAG");
+    return env && env[0] != '\0' && env[0] != '0';
+}
+}  // namespace
 
 SizeT GlobalLinearSystem::dof_count() const
 {
@@ -73,6 +91,8 @@ void GlobalLinearSystem::_dump_x()
 
 void GlobalLinearSystem::solve()
 {
+    m_impl.diagnostic_frame = engine().frame();
+    m_impl.diagnostic_newton = engine().newton_iter();
     m_impl.build_linear_system();
 
     if(m_impl.empty_system) [[unlikely]]
@@ -373,6 +393,151 @@ void GlobalLinearSystem::Impl::build_linear_system()
                                    sizeof(Matrix3x3) * nnz,
                                    cudaMemcpyHostToDevice));
         trace("host ge2sym+convert: end");
+    }
+
+    if(corex_matrix_quality_diag_enabled())
+    {
+        const int nnz = static_cast<int>(bcoo_A.triplet_count());
+        const int rows = static_cast<int>(bcoo_A.rows());
+        std::vector<int>       h_rows(nnz), h_cols(nnz);
+        std::vector<Matrix3x3> h_vals(nnz);
+        if(nnz > 0)
+        {
+            checkCudaErrors(cudaMemcpy(h_rows.data(),
+                                       bcoo_A.row_indices().data(),
+                                       sizeof(int) * nnz,
+                                       cudaMemcpyDeviceToHost));
+            checkCudaErrors(cudaMemcpy(h_cols.data(),
+                                       bcoo_A.col_indices().data(),
+                                       sizeof(int) * nnz,
+                                       cudaMemcpyDeviceToHost));
+            checkCudaErrors(cudaMemcpy(h_vals.data(),
+                                       bcoo_A.values().data(),
+                                       sizeof(Matrix3x3) * nnz,
+                                       cudaMemcpyDeviceToHost));
+        }
+
+        std::vector<double> row_abs(rows > 0 ? rows : 1, 0.0);
+        double diag_abs_sum = 0.0;
+        double offdiag_abs_sum = 0.0;
+        int    diag_blocks = 0;
+        int    offdiag_blocks = 0;
+        int    near_zero_diag = 0;
+        for(int k = 0; k < nnz; ++k)
+        {
+            double block_abs = 0.0;
+            double diag_abs = 0.0;
+            for(int r = 0; r < 3; ++r)
+            {
+                for(int c = 0; c < 3; ++c)
+                {
+                    double av = std::abs(static_cast<double>(h_vals[k](r, c)));
+                    block_abs += av;
+                    if(r == c)
+                        diag_abs += av;
+                }
+            }
+            int row = h_rows[k];
+            int col = h_cols[k];
+            if(row >= 0 && row < static_cast<int>(row_abs.size()))
+                row_abs[row] += block_abs;
+            if(row == col)
+            {
+                ++diag_blocks;
+                diag_abs_sum += block_abs;
+                if(diag_abs < 1e-8)
+                    ++near_zero_diag;
+            }
+            else
+            {
+                ++offdiag_blocks;
+                offdiag_abs_sum += block_abs;
+            }
+        }
+
+        double max_row_abs = 0.0;
+        double sum_row_abs = 0.0;
+        for(double v : row_abs)
+        {
+            max_row_abs = std::max(max_row_abs, v);
+            sum_row_abs += v;
+        }
+        double mean_row_abs = rows > 0 ? sum_row_abs / static_cast<double>(rows) : 0.0;
+        double row_imbalance = mean_row_abs > 0.0 ? max_row_abs / mean_row_abs : 0.0;
+        logger::info("[corex_matrix_quality] frame={} newton={} "
+                     "blocks={} diag_blocks={} offdiag_blocks={} "
+                     "diag_abs_sum={:.9g} offdiag_abs_sum={:.9g} "
+                     "near_zero_diag={} max_row_abs={:.9g} mean_row_abs={:.9g} row_imbalance={:.9g}",
+                     diagnostic_frame,
+                     diagnostic_newton,
+                     nnz,
+                     diag_blocks,
+                     offdiag_blocks,
+                     diag_abs_sum,
+                     offdiag_abs_sum,
+                     near_zero_diag,
+                     max_row_abs,
+                     mean_row_abs,
+                     row_imbalance);
+        if(corex_matrix_row_hotspot_diag_enabled())
+        {
+            std::vector<int> order(row_abs.size());
+            std::iota(order.begin(), order.end(), 0);
+            std::sort(order.begin(), order.end(), [&](int a, int b) {
+                return row_abs[a] > row_abs[b];
+            });
+            auto diag_subsystem_view = diag_subsystems.view();
+            auto diag_dof_counts     = diag_dof_offsets_counts.counts();
+            auto diag_dof_offsets    = diag_dof_offsets_counts.offsets();
+            auto row_owner = [&](int block_row) {
+                struct Owner
+                {
+                    int         index = -1;
+                    int         local_block = -1;
+                    int         dof_offset = -1;
+                    int         dof_count = 0;
+                    std::string subsystem = "unknown";
+                };
+                Owner owner;
+                int   dof = block_row * static_cast<int>(DoFBlockSize);
+                for(int i = 0; i < static_cast<int>(diag_subsystem_view.size()); ++i)
+                {
+                    int offset = diag_dof_offsets[i];
+                    int count  = diag_dof_counts[i];
+                    if(dof >= offset && dof < offset + count)
+                    {
+                        owner.index       = i;
+                        owner.local_block = (dof - offset) / static_cast<int>(DoFBlockSize);
+                        owner.dof_offset  = offset;
+                        owner.dof_count   = count;
+                        auto* subsystem = diag_subsystem_view[i];
+                        owner.subsystem = uipc::demangle(typeid(*subsystem).name());
+                        break;
+                    }
+                }
+                return owner;
+            };
+            const int top_n = std::min<int>(8, static_cast<int>(order.size()));
+            for(int rank = 0; rank < top_n; ++rank)
+            {
+                int row = order[rank];
+                auto owner = row_owner(row);
+                logger::info("[corex_matrix_row_hotspot] frame={} newton={} rank={} row={} "
+                             "row_abs={:.9g} row_ratio={:.9g} owner_index={} "
+                             "local_block={} dof_offset={} dof_count={} subsystem={}",
+                             diagnostic_frame,
+                             diagnostic_newton,
+                             rank,
+                             row,
+                             row_abs[row],
+                             mean_row_abs > 0.0 ? row_abs[row] / mean_row_abs : 0.0,
+                             owner.index,
+                             owner.local_block,
+                             owner.dof_offset,
+                             owner.dof_count,
+                             owner.subsystem);
+            }
+        }
     }
 
     trace("assemble_preconditioner: begin");

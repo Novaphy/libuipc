@@ -179,6 +179,169 @@ __global__ void kernel_sym_spmv_grouped_row_atomic(int          n_triplets,
     atomicAdd(y + bi * 3 + 1, a * yi1);
     atomicAdd(y + bi * 3 + 2, a * yi2);
 }
+
+__global__ void kernel_sym_spmv_offdiag_atomic(int          n_triplets,
+                                               const int*   rows,
+                                               const int*   cols,
+                                               const Float* blocks,
+                                               const Float* x,
+                                               Float        a,
+                                               Float*       y)
+{
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if(t >= n_triplets)
+        return;
+
+    int bi = rows[t];
+    int bj = cols[t];
+    if(bi == bj)
+        return;
+
+    const Float* B = blocks + t * 9;
+    Float xi0 = x[bi * 3 + 0];
+    Float xi1 = x[bi * 3 + 1];
+    Float xi2 = x[bi * 3 + 2];
+
+    Float yj0 = B[0] * xi0 + B[1] * xi1 + B[2] * xi2;
+    Float yj1 = B[3] * xi0 + B[4] * xi1 + B[5] * xi2;
+    Float yj2 = B[6] * xi0 + B[7] * xi1 + B[8] * xi2;
+
+    atomicAdd(y + bj * 3 + 0, a * yj0);
+    atomicAdd(y + bj * 3 + 1, a * yj1);
+    atomicAdd(y + bj * 3 + 2, a * yj2);
+}
+
+__global__ void kernel_sym_spmv_segmented_row_block(int          n_triplets,
+                                                    const int*   rows,
+                                                    const int*   cols,
+                                                    const Float* blocks,
+                                                    const Float* x,
+                                                    Float        a,
+                                                    Float*       y)
+{
+    int t0 = blockIdx.x;
+    if(t0 >= n_triplets)
+        return;
+
+    int bi = rows[t0];
+    if(t0 > 0 && rows[t0 - 1] == bi)
+        return;
+
+    __shared__ Float partial[256 * 3];
+    Float local0 = 0;
+    Float local1 = 0;
+    Float local2 = 0;
+
+    for(int t = t0 + threadIdx.x; t < n_triplets && rows[t] == bi; t += blockDim.x)
+    {
+        int cj = cols[t];
+        const Float* B = blocks + t * 9;
+        Float xj0 = x[cj * 3 + 0];
+        Float xj1 = x[cj * 3 + 1];
+        Float xj2 = x[cj * 3 + 2];
+
+        local0 += B[0] * xj0 + B[3] * xj1 + B[6] * xj2;
+        local1 += B[1] * xj0 + B[4] * xj1 + B[7] * xj2;
+        local2 += B[2] * xj0 + B[5] * xj1 + B[8] * xj2;
+    }
+
+    partial[threadIdx.x * 3 + 0] = local0;
+    partial[threadIdx.x * 3 + 1] = local1;
+    partial[threadIdx.x * 3 + 2] = local2;
+    __syncthreads();
+
+    for(int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+    {
+        if(threadIdx.x < stride)
+        {
+            partial[threadIdx.x * 3 + 0] += partial[(threadIdx.x + stride) * 3 + 0];
+            partial[threadIdx.x * 3 + 1] += partial[(threadIdx.x + stride) * 3 + 1];
+            partial[threadIdx.x * 3 + 2] += partial[(threadIdx.x + stride) * 3 + 2];
+        }
+        __syncthreads();
+    }
+
+    if(threadIdx.x == 0)
+    {
+        atomicAdd(y + bi * 3 + 0, a * partial[0]);
+        atomicAdd(y + bi * 3 + 1, a * partial[1]);
+        atomicAdd(y + bi * 3 + 2, a * partial[2]);
+    }
+}
+
+__global__ void kernel_sym_spmv_warp_segmented(int          n_triplets,
+                                               const int*   rows,
+                                               const int*   cols,
+                                               const Float* blocks,
+                                               const Float* x,
+                                               Float        a,
+                                               Float*       y)
+{
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    int lane = threadIdx.x & 31;
+
+    int bi = -1;
+    int bj = -1;
+    Float yi0 = 0;
+    Float yi1 = 0;
+    Float yi2 = 0;
+
+    if(t < n_triplets)
+    {
+        bi = rows[t];
+        bj = cols[t];
+        const Float* B = blocks + t * 9;
+
+        Float xj0 = x[bj * 3 + 0];
+        Float xj1 = x[bj * 3 + 1];
+        Float xj2 = x[bj * 3 + 2];
+
+        yi0 = B[0] * xj0 + B[3] * xj1 + B[6] * xj2;
+        yi1 = B[1] * xj0 + B[4] * xj1 + B[7] * xj2;
+        yi2 = B[2] * xj0 + B[5] * xj1 + B[8] * xj2;
+
+        if(bi != bj)
+        {
+            Float xi0 = x[bi * 3 + 0];
+            Float xi1 = x[bi * 3 + 1];
+            Float xi2 = x[bi * 3 + 2];
+
+            Float yj0 = B[0] * xi0 + B[1] * xi1 + B[2] * xi2;
+            Float yj1 = B[3] * xi0 + B[4] * xi1 + B[5] * xi2;
+            Float yj2 = B[6] * xi0 + B[7] * xi1 + B[8] * xi2;
+
+            atomicAdd(y + bj * 3 + 0, a * yj0);
+            atomicAdd(y + bj * 3 + 1, a * yj1);
+            atomicAdd(y + bj * 3 + 2, a * yj2);
+        }
+    }
+
+    unsigned int mask = 0xffffffffu;
+    for(int offset = 1; offset < 32; offset <<= 1)
+    {
+        int row_down = __shfl_down_sync(mask, bi, offset);
+        Float v0_down = __shfl_down_sync(mask, yi0, offset);
+        Float v1_down = __shfl_down_sync(mask, yi1, offset);
+        Float v2_down = __shfl_down_sync(mask, yi2, offset);
+        if(lane + offset < 32 && bi >= 0 && bi == row_down)
+        {
+            yi0 += v0_down;
+            yi1 += v1_down;
+            yi2 += v2_down;
+        }
+    }
+
+    if(t < n_triplets)
+    {
+        bool emits_head = lane == 0 || t == 0 || rows[t - 1] != bi;
+        if(emits_head)
+        {
+            atomicAdd(y + bi * 3 + 0, a * yi0);
+            atomicAdd(y + bi * 3 + 1, a * yi1);
+            atomicAdd(y + bi * 3 + 2, a * yi2);
+        }
+    }
+}
 }  // namespace
 
 void Spmv::sym_spmv(Float                           a,
@@ -227,9 +390,39 @@ void Spmv::sym_spmv(Float                           a,
         else
         {
             int grid = (nt + kBlk - 1) / kBlk;
-            if(std::getenv("UIPC_COREX_SPMV_GROUPED_ROW"))
+            if(std::getenv("UIPC_COREX_SPMV_SEGMENTED_ROW"))
+            {
+                kernel_sym_spmv_offdiag_atomic<<<grid, kBlk>>>(
+                    nt,
+                    A.row_indices().data(),
+                    A.col_indices().data(),
+                    reinterpret_cast<const Float*>(A.values().data()),
+                    x.data(),
+                    a,
+                    y.buffer_view().data());
+                kernel_sym_spmv_segmented_row_block<<<nt, kBlk>>>(
+                    nt,
+                    A.row_indices().data(),
+                    A.col_indices().data(),
+                    reinterpret_cast<const Float*>(A.values().data()),
+                    x.data(),
+                    a,
+                    y.buffer_view().data());
+            }
+            else if(std::getenv("UIPC_COREX_SPMV_GROUPED_ROW"))
             {
                 kernel_sym_spmv_grouped_row_atomic<<<grid, kBlk>>>(
+                    nt,
+                    A.row_indices().data(),
+                    A.col_indices().data(),
+                    reinterpret_cast<const Float*>(A.values().data()),
+                    x.data(),
+                    a,
+                    y.buffer_view().data());
+            }
+            else if(std::getenv("UIPC_COREX_SPMV_WARP_SEGMENTED"))
+            {
+                kernel_sym_spmv_warp_segmented<<<grid, kBlk>>>(
                     nt,
                     A.row_indices().data(),
                     A.col_indices().data(),

@@ -33,7 +33,20 @@ PCG_COST_RE = re.compile(
     r"precond_pct=(?P<precond_pct>[-+0-9.eE]+) dotnorm_pct=(?P<dotnorm_pct>[-+0-9.eE]+) "
     r"per_iter_ms=(?P<per_iter_ms>[-+0-9.eE]+) "
     r"skip_spmv_sync=(?P<skip_spmv_sync>\d+) fused_rz_norm=(?P<fused_rz_norm>\d+) "
-    r"reduce2=(?P<reduce2>\d+)"
+    r"reduce2=(?P<reduce2>\d+)(?: fused_spmv_dot=(?P<fused_spmv_dot>\d+))?"
+)
+SELECTED_RE = re.compile(
+    r"\[corex_selected_set\] frame=(?P<frame>\d+) newton=(?P<newton>\d+) "
+    r"cand_PP=(?P<cand_PP>\d+) cand_CodimPE=(?P<cand_CodimPE>\d+) cand_PT=(?P<cand_PT>\d+) cand_EE=(?P<cand_EE>\d+) "
+    r"temp_PP=(?P<temp_PP>\d+) temp_PE=(?P<temp_PE>\d+) temp_PT=(?P<temp_PT>\d+) temp_EE=(?P<temp_EE>\d+) "
+    r"selected_PP=(?P<selected_PP>\d+) selected_PE=(?P<selected_PE>\d+) selected_PT=(?P<selected_PT>\d+) selected_EE=(?P<selected_EE>\d+)"
+)
+MATRIX_RE = re.compile(
+    r"\[corex_matrix_quality\] frame=(?P<frame>-?\d+) newton=(?P<newton>-?\d+) "
+    r"blocks=(?P<blocks>\d+) diag_blocks=(?P<diag_blocks>\d+) offdiag_blocks=(?P<offdiag_blocks>\d+) "
+    r"diag_abs_sum=(?P<diag_abs_sum>[-+0-9.eE]+) offdiag_abs_sum=(?P<offdiag_abs_sum>[-+0-9.eE]+) "
+    r"near_zero_diag=(?P<near_zero_diag>\d+) max_row_abs=(?P<max_row_abs>[-+0-9.eE]+) "
+    r"mean_row_abs=(?P<mean_row_abs>[-+0-9.eE]+) row_imbalance=(?P<row_imbalance>[-+0-9.eE]+)"
 )
 LINEAR_PCG_RE = re.compile(
     r"LinearPCG: frame=(?P<frame>\d+) newton_iter=(?P<newton>\d+) dof=(?P<dof>\d+) "
@@ -54,7 +67,9 @@ def as_ints(match):
 def as_numbers(match):
     out = {}
     for key, value in match.groupdict().items():
-        if key in {"frame", "newton", "iter", "skip_spmv_sync", "fused_rz_norm", "reduce2"}:
+        if value is None:
+            continue
+        if key in {"frame", "newton", "iter", "skip_spmv_sync", "fused_rz_norm", "reduce2", "fused_spmv_dot"}:
             out[key] = int(value)
         else:
             out[key] = float(value)
@@ -84,6 +99,8 @@ def empty_spd_bucket():
 def parse_log(path):
     pending_spd = []
     pending_struct = []
+    selected_by_key = {}
+    matrix_by_key = {}
     rows = []
     pcg_by_key = {}
 
@@ -123,6 +140,15 @@ def parse_log(path):
                 pending_struct.append(as_ints(m))
                 continue
 
+            if m := SELECTED_RE.search(line):
+                selected = as_ints(m)
+                selected_by_key[(selected["frame"], selected["newton"])] = selected
+                continue
+
+            if m := MATRIX_RE.search(line):
+                matrix_by_key[(int(m.group("frame")), int(m.group("newton")))] = as_numbers(m)
+                continue
+
             pcg = None
             if m := PCG_COST_RE.search(line):
                 pcg = as_numbers(m)
@@ -143,6 +169,14 @@ def parse_log(path):
                 }
                 row.update(spd)
                 row.update(struct)
+                selected = selected_by_key.get((pcg["frame"], pcg["newton"]), {})
+                for key, value in selected.items():
+                    if key not in {"frame", "newton"}:
+                        row[f"selected_{key}"] = value
+                matrix = matrix_by_key.get((pcg["frame"], pcg["newton"]), {})
+                for key, value in matrix.items():
+                    if key not in {"frame", "newton"}:
+                        row[f"matrix_{key}"] = value
                 for key, value in pcg.items():
                     if key not in {"frame", "newton", "iter"}:
                         row[f"pcg_{key}"] = value
@@ -225,6 +259,10 @@ def summarize(rows):
             "PE_corr_diag_ratio_max": r.get("PE_corr_diag_ratio_max"),
             "PP_corr_diag_ratio_max": r.get("PP_corr_diag_ratio_max"),
             "dotnorm_pct": r.get("pcg_dotnorm_pct"),
+            "selected_PE": r.get("selected_selected_PE"),
+            "selected_PT": r.get("selected_selected_PT"),
+            "matrix_row_imbalance": r.get("matrix_row_imbalance"),
+            "matrix_near_zero_diag": r.get("matrix_near_zero_diag"),
         }
         for r in top
     ]

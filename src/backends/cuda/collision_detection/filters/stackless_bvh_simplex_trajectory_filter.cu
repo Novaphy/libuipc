@@ -244,6 +244,13 @@ static __global__ void kernel_filter_toi_EE(
     out_tois[i] = toi;
 }
 
+static inline void corex_filter_active_post_launch()
+{
+    cudaGetLastError();
+    if(std::getenv("UIPC_COREX_FILTER_ACTIVE_SYNC") != nullptr)
+        cudaDeviceSynchronize();
+}
+
 // filter_active kernels
 
 static __global__ void kernel_filter_active_PP(
@@ -455,6 +462,232 @@ namespace uipc::backend::cuda
 constexpr bool PrintDebugInfo = false;
 constexpr bool PrintKernelZeroDistance = false;
 
+namespace
+{
+bool corex_contact_early_active_filter_enabled()
+{
+    return std::getenv("UIPC_COREX_CONTACT_EARLY_ACTIVE_FILTER") != nullptr;
+}
+
+Float corex_contact_early_active_scale()
+{
+    const char* env = std::getenv("UIPC_COREX_CONTACT_EARLY_ACTIVE_SCALE");
+    if(!env || env[0] == '\0')
+        return static_cast<Float>(4.0);
+
+    char*  end = nullptr;
+    double v   = std::strtod(env, &end);
+    if(end == env || v < 1.0)
+        return static_cast<Float>(4.0);
+    return static_cast<Float>(v);
+}
+
+bool corex_contact_early_active_stats_enabled()
+{
+    return std::getenv("UIPC_COREX_CONTACT_EARLY_ACTIVE_STATS") != nullptr
+        || std::getenv("UIPC_COREX_CONTACT_EARLY_ACTIVE_FILTER") != nullptr;
+}
+
+bool corex_selected_set_diag_enabled()
+{
+    const char* env = std::getenv("UIPC_COREX_SELECTED_SET_DIAG");
+    return env && env[0] != '\0' && env[0] != '0';
+}
+
+bool corex_selected_set_hash_diag_enabled()
+{
+    const char* env = std::getenv("UIPC_COREX_SELECTED_SET_HASH_DIAG");
+    return env && env[0] != '\0' && env[0] != '0';
+}
+
+bool corex_filter_view_slice_enabled()
+{
+    const char* env = std::getenv("UIPC_COREX_FILTER_VIEW_SLICE");
+    return env && env[0] != '\0' && env[0] != '0';
+}
+
+int corex_filter_aabb_async_mask()
+{
+    const char* mask_env = std::getenv("UIPC_COREX_FILTER_AABB_ASYNC_MASK");
+    if(mask_env && mask_env[0] != '\0')
+    {
+        char* end = nullptr;
+        long  v   = std::strtol(mask_env, &end, 0);
+        if(end != mask_env && v >= 0)
+            return static_cast<int>(v);
+    }
+
+    const char* env = std::getenv("UIPC_COREX_FILTER_AABB_ASYNC");
+    if(env && env[0] != '\0')
+        return env[0] != '0' ? 0xF : 0;
+
+    // Keep CoreX default synchronized. AABB async can change selected-set evolution
+    // on this path, so it remains opt-in through the mask env.
+    return 0;
+}
+
+void corex_filter_detect_sync_if_needed(int stage_bit)
+{
+    if((corex_filter_aabb_async_mask() & stage_bit) == 0)
+        cudaDeviceSynchronize();
+}
+
+template <typename T>
+void corex_filter_loose_resize(muda::DeviceBuffer<T>& buffer, SizeT size)
+{
+    if(size > buffer.capacity())
+        buffer.reserve(static_cast<size_t>(static_cast<double>(size) * 1.1) + 1);
+    buffer.resize(size);
+}
+
+struct CorexSelectedHashStats
+{
+    unsigned int sum_lo[4];
+    unsigned int sum_hi[4];
+    unsigned int sum2_lo[4];
+    unsigned int sum2_hi[4];
+};
+
+__device__ inline unsigned long long corex_mix_u64(unsigned long long x)
+{
+    x += 0x9e3779b97f4a7c15ull;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+    return x ^ (x >> 31);
+}
+
+__device__ inline unsigned long long corex_hash_index(IndexT v, int lane)
+{
+    return corex_mix_u64(static_cast<unsigned long long>(static_cast<long long>(v))
+                         ^ (static_cast<unsigned long long>(lane + 1) * 0x9e3779b97f4a7c15ull));
+}
+
+__device__ inline void corex_hash_update(CorexSelectedHashStats* stats,
+                                         int                     type,
+                                         unsigned long long      h)
+{
+    unsigned long long h2 = corex_mix_u64(h);
+    atomicAdd(&stats->sum_lo[type], static_cast<unsigned int>(h & 0xffffffffull));
+    atomicAdd(&stats->sum_hi[type], static_cast<unsigned int>(h >> 32));
+    atomicAdd(&stats->sum2_lo[type], static_cast<unsigned int>(h2 & 0xffffffffull));
+    atomicAdd(&stats->sum2_hi[type], static_cast<unsigned int>(h2 >> 32));
+}
+
+static __global__ void kernel_hash_selected_pp(int N, const Vector2i* values, CorexSelectedHashStats* stats)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N)
+        return;
+    auto v = values[i];
+    unsigned long long h = corex_hash_index(v(0), 0) ^ corex_hash_index(v(1), 1);
+    corex_hash_update(stats, 0, corex_mix_u64(h));
+}
+
+static __global__ void kernel_hash_selected_pe(int N, const Vector3i* values, CorexSelectedHashStats* stats)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N)
+        return;
+    auto v = values[i];
+    unsigned long long h =
+        corex_hash_index(v(0), 0) ^ corex_hash_index(v(1), 1) ^ corex_hash_index(v(2), 2);
+    corex_hash_update(stats, 1, corex_mix_u64(h));
+}
+
+static __global__ void kernel_hash_selected_pt(int N, const Vector4i* values, CorexSelectedHashStats* stats)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N)
+        return;
+    auto v = values[i];
+    unsigned long long h = corex_hash_index(v(0), 0) ^ corex_hash_index(v(1), 1)
+                         ^ corex_hash_index(v(2), 2) ^ corex_hash_index(v(3), 3);
+    corex_hash_update(stats, 2, corex_mix_u64(h));
+}
+
+static __global__ void kernel_hash_selected_ee(int N, const Vector4i* values, CorexSelectedHashStats* stats)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N)
+        return;
+    auto v = values[i];
+    unsigned long long h = corex_hash_index(v(0), 0) ^ corex_hash_index(v(1), 1)
+                         ^ corex_hash_index(v(2), 2) ^ corex_hash_index(v(3), 3);
+    corex_hash_update(stats, 3, corex_mix_u64(h));
+}
+
+void corex_log_selected_hash(int frame,
+                             int newton_iter,
+                             IndexT PP_count,
+                             IndexT PE_count,
+                             IndexT PT_count,
+                             IndexT EE_count,
+                             const muda::DeviceBuffer<Vector2i>& PPs,
+                             const muda::DeviceBuffer<Vector3i>& PEs,
+                             const muda::DeviceBuffer<Vector4i>& PTs,
+                             const muda::DeviceBuffer<Vector4i>& EEs)
+{
+    CorexSelectedHashStats* stats = nullptr;
+    cudaMalloc(reinterpret_cast<void**>(&stats), sizeof(CorexSelectedHashStats));
+    cudaMemset(stats, 0, sizeof(CorexSelectedHashStats));
+
+    constexpr int block = 256;
+    if(PP_count > 0)
+        kernel_hash_selected_pp<<<(static_cast<int>(PP_count) + block - 1) / block, block>>>(
+            static_cast<int>(PP_count), PPs.data(), stats);
+    if(PE_count > 0)
+        kernel_hash_selected_pe<<<(static_cast<int>(PE_count) + block - 1) / block, block>>>(
+            static_cast<int>(PE_count), PEs.data(), stats);
+    if(PT_count > 0)
+        kernel_hash_selected_pt<<<(static_cast<int>(PT_count) + block - 1) / block, block>>>(
+            static_cast<int>(PT_count), PTs.data(), stats);
+    if(EE_count > 0)
+        kernel_hash_selected_ee<<<(static_cast<int>(EE_count) + block - 1) / block, block>>>(
+            static_cast<int>(EE_count), EEs.data(), stats);
+
+    cudaDeviceSynchronize();
+    CorexSelectedHashStats h_stats{};
+    cudaMemcpy(&h_stats, stats, sizeof(CorexSelectedHashStats), cudaMemcpyDeviceToHost);
+    cudaFree(stats);
+
+    auto combine = [](unsigned int hi, unsigned int lo) -> unsigned long long
+    {
+        return (static_cast<unsigned long long>(hi) << 32) | static_cast<unsigned long long>(lo);
+    };
+    unsigned long long sum_hash[4] = {
+        combine(h_stats.sum_hi[0], h_stats.sum_lo[0]),
+        combine(h_stats.sum_hi[1], h_stats.sum_lo[1]),
+        combine(h_stats.sum_hi[2], h_stats.sum_lo[2]),
+        combine(h_stats.sum_hi[3], h_stats.sum_lo[3]),
+    };
+    unsigned long long sum2_hash[4] = {
+        combine(h_stats.sum2_hi[0], h_stats.sum2_lo[0]),
+        combine(h_stats.sum2_hi[1], h_stats.sum2_lo[1]),
+        combine(h_stats.sum2_hi[2], h_stats.sum2_lo[2]),
+        combine(h_stats.sum2_hi[3], h_stats.sum2_lo[3]),
+    };
+
+    spdlog::info("[corex_selected_hash] frame={} newton={} "
+                 "PP_count={} PE_count={} PT_count={} EE_count={} "
+                 "PP_sum={:#018x} PE_sum={:#018x} PT_sum={:#018x} EE_sum={:#018x} "
+                 "PP_sum2={:#018x} PE_sum2={:#018x} PT_sum2={:#018x} EE_sum2={:#018x}",
+                 frame,
+                 newton_iter,
+                 PP_count,
+                 PE_count,
+                 PT_count,
+                 EE_count,
+                 sum_hash[0],
+                 sum_hash[1],
+                 sum_hash[2],
+                 sum_hash[3],
+                 sum2_hash[0],
+                 sum2_hash[1],
+                 sum2_hash[2],
+                 sum2_hash[3]);
+}
+}  // namespace
+
 REGISTER_SIM_SYSTEM(StacklessBVHSimplexTrajectoryFilter);
 
 void StacklessBVHSimplexTrajectoryFilter::do_build(BuildInfo& info)
@@ -474,7 +707,7 @@ void StacklessBVHSimplexTrajectoryFilter::do_detect(DetectInfo& info)
 
 void StacklessBVHSimplexTrajectoryFilter::do_filter_active(FilterActiveInfo& info)
 {
-    m_impl.filter_active(info);
+    m_impl.filter_active(info, engine().frame(), engine().newton_iter());
 }
 
 void StacklessBVHSimplexTrajectoryFilter::do_filter_toi(FilterTOIInfo& info)
@@ -521,6 +754,8 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
     auto Es      = info.surf_edges();
     auto Fs      = info.surf_triangles();
     const bool trace_simplex_filter = (std::getenv("UIPC_COREX_TRACE_SIMPLEX_FILTER") != nullptr);
+    const bool  early_active_filter = corex_contact_early_active_filter_enabled();
+    const Float early_active_scale  = corex_contact_early_active_scale();
 
     if(trace_simplex_filter)
     {
@@ -779,7 +1014,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
                 codimVs.size(), (const IndexT*)codimVs.data(), (const Vector3*)Ps.data(),
                 (const Vector3*)dxs.data(), (const Float*)info.thicknesses().data(),
                 (const Float*)info.d_hats().data(), alpha, codim_point_aabbs.data());
-            cudaDeviceSynchronize();
+            corex_filter_detect_sync_if_needed(0x1);
         }
 
         // build AABBs for surf vertices (including codim vertices)
@@ -790,7 +1025,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
                 Vs.size(), (const IndexT*)Vs.data(), (const Vector3*)Ps.data(),
                 (const Vector3*)dxs.data(), (const Float*)info.thicknesses().data(),
                 (const Float*)info.d_hats().data(), alpha, point_aabbs.data());
-            cudaDeviceSynchronize();
+            corex_filter_detect_sync_if_needed(0x2);
         }
 
         // build AABBs for edges
@@ -801,7 +1036,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
                 Es.size(), (const Vector2i*)Es.data(), (const Vector3*)Ps.data(),
                 (const Vector3*)dxs.data(), (const Float*)info.thicknesses().data(),
                 (const Float*)info.d_hats().data(), alpha, edge_aabbs.data());
-            cudaDeviceSynchronize();
+            corex_filter_detect_sync_if_needed(0x4);
         }
 
         // build AABBs for triangles
@@ -812,7 +1047,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
                 Fs.size(), (const Vector3i*)Fs.data(), (const Vector3*)Ps.data(),
                 (const Vector3*)dxs.data(), (const Float*)info.thicknesses().data(),
                 (const Float*)info.d_hats().data(), alpha, triangle_aabbs.data());
-            cudaDeviceSynchronize();
+            corex_filter_detect_sync_if_needed(0x8);
         }
     }
 
@@ -979,7 +1214,9 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
              v2b = info.v2b().viewer().name("v2b"),
              body_self_collision = info.body_self_collision().viewer().name("body_self_collision"),
              d_hats = info.d_hats().viewer().name("d_hats"),
-             alpha  = alpha] __device__(IndexT i, IndexT j)
+             alpha  = alpha,
+             early_active_filter = early_active_filter,
+             early_active_scale = early_active_scale] __device__(IndexT i, IndexT j)
             {
                 const auto& E0 = Es(i);
                 const auto& E1 = Es(j);
@@ -1034,6 +1271,28 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
                        E0_0, E0_1, E1_0, E1_1, dE0_0, dE0_1, dE1_0, dE1_1, expand))
                     return false;
 
+                if(early_active_filter)
+                {
+                    Vector2 range = D_range(thickness, d_hat);
+                    Vector4i flag0 =
+                        distance::edge_edge_distance_flag(E0_0, E0_1, E1_0, E1_1);
+                    Float D0;
+                    distance::edge_edge_distance2(flag0, E0_0, E0_1, E1_0, E1_1, D0);
+
+                    Vector3 E0_0t = E0_0 + dE0_0;
+                    Vector3 E0_1t = E0_1 + dE0_1;
+                    Vector3 E1_0t = E1_0 + dE1_0;
+                    Vector3 E1_1t = E1_1 + dE1_1;
+                    Vector4i flag1 =
+                        distance::edge_edge_distance_flag(E0_0t, E0_1t, E1_0t, E1_1t);
+                    Float D1;
+                    distance::edge_edge_distance2(flag1, E0_0t, E0_1t, E1_0t, E1_1t, D1);
+
+                    Float conservative_upper = range.y() * early_active_scale;
+                    if(D0 >= conservative_upper && D1 >= conservative_upper)
+                        return false;
+                }
+
                 return true;
             },
             candidate_AllE_AllE_pairs);
@@ -1058,7 +1317,9 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
              v2b = info.v2b().viewer().name("v2b"),
              body_self_collision = info.body_self_collision().viewer().name("body_self_collision"),
              d_hats = info.d_hats().viewer().name("d_hats"),
-             alpha  = alpha] __device__(IndexT i, IndexT j)
+             alpha  = alpha,
+             early_active_filter = early_active_filter,
+             early_active_scale = early_active_scale] __device__(IndexT i, IndexT j)
             {
                 auto V = Vs(i);
                 auto F = Fs(j);
@@ -1114,6 +1375,28 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
                 if(!distance::point_triangle_ccd_broadphase(P, F0, F1, F2, dP, dF0, dF1, dF2, expand))
                     return false;
 
+                if(early_active_filter)
+                {
+                    Vector2 range = D_range(thickness, d_hat);
+                    Vector4i flag0 =
+                        distance::point_triangle_distance_flag(P, F0, F1, F2);
+                    Float D0;
+                    distance::point_triangle_distance2(flag0, P, F0, F1, F2, D0);
+
+                    Vector3 Pt  = P + dP;
+                    Vector3 F0t = F0 + dF0;
+                    Vector3 F1t = F1 + dF1;
+                    Vector3 F2t = F2 + dF2;
+                    Vector4i flag1 =
+                        distance::point_triangle_distance_flag(Pt, F0t, F1t, F2t);
+                    Float D1;
+                    distance::point_triangle_distance2(flag1, Pt, F0t, F1t, F2t, D1);
+
+                    Float conservative_upper = range.y() * early_active_scale;
+                    if(D0 >= conservative_upper && D1 >= conservative_upper)
+                        return false;
+                }
+
                 return true;
             },
             candidate_AllP_AllT_pairs);
@@ -1128,11 +1411,17 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
                      (int)candidate_AllE_AllE_pairs.size());
 }
 
-void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& info)
+void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& info,
+                                                              int frame,
+                                                              int newton_iter)
 {
     using namespace muda;
     const bool trace_filter_active_diag =
         (std::getenv("UIPC_COREX_TRACE_FILTER_ACTIVE_DIAG") != nullptr);
+    const bool early_active_stats = corex_contact_early_active_stats_enabled();
+    const bool selected_set_diag = corex_selected_set_diag_enabled();
+    const bool selected_set_hash_diag = corex_selected_set_hash_diag_enabled();
+    const bool view_slice_output = corex_filter_view_slice_enabled();
     Float pt_pe_hyst_scale = static_cast<Float>(0.0);
     if(const char* env = std::getenv("UIPC_COREX_PTPE_HYST_SCALE"))
     {
@@ -1150,12 +1439,26 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
     SizeT N_EEs     = candidate_AllE_AllE_pairs.size();
 
     // PT, EE, PT, PP can degenerate to PP
-    temp_PPs.resize(N_PCoimP + N_CodimPE + N_PTs + N_EEs);
+    if(view_slice_output)
+        corex_filter_loose_resize(temp_PPs, N_PCoimP + N_CodimPE + N_PTs + N_EEs);
+    else
+        temp_PPs.resize(N_PCoimP + N_CodimPE + N_PTs + N_EEs);
     // PT, EE, PT can degenerate to PE
-    temp_PEs.resize(N_CodimPE + N_PTs + N_EEs);
+    if(view_slice_output)
+        corex_filter_loose_resize(temp_PEs, N_CodimPE + N_PTs + N_EEs);
+    else
+        temp_PEs.resize(N_CodimPE + N_PTs + N_EEs);
 
-    temp_PTs.resize(N_PTs);
-    temp_EEs.resize(N_EEs);
+    if(view_slice_output)
+    {
+        corex_filter_loose_resize(temp_PTs, N_PTs);
+        corex_filter_loose_resize(temp_EEs, N_EEs);
+    }
+    else
+    {
+        temp_PTs.resize(N_PTs);
+        temp_EEs.resize(N_EEs);
+    }
 
     SizeT temp_PP_offset = 0;
     SizeT temp_PE_offset = 0;
@@ -1178,7 +1481,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
                 (const Float*)info.thicknesses().data(),
                 (const Float*)info.d_hats().data(),
                 PP_view.data());
-            cudaDeviceSynchronize();
+            corex_filter::corex_filter_active_post_launch();
         }
 
         temp_PP_offset += N_PCoimP;
@@ -1203,7 +1506,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
                 (const Float*)info.d_hats().data(),
                 PP_view.data(),
                 PE_view.data());
-            cudaDeviceSynchronize();
+            corex_filter::corex_filter_active_post_launch();
         }
 
         temp_PP_offset += N_CodimPE;
@@ -1233,7 +1536,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
                     PP_view.data(),
                     PE_view.data(),
                     temp_PTs.data());
-                cudaDeviceSynchronize();
+                corex_filter::corex_filter_active_post_launch();
             }
         }
 
@@ -1262,7 +1565,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
                     PP_view.data(),
                     PE_view.data(),
                     temp_EEs.data());
-                cudaDeviceSynchronize();
+                corex_filter::corex_filter_active_post_launch();
             }
         }
 
@@ -1451,12 +1754,27 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
         filter_active_diag_call++;
     }
 
+    IndexT PP_count = 0;
+    IndexT PE_count = 0;
+    IndexT PT_count = 0;
+    IndexT EE_count = 0;
+
     {  // select the valid ones
         corex_profile::ScopedPhase phase("contact_filter_detail", "select_valid_all");
-        PPs.resize(temp_PPs.size());
-        PEs.resize(temp_PEs.size());
-        PTs.resize(temp_PTs.size());
-        EEs.resize(temp_EEs.size());
+        if(view_slice_output)
+        {
+            corex_filter_loose_resize(PPs, temp_PPs.size());
+            corex_filter_loose_resize(PEs, temp_PEs.size());
+            corex_filter_loose_resize(PTs, temp_PTs.size());
+            corex_filter_loose_resize(EEs, temp_EEs.size());
+        }
+        else
+        {
+            PPs.resize(temp_PPs.size());
+            PEs.resize(temp_PEs.size());
+            PTs.resize(temp_PTs.size());
+            EEs.resize(temp_EEs.size());
+        }
 
         DeviceSelect().If(temp_PPs.data(),
                           PPs.data(),
@@ -1486,10 +1804,64 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
                           [] CUB_RUNTIME_FUNCTION(const Vector4i& EE)
                           { return EE(0) != -1; });
 
-        IndexT PP_count = selected_PP_count;
-        IndexT PE_count = selected_PE_count;
-        IndexT PT_count = selected_PT_count;
-        IndexT EE_count = selected_EE_count;
+        PP_count = selected_PP_count;
+        PE_count = selected_PE_count;
+        PT_count = selected_PT_count;
+        EE_count = selected_EE_count;
+
+        if(early_active_stats)
+        {
+            static int early_active_log_call = 0;
+            if(early_active_log_call < 10 || (early_active_log_call % 50 == 0))
+            {
+                spdlog::info("[corex_contact_early_stats] PP_cands={} CodimPE_cands={} PT_cands={} EE_cands={} selected_PP={} selected_PE={} selected_PT={} selected_EE={}",
+                             static_cast<int>(N_PCoimP),
+                             static_cast<int>(N_CodimPE),
+                             static_cast<int>(N_PTs),
+                             static_cast<int>(N_EEs),
+                             PP_count,
+                             PE_count,
+                             PT_count,
+                             EE_count);
+            }
+            ++early_active_log_call;
+        }
+
+        if(selected_set_diag)
+        {
+            spdlog::info("[corex_selected_set] frame={} newton={} "
+                         "cand_PP={} cand_CodimPE={} cand_PT={} cand_EE={} "
+                         "temp_PP={} temp_PE={} temp_PT={} temp_EE={} "
+                         "selected_PP={} selected_PE={} selected_PT={} selected_EE={}",
+                         frame,
+                         newton_iter,
+                         static_cast<int>(N_PCoimP),
+                         static_cast<int>(N_CodimPE),
+                         static_cast<int>(N_PTs),
+                         static_cast<int>(N_EEs),
+                         static_cast<int>(temp_PPs.size()),
+                         static_cast<int>(temp_PEs.size()),
+                         static_cast<int>(temp_PTs.size()),
+                         static_cast<int>(temp_EEs.size()),
+                         PP_count,
+                         PE_count,
+                         PT_count,
+                         EE_count);
+        }
+
+        if(selected_set_hash_diag)
+        {
+            corex_log_selected_hash(frame,
+                                    newton_iter,
+                                    PP_count,
+                                    PE_count,
+                                    PT_count,
+                                    EE_count,
+                                    PPs,
+                                    PEs,
+                                    PTs,
+                                    EEs);
+        }
 
         if(trace_filter_active_diag)
         {
@@ -1770,16 +2142,29 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
             }
         }
 
-        PPs.resize(PP_count);
-        PEs.resize(PE_count);
-        PTs.resize(PT_count);
-        EEs.resize(EE_count);
+        if(!view_slice_output)
+        {
+            PPs.resize(PP_count);
+            PEs.resize(PE_count);
+            PTs.resize(PT_count);
+            EEs.resize(EE_count);
+        }
     }
 
-    info.PPs(PPs);
-    info.PEs(PEs);
-    info.PTs(PTs);
-    info.EEs(EEs);
+    if(view_slice_output)
+    {
+        info.PPs(PPs.view(0, PP_count));
+        info.PEs(PEs.view(0, PE_count));
+        info.PTs(PTs.view(0, PT_count));
+        info.EEs(EEs.view(0, EE_count));
+    }
+    else
+    {
+        info.PPs(PPs);
+        info.PEs(PEs);
+        info.PTs(PTs);
+        info.EEs(EEs);
+    }
 
     if constexpr(PrintDebugInfo)
     {

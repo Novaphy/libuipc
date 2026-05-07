@@ -234,9 +234,11 @@ void MatrixConverter<T, N>::_make_unique_block_warp_reduction(
     static_assert(N == 3, "CoreX matrix segmental reduce only supports 3x3 blocks");
     static_assert(std::is_same_v<T, Float>,
                   "CoreX matrix segmental reduce block type must match uipc::Float");
-    corex_matconv::launch_segmental_reduce_3x3(
+    corex_matconv::launch_segmental_reduce_3x3_blocked(
         static_cast<int>(blocks_sorted.size()),
         thrust::raw_pointer_cast(sorted_partition_output.data()),
+        thrust::raw_pointer_cast(unique_counts.data()),
+        thrust::raw_pointer_cast(offsets.data()),
         reinterpret_cast<const corex_matconv::BlockT3*>(
             thrust::raw_pointer_cast(blocks_sorted.data())),
         reinterpret_cast<corex_matconv::BlockT3*>(
@@ -430,9 +432,11 @@ void MatrixConverter<T, N>::_make_unique_segment_warp_reduction(
     static_assert(N == 3, "CoreX vector segmental reduce only supports 3x1 blocks");
     static_assert(std::is_same_v<T, Float>,
                   "CoreX vector segmental reduce vector type must match uipc::Float");
-    corex_matconv::launch_segmental_reduce_3x1(
+    corex_matconv::launch_segmental_reduce_3x1_blocked(
         static_cast<int>(segments_sorted.size()),
         thrust::raw_pointer_cast(sorted_partition_output.data()),
+        thrust::raw_pointer_cast(unique_counts.data()),
+        thrust::raw_pointer_cast(offsets.data()),
         reinterpret_cast<const corex_matconv::VecT3*>(
             thrust::raw_pointer_cast(segments_sorted.data())),
         reinterpret_cast<corex_matconv::VecT3*>(

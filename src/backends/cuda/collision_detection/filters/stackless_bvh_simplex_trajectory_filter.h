@@ -19,7 +19,7 @@ class StacklessBVHSimplexTrajectoryFilter final : public SimplexTrajectoryFilter
     {
       public:
         void detect(DetectInfo& info);
-        void filter_active(FilterActiveInfo& info);
+        void filter_active(FilterActiveInfo& info, int frame, int newton_iter);
         void filter_toi(FilterTOIInfo& info);
 
         /****************************************************

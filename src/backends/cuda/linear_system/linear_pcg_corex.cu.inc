@@ -41,6 +41,46 @@ bool corex_pcg_diag_enabled()
 #endif
 }
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+// Replace the dotnorm finalize sequence
+//   cudaDeviceSynchronize() + (DeviceVar<Float>::operator Float)*2
+// with a single explicit cudaMemcpyAsync per scalar to a lazily-allocated
+// pinned host buffer, followed by one cudaStreamSynchronize.
+//
+// The default DeviceVar<Float>::operator Float() implementation issues a
+// synchronous cudaMemcpy that blocks on the default stream, so the legacy
+// path effectively pays for three sync points per dotnorm call (one device
+// drain plus two implicit per-scalar drains). Pinned host memory makes the
+// async memcpys cheap, so the critical path collapses to one stream sync.
+//
+// Toggle:
+//   - default: ON
+//   - UIPC_COREX_PCG_PINNED_SCALAR=0: rollback to the legacy
+//     cudaDeviceSynchronize + implicit memcpy path.
+inline bool corex_pcg_pinned_scalar_enabled()
+{
+    const char* env = std::getenv("UIPC_COREX_PCG_PINNED_SCALAR");
+    if(!env) return true;
+    return env[0] != '\0' && env[0] != '0';
+}
+
+// Two-slot pinned host buffer. Lazily allocated on first use; kept alive
+// for the lifetime of the process. The PCG solver is single-threaded on
+// host so a process-wide singleton is safe for the existing call sites.
+inline Float* corex_pcg_pinned_scalar_slot()
+{
+    static Float* g_buf = nullptr;
+    if(!g_buf)
+    {
+        Float* tmp = nullptr;
+        if(cudaMallocHost(reinterpret_cast<void**>(&tmp), sizeof(Float) * 2)
+           == cudaSuccess)
+            g_buf = tmp;
+    }
+    return g_buf;
+}
+#endif
+
 bool corex_pcg_fused_rz_norm_enabled()
 {
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
@@ -73,6 +113,16 @@ bool corex_pcg_scalar_audit_enabled()
 {
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
     const char* env = std::getenv("UIPC_COREX_PCG_SCALAR_AUDIT");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+#else
+    return false;
+#endif
+}
+
+bool corex_pcg_fused_spmv_dot_enabled()
+{
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    const char* env = std::getenv("UIPC_COREX_PCG_FUSED_SPMV_DOT");
     return env != nullptr && env[0] != '\0' && env[0] != '0';
 #else
     return false;
@@ -487,9 +537,27 @@ std::pair<Float, Float> corex_dot_norm(cudaStream_t                   stream,
         }
         checkCudaErrors(cudaGetLastError());
     }
-    checkCudaErrors(cudaDeviceSynchronize());
-    Float dot   = d_dot;
-    Float norm2 = d_norm2;
+    Float dot;
+    Float norm2;
+    Float* pinned = corex_pcg_pinned_scalar_enabled()
+                        ? corex_pcg_pinned_scalar_slot()
+                        : nullptr;
+    if(pinned)
+    {
+        checkCudaErrors(cudaMemcpyAsync(
+            pinned, d_dot.data(), sizeof(Float), cudaMemcpyDeviceToHost, stream));
+        checkCudaErrors(cudaMemcpyAsync(
+            pinned + 1, d_norm2.data(), sizeof(Float), cudaMemcpyDeviceToHost, stream));
+        checkCudaErrors(cudaStreamSynchronize(stream));
+        dot   = pinned[0];
+        norm2 = pinned[1];
+    }
+    else
+    {
+        checkCudaErrors(cudaDeviceSynchronize());
+        dot   = d_dot;
+        norm2 = d_norm2;
+    }
     return {dot, std::sqrt(std::max(norm2, Float{0}))};
 #else
     (void)stream;
@@ -522,6 +590,16 @@ Float corex_dot_reduce2(cudaStream_t                   stream,
         checkCudaErrors(cudaGetLastError());
         kernel_dot_finalize<<<1, block, 0, stream>>>(grid, partials.data(), d_dot.data());
         checkCudaErrors(cudaGetLastError());
+    }
+    Float* pinned = corex_pcg_pinned_scalar_enabled()
+                        ? corex_pcg_pinned_scalar_slot()
+                        : nullptr;
+    if(pinned)
+    {
+        checkCudaErrors(cudaMemcpyAsync(
+            pinned, d_dot.data(), sizeof(Float), cudaMemcpyDeviceToHost, stream));
+        checkCudaErrors(cudaStreamSynchronize(stream));
+        return pinned[0];
     }
     checkCudaErrors(cudaDeviceSynchronize());
     return d_dot;
@@ -637,6 +715,7 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
     const bool fused_rz_norm = corex_pcg_fused_rz_norm_enabled();
     const bool reduce2 = corex_pcg_reduce2_enabled();
     const bool scalar_audit = corex_pcg_scalar_audit_enabled();
+    const bool fused_spmv_dot = corex_pcg_fused_spmv_dot_enabled();
     int scalar_dot_calls = 0;
     int scalar_norm_calls = 0;
     int scalar_fused_dotnorm_calls = 0;
@@ -762,13 +841,16 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
         {
             Timer timer{"SpMV"};
             auto profile_t0 = corex_profile::now_ms();
-            spmv(p.cview(), Ap.view());
+            if(fused_spmv_dot)
+                spmv_dot(p.cview(), Ap.view(), d_corex_dot.view());
+            else
+                spmv(p.cview(), Ap.view());
             profile_spmv_ms += corex_profile::now_ms() - profile_t0;
         }
 
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
         auto profile_sync_t0 = corex_profile::now_ms();
-        if(std::getenv("UIPC_COREX_PCG_SKIP_SPMV_SYNC") == nullptr)
+        if(!fused_spmv_dot && std::getenv("UIPC_COREX_PCG_SKIP_SPMV_SYNC") == nullptr)
             checkCudaErrors(cudaDeviceSynchronize());
         profile_spmv_sync_ms += corex_profile::now_ms() - profile_sync_t0;
 #endif
@@ -780,7 +862,12 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
 
         // alpha = rz / p^T * Ap
         profile_dot_t0 = corex_profile::now_ms();
-        if(reduce2)
+        if(fused_spmv_dot)
+        {
+            pAp = d_corex_dot;
+            ++scalar_dot_calls;
+        }
+        else if(reduce2)
         {
             pAp = corex_dot_reduce2(stream, p.cview(), Ap.cview(), d_corex_dot, corex_reduce_partials);
             ++scalar_reduce2_calls;
@@ -887,7 +974,7 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
         logger::info("[corex_pcg_cost] frame={} newton={} iter={} "
                      "spmv_ms={:.6g} spmv_sync_ms={:.6g} precond_ms={:.6g} dotnorm_ms={:.6g} "
                      "spmv_pct={:.3f} spmv_sync_pct={:.3f} precond_pct={:.3f} dotnorm_pct={:.3f} "
-                     "per_iter_ms={:.6g} skip_spmv_sync={} fused_rz_norm={} reduce2={}",
+                     "per_iter_ms={:.6g} skip_spmv_sync={} fused_rz_norm={} reduce2={} fused_spmv_dot={}",
                      profile_frame,
                      profile_newton,
                      k,
@@ -902,13 +989,14 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
                      measured / iter_count,
                      std::getenv("UIPC_COREX_PCG_SKIP_SPMV_SYNC") != nullptr ? 1 : 0,
                      fused_rz_norm ? 1 : 0,
-                     reduce2 ? 1 : 0);
+                     reduce2 ? 1 : 0,
+                     fused_spmv_dot ? 1 : 0);
     }
     if(scalar_audit)
     {
         logger::info("[corex_pcg_scalar_audit] frame={} newton={} iter={} "
                      "dot_calls={} norm_calls={} fused_dotnorm_calls={} reduce2_calls={} "
-                     "host_scalar_results={} fused_rz_norm={} reduce2={}",
+                     "host_scalar_results={} fused_rz_norm={} reduce2={} fused_spmv_dot={}",
                      profile_frame,
                      profile_newton,
                      k,
@@ -919,7 +1007,8 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
                      scalar_dot_calls + scalar_norm_calls + scalar_fused_dotnorm_calls
                          + scalar_reduce2_calls,
                      fused_rz_norm ? 1 : 0,
-                     reduce2 ? 1 : 0);
+                     reduce2 ? 1 : 0,
+                     fused_spmv_dot ? 1 : 0);
     }
     if(pcg_diag)
     {

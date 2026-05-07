@@ -312,6 +312,8 @@ class GlobalLinearSystem : public SimSystem
 
         bool initialized = false;
         bool empty_system = true;
+        int diagnostic_frame = -1;
+        int diagnostic_newton = -1;
 
         void apply_preconditioner(muda::DenseVectorView<Float>  z,
                                   muda::CDenseVectorView<Float> r,

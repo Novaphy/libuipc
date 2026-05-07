@@ -448,6 +448,7 @@ void GlobalDyTopoEffectManager::add_receiver(DyTopoEffectReceiver* receiver)
 // ============================================================================
 #include <algorithm/corex_matrix_converter_kernels.h>
 #include <cstdlib>
+#include <vector>
 
 namespace uipc::backend::cuda::corex_matconv
 {
@@ -463,6 +464,86 @@ inline bool corex_matconv_trace()
 inline bool corex_matconv_async_enabled()
 {
     return std::getenv("UIPC_COREX_MATCONV_ASYNC") != nullptr;
+}
+
+inline bool corex_matconv_block_reduce_enabled()
+{
+    const char* env = std::getenv("UIPC_COREX_MATCONV_BLOCK_REDUCE");
+    return env && env[0] != '\0' && env[0] != '0';
+}
+
+inline bool corex_matconv_nvidia_seg_reduce_enabled()
+{
+    const char* env = std::getenv("UIPC_COREX_MATCONV_NVIDIA_SEG_REDUCE");
+    return env && env[0] != '\0' && env[0] != '0';
+}
+
+inline int corex_matconv_seg_threshold()
+{
+    const char* env = std::getenv("UIPC_COREX_MATCONV_SEG_THRESHOLD");
+    if(!env || env[0] == '\0')
+        return 16;
+
+    int value = std::atoi(env);
+    return value > 1 ? value : 2;
+}
+
+inline bool corex_matconv_seg_hist_enabled()
+{
+    const char* env = std::getenv("UIPC_COREX_MATCONV_SEG_HIST");
+    return env && env[0] != '\0' && env[0] != '0';
+}
+
+inline void corex_log_segment_histogram(const char* tag, const int* unique_counts, int out_count)
+{
+    if(!corex_matconv_seg_hist_enabled() || out_count <= 0)
+        return;
+
+    std::vector<int> counts(static_cast<size_t>(out_count));
+    cudaMemcpy(counts.data(),
+               unique_counts,
+               counts.size() * sizeof(int),
+               cudaMemcpyDeviceToHost);
+
+    int max_count = 0;
+    long long total = 0;
+    int bins[7] = {0, 0, 0, 0, 0, 0, 0};
+    for(int count : counts)
+    {
+        total += count;
+        if(count > max_count)
+            max_count = count;
+        if(count <= 1)
+            ++bins[0];
+        else if(count <= 2)
+            ++bins[1];
+        else if(count <= 4)
+            ++bins[2];
+        else if(count <= 8)
+            ++bins[3];
+        else if(count <= 16)
+            ++bins[4];
+        else if(count <= 32)
+            ++bins[5];
+        else
+            ++bins[6];
+    }
+
+    std::fprintf(stderr,
+                 "[corex_matconv_seg_hist] tag=%s segments=%d inputs=%lld max=%d "
+                 "le1=%d le2=%d le4=%d le8=%d le16=%d le32=%d gt32=%d\n",
+                 tag,
+                 out_count,
+                 total,
+                 max_count,
+                 bins[0],
+                 bins[1],
+                 bins[2],
+                 bins[3],
+                 bins[4],
+                 bins[5],
+                 bins[6]);
+    std::fflush(stderr);
 }
 
 inline void corex_matconv_sync_if_needed(const char* name)
@@ -695,6 +776,130 @@ static __global__ void kernel_segmental_reduce_3x3_linear(int N,
         atomicAdd(dst + j, src[j]);
 }
 
+static __global__ void kernel_segmental_reduce_3x3_blocked(int N,
+                                                           const int* unique_counts,
+                                                           const int* offsets,
+                                                           const BlockT3* in_blocks,
+                                                           BlockT3* out_blocks,
+                                                           int out_count)
+{
+    int seg = blockIdx.x;
+    if(seg >= out_count) return;
+
+    int begin = offsets[seg];
+    int count = unique_counts[seg];
+    int end   = begin + count;
+    if(begin < 0 || count <= 0 || begin >= N) return;
+    if(end > N) end = N;
+
+    __shared__ Float partial[256 * 9];
+    Float local[9];
+    for(int k = 0; k < 9; ++k)
+        local[k] = Float(0);
+
+    for(int i = begin + threadIdx.x; i < end; i += blockDim.x)
+    {
+        const Float* src = reinterpret_cast<const Float*>(in_blocks + i);
+        for(int k = 0; k < 9; ++k)
+            local[k] += src[k];
+    }
+
+    for(int k = 0; k < 9; ++k)
+        partial[threadIdx.x * 9 + k] = local[k];
+    __syncthreads();
+
+    for(int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+    {
+        if(threadIdx.x < stride)
+        {
+            for(int k = 0; k < 9; ++k)
+                partial[threadIdx.x * 9 + k] += partial[(threadIdx.x + stride) * 9 + k];
+        }
+        __syncthreads();
+    }
+
+    if(threadIdx.x == 0)
+    {
+        Float* dst = reinterpret_cast<Float*>(out_blocks + seg);
+        for(int k = 0; k < 9; ++k)
+            dst[k] = partial[k];
+    }
+}
+
+static __global__ void kernel_segmental_reduce_3x3_hybrid_small(int N,
+                                                                const int* segment_ids,
+                                                                const int* unique_counts,
+                                                                const BlockT3* in_blocks,
+                                                                BlockT3* out_blocks,
+                                                                int out_count,
+                                                                int threshold)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+
+    int seg = segment_ids[i];
+    if(seg < 0 || seg >= out_count) return;
+    if(unique_counts[seg] >= threshold) return;
+
+    const Float* src = reinterpret_cast<const Float*>(in_blocks + i);
+    Float*       dst = reinterpret_cast<Float*>(out_blocks + seg);
+    for(int j = 0; j < 9; ++j)
+        atomicAdd(dst + j, src[j]);
+}
+
+static __global__ void kernel_segmental_reduce_3x3_hybrid_large(int N,
+                                                                const int* unique_counts,
+                                                                const int* offsets,
+                                                                const BlockT3* in_blocks,
+                                                                BlockT3* out_blocks,
+                                                                int out_count,
+                                                                int threshold)
+{
+    int seg = blockIdx.x;
+    if(seg >= out_count) return;
+
+    int count = unique_counts[seg];
+    if(count < threshold) return;
+
+    int begin = offsets[seg];
+    int end   = begin + count;
+    if(begin < 0 || count <= 0 || begin >= N) return;
+    if(end > N) end = N;
+
+    __shared__ Float partial[256 * 9];
+    Float local[9];
+    for(int k = 0; k < 9; ++k)
+        local[k] = Float(0);
+
+    for(int i = begin + threadIdx.x; i < end; i += blockDim.x)
+    {
+        const Float* src = reinterpret_cast<const Float*>(in_blocks + i);
+        for(int k = 0; k < 9; ++k)
+            local[k] += src[k];
+    }
+
+    for(int k = 0; k < 9; ++k)
+        partial[threadIdx.x * 9 + k] = local[k];
+    __syncthreads();
+
+    for(int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+    {
+        if(threadIdx.x < stride)
+        {
+            for(int k = 0; k < 9; ++k)
+                partial[threadIdx.x * 9 + k] += partial[(threadIdx.x + stride) * 9 + k];
+        }
+        __syncthreads();
+    }
+
+    if(threadIdx.x == 0)
+    {
+        Float* dst = reinterpret_cast<Float*>(out_blocks + seg);
+        for(int k = 0; k < 9; ++k)
+            dst[k] = partial[k];
+    }
+}
+
 void launch_segmental_reduce_3x3(int N, const int* segment_ids,
                                   const BlockT3* in_blocks, BlockT3* out_blocks,
                                   int out_count)
@@ -738,6 +943,64 @@ void launch_segmental_reduce_3x3(int N, const int* segment_ids,
     }
 }
 
+void launch_segmental_reduce_3x3_blocked(int N, const int* segment_ids,
+                                         const int* unique_counts,
+                                         const int* offsets,
+                                         const BlockT3* in_blocks,
+                                         BlockT3* out_blocks,
+                                         int out_count)
+{
+    if(corex_matconv_nvidia_seg_reduce_enabled())
+    {
+        corex_log_segment_histogram("3x3", unique_counts, out_count);
+        const int threshold = corex_matconv_seg_threshold();
+        cudaMemsetAsync(out_blocks, 0, out_count * sizeof(BlockT3));
+        corex_matconv_sync_if_needed("segmental_reduce_3x3_hybrid_memset");
+        if(out_count > 0)
+        {
+            {
+                MatconvPhase phase("segmental_reduce_3x3_hybrid_small");
+                kernel_segmental_reduce_3x3_hybrid_small<<<grid_for(N), kBlock>>>(
+                    N, segment_ids, unique_counts, in_blocks, out_blocks, out_count, threshold);
+                corex_matconv_sync_if_needed("segmental_reduce_3x3_hybrid_small");
+            }
+            {
+                MatconvPhase phase("segmental_reduce_3x3_hybrid_large");
+                kernel_segmental_reduce_3x3_hybrid_large<<<out_count, kBlock>>>(
+                    N, unique_counts, offsets, in_blocks, out_blocks, out_count, threshold);
+                corex_matconv_sync_if_needed("segmental_reduce_3x3_hybrid_large");
+            }
+        }
+        return;
+    }
+
+    if(!corex_matconv_block_reduce_enabled())
+    {
+        launch_segmental_reduce_3x3(N, segment_ids, in_blocks, out_blocks, out_count);
+        return;
+    }
+
+    if(corex_matconv_trace())
+    {
+        fmt::println(stderr, "[corex_seg3x3_block] enter N={} out_count={}", N, out_count);
+        std::fflush(stderr);
+    }
+
+    if(out_count > 0)
+    {
+        MatconvPhase phase("segmental_reduce_3x3_blocked");
+        kernel_segmental_reduce_3x3_blocked<<<out_count, kBlock>>>(
+            N, unique_counts, offsets, in_blocks, out_blocks, out_count);
+        cudaError_t e = cudaGetLastError();
+        if(corex_matconv_trace())
+        {
+            fmt::println(stderr, "[corex_seg3x3_block] kernel launch err={}", cudaGetErrorString(e));
+            std::fflush(stderr);
+        }
+        corex_matconv_sync_if_needed("segmental_reduce_3x3_blocked");
+    }
+}
+
 static __global__ void kernel_segmental_reduce_3x1_linear(int N,
                                                           const int* segment_ids,
                                                           const VecT3* in_vecs,
@@ -754,6 +1017,126 @@ static __global__ void kernel_segmental_reduce_3x1_linear(int N,
     Float*       dst = reinterpret_cast<Float*>(out_vecs + seg);
     for(int j = 0; j < 3; ++j)
         atomicAdd(dst + j, src[j]);
+}
+
+static __global__ void kernel_segmental_reduce_3x1_blocked(int N,
+                                                           const int* unique_counts,
+                                                           const int* offsets,
+                                                           const VecT3* in_vecs,
+                                                           VecT3* out_vecs,
+                                                           int out_count)
+{
+    int seg = blockIdx.x;
+    if(seg >= out_count) return;
+
+    int begin = offsets[seg];
+    int count = unique_counts[seg];
+    int end   = begin + count;
+    if(begin < 0 || count <= 0 || begin >= N) return;
+    if(end > N) end = N;
+
+    __shared__ Float partial[256 * 3];
+    Float local[3] = {Float(0), Float(0), Float(0)};
+
+    for(int i = begin + threadIdx.x; i < end; i += blockDim.x)
+    {
+        const Float* src = reinterpret_cast<const Float*>(in_vecs + i);
+        for(int k = 0; k < 3; ++k)
+            local[k] += src[k];
+    }
+
+    for(int k = 0; k < 3; ++k)
+        partial[threadIdx.x * 3 + k] = local[k];
+    __syncthreads();
+
+    for(int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+    {
+        if(threadIdx.x < stride)
+        {
+            for(int k = 0; k < 3; ++k)
+                partial[threadIdx.x * 3 + k] += partial[(threadIdx.x + stride) * 3 + k];
+        }
+        __syncthreads();
+    }
+
+    if(threadIdx.x == 0)
+    {
+        Float* dst = reinterpret_cast<Float*>(out_vecs + seg);
+        for(int k = 0; k < 3; ++k)
+            dst[k] = partial[k];
+    }
+}
+
+static __global__ void kernel_segmental_reduce_3x1_hybrid_small(int N,
+                                                                const int* segment_ids,
+                                                                const int* unique_counts,
+                                                                const VecT3* in_vecs,
+                                                                VecT3* out_vecs,
+                                                                int out_count,
+                                                                int threshold)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+
+    int seg = segment_ids[i];
+    if(seg < 0 || seg >= out_count) return;
+    if(unique_counts[seg] >= threshold) return;
+
+    const Float* src = reinterpret_cast<const Float*>(in_vecs + i);
+    Float*       dst = reinterpret_cast<Float*>(out_vecs + seg);
+    for(int j = 0; j < 3; ++j)
+        atomicAdd(dst + j, src[j]);
+}
+
+static __global__ void kernel_segmental_reduce_3x1_hybrid_large(int N,
+                                                                const int* unique_counts,
+                                                                const int* offsets,
+                                                                const VecT3* in_vecs,
+                                                                VecT3* out_vecs,
+                                                                int out_count,
+                                                                int threshold)
+{
+    int seg = blockIdx.x;
+    if(seg >= out_count) return;
+
+    int count = unique_counts[seg];
+    if(count < threshold) return;
+
+    int begin = offsets[seg];
+    int end   = begin + count;
+    if(begin < 0 || count <= 0 || begin >= N) return;
+    if(end > N) end = N;
+
+    __shared__ Float partial[256 * 3];
+    Float local[3] = {Float(0), Float(0), Float(0)};
+
+    for(int i = begin + threadIdx.x; i < end; i += blockDim.x)
+    {
+        const Float* src = reinterpret_cast<const Float*>(in_vecs + i);
+        for(int k = 0; k < 3; ++k)
+            local[k] += src[k];
+    }
+
+    for(int k = 0; k < 3; ++k)
+        partial[threadIdx.x * 3 + k] = local[k];
+    __syncthreads();
+
+    for(int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+    {
+        if(threadIdx.x < stride)
+        {
+            for(int k = 0; k < 3; ++k)
+                partial[threadIdx.x * 3 + k] += partial[(threadIdx.x + stride) * 3 + k];
+        }
+        __syncthreads();
+    }
+
+    if(threadIdx.x == 0)
+    {
+        Float* dst = reinterpret_cast<Float*>(out_vecs + seg);
+        for(int k = 0; k < 3; ++k)
+            dst[k] = partial[k];
+    }
 }
 
 void launch_segmental_reduce_3x1(int N, const int* segment_ids,
@@ -796,6 +1179,64 @@ void launch_segmental_reduce_3x1(int N, const int* segment_ids,
             fmt::println(stderr, "[corex_seg3x1] kernel sync done");
             std::fflush(stderr);
         }
+    }
+}
+
+void launch_segmental_reduce_3x1_blocked(int N, const int* segment_ids,
+                                         const int* unique_counts,
+                                         const int* offsets,
+                                         const VecT3* in_vecs,
+                                         VecT3* out_vecs,
+                                         int out_count)
+{
+    if(corex_matconv_nvidia_seg_reduce_enabled())
+    {
+        corex_log_segment_histogram("3x1", unique_counts, out_count);
+        const int threshold = corex_matconv_seg_threshold();
+        cudaMemsetAsync(out_vecs, 0, out_count * sizeof(VecT3));
+        corex_matconv_sync_if_needed("segmental_reduce_3x1_hybrid_memset");
+        if(out_count > 0)
+        {
+            {
+                MatconvPhase phase("segmental_reduce_3x1_hybrid_small");
+                kernel_segmental_reduce_3x1_hybrid_small<<<grid_for(N), kBlock>>>(
+                    N, segment_ids, unique_counts, in_vecs, out_vecs, out_count, threshold);
+                corex_matconv_sync_if_needed("segmental_reduce_3x1_hybrid_small");
+            }
+            {
+                MatconvPhase phase("segmental_reduce_3x1_hybrid_large");
+                kernel_segmental_reduce_3x1_hybrid_large<<<out_count, kBlock>>>(
+                    N, unique_counts, offsets, in_vecs, out_vecs, out_count, threshold);
+                corex_matconv_sync_if_needed("segmental_reduce_3x1_hybrid_large");
+            }
+        }
+        return;
+    }
+
+    if(!corex_matconv_block_reduce_enabled())
+    {
+        launch_segmental_reduce_3x1(N, segment_ids, in_vecs, out_vecs, out_count);
+        return;
+    }
+
+    if(corex_matconv_trace())
+    {
+        fmt::println(stderr, "[corex_seg3x1_block] enter N={} out_count={}", N, out_count);
+        std::fflush(stderr);
+    }
+
+    if(out_count > 0)
+    {
+        MatconvPhase phase("segmental_reduce_3x1_blocked");
+        kernel_segmental_reduce_3x1_blocked<<<out_count, kBlock>>>(
+            N, unique_counts, offsets, in_vecs, out_vecs, out_count);
+        cudaError_t e = cudaGetLastError();
+        if(corex_matconv_trace())
+        {
+            fmt::println(stderr, "[corex_seg3x1_block] kernel launch err={}", cudaGetErrorString(e));
+            std::fflush(stderr);
+        }
+        corex_matconv_sync_if_needed("segmental_reduce_3x1_blocked");
     }
 }
 

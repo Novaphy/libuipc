@@ -58,6 +58,35 @@ bool struct_block_precond_stats_enabled()
     return env[0] != '\0' && env[0] != '0';
 }
 
+// Default-on switch for the numerically-stable 12x12 LDLT block-inverse
+// preconditioner that mirrors the NVIDIA path semantically. When enabled,
+// the diagonal Jacobi reciprocal is still computed as a per-DoF safety
+// fallback, which is selected only for bodies whose 12x12 block fails the
+// LDLT SPD pivot test.
+//
+// Rollback knobs:
+// - `UIPC_COREX_ABD_PRECOND_BLOCK_INVERSE=0` disables the block-inverse
+//   path and keeps the legacy Jacobi extract.
+// - `UIPC_COREX_ABD_PRECOND_DIAG_JACOBI=1` is a hard rollback that forces
+//   the legacy Jacobi extract regardless of the block-inverse flag.
+// - `UIPC_COREX_ABD_PRECOND_STRUCT_BLOCK=1` (legacy) takes precedence over
+//   both, since it allocates and uses different buffers.
+bool block_inverse_precond_enabled()
+{
+    if(std::getenv("UIPC_COREX_ABD_PRECOND_DIAG_JACOBI"))
+        return false;
+    const char* env = std::getenv("UIPC_COREX_ABD_PRECOND_BLOCK_INVERSE");
+    if(!env) return true;
+    return env[0] != '\0' && env[0] != '0';
+}
+
+bool block_inverse_precond_stats_enabled()
+{
+    const char* env = std::getenv("UIPC_COREX_ABD_PRECOND_BLOCK_INVERSE_STATS");
+    if(!env) return false;
+    return env[0] != '\0' && env[0] != '0';
+}
+
 __device__ inline Float corex_abs(Float v)
 {
     return v < 0 ? -v : v;
@@ -93,6 +122,203 @@ __device__ bool invert_spd_safe_3x3(const Float* A, Float* inv)
     inv[7] = (b * g - a * h) * inv_det;
     inv[8] = (a * e - b * d) * inv_det;
     return true;
+}
+
+// In-place LDLT factorization for an SPD matrix stored column-major in `A`.
+// On exit, A holds the LDLT factors:
+//   - the lower triangle of A (i > j) holds L[i][j] (unit diagonal of L is implicit)
+//   - the diagonal of A holds D[k]
+//   - the upper triangle (i < j) is left untouched
+//
+// Returns true on success. Returns false if any pivot D[k] is below the
+// SPD safety threshold (relative to the largest input diagonal). Callers
+// should treat false as "fall back to plain Jacobi for this body".
+//
+// The threshold uses the input matrix diagonal as the scale reference, and
+// also bounds the relative threshold from below by `1e-30` so that bodies
+// with extremely large Hessian magnitudes still get a non-degenerate test.
+template<int N>
+__device__ bool corex_ldlt_factorize_inplace(Float* A)
+{
+    Float max_diag_abs = static_cast<Float>(0);
+    for(int k = 0; k < N; ++k)
+    {
+        Float d  = A[k * N + k];
+        Float ad = d < static_cast<Float>(0) ? -d : d;
+        if(ad > max_diag_abs) max_diag_abs = ad;
+    }
+
+    Float eps = max_diag_abs * static_cast<Float>(1e-10);
+    if(eps < static_cast<Float>(1e-30)) eps = static_cast<Float>(1e-30);
+
+    for(int k = 0; k < N; ++k)
+    {
+        Float Dk = A[k * N + k];
+        for(int j = 0; j < k; ++j)
+        {
+            Float Lkj = A[j * N + k];
+            Float Dj  = A[j * N + j];
+            Dk -= Lkj * Lkj * Dj;
+        }
+        if(Dk < eps) return false;
+        A[k * N + k] = Dk;
+
+        for(int i = k + 1; i < N; ++i)
+        {
+            Float Lik = A[k * N + i];
+            for(int j = 0; j < k; ++j)
+            {
+                Float Lij = A[j * N + i];
+                Float Lkj = A[j * N + k];
+                Float Dj  = A[j * N + j];
+                Lik -= Lij * Lkj * Dj;
+            }
+            A[k * N + i] = Lik / Dk;
+        }
+    }
+    return true;
+}
+
+// Solve A*x = b given the in-place LDLT factors of A. Internally uses two
+// length-N stack vectors for the forward/backward substitution intermediates.
+template<int N>
+__device__ void corex_ldlt_solve(const Float* A, const Float* b, Float* x)
+{
+    Float w[N];
+    for(int i = 0; i < N; ++i)
+    {
+        Float s = b[i];
+        for(int j = 0; j < i; ++j)
+            s -= A[j * N + i] * w[j];
+        w[i] = s;
+    }
+
+    Float y[N];
+    for(int i = 0; i < N; ++i)
+        y[i] = w[i] / A[i * N + i];
+
+    for(int i = N - 1; i >= 0; --i)
+    {
+        Float s = y[i];
+        for(int j = i + 1; j < N; ++j)
+            s -= A[i * N + j] * x[j];
+        x[i] = s;
+    }
+}
+
+// Compute A^{-1} as a column-major dense matrix from the in-place LDLT
+// factors of A. Each column of the inverse is recovered by solving against
+// a unit basis vector; this avoids constructing L^{-1} explicitly and
+// keeps the solve numerically stable.
+template<int N>
+__device__ void corex_ldlt_explicit_inverse(const Float* A, Float* invA)
+{
+    for(int j = 0; j < N; ++j)
+    {
+        Float ej[N];
+        Float xj[N];
+        for(int i = 0; i < N; ++i)
+            ej[i] = (i == j) ? static_cast<Float>(1) : static_cast<Float>(0);
+        corex_ldlt_solve<N>(A, ej, xj);
+        for(int i = 0; i < N; ++i)
+            invA[j * N + i] = xj[i];
+    }
+}
+
+// Build a 12x12 SPD block inverse for each ABD body using LDLT factorization.
+// Mirrors the algorithmic intent of the NVIDIA path
+// (`muda::eigen::inverse(diag_hessian(i))`), but uses an SPD-safe LDLT with
+// an explicit pivot test instead of the unpivoted Gauss elimination that
+// proved unstable on CoreX.
+//
+// For bodies that fail the SPD pivot test we still write a usable inverse:
+// a diagonal matrix containing the per-DoF Jacobi reciprocals, so the apply
+// path remains an unconditional 12x12 mat-vec.
+//
+// `block_status` records 1 for LDLT-accepted bodies and 0 for Jacobi
+// fallback, so the host can log accepted/rejected ratios in a diagnostic
+// pass without re-reading the Hessian.
+__global__ void kernel_abd_precond_extract_block_inverse(
+    int n,
+    const Float* diag_hessian,
+    Float*       diag_inv,
+    Float*       diag_recip,
+    int*         block_status,
+    Float        min_abs_diag,
+    Float        max_abs_diag)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= n) return;
+
+    constexpr int N = 12;
+    Float A[N * N];
+
+    for(int c = 0; c < N; ++c)
+    {
+        for(int r = 0; r < N; ++r)
+        {
+            Float h_rc = diag_hessian[i * 144 + c * N + r];
+            Float h_cr = diag_hessian[i * 144 + r * N + c];
+            A[c * N + r] = static_cast<Float>(0.5) * (h_rc + h_cr);
+        }
+    }
+
+    for(int k = 0; k < N; ++k)
+    {
+        Float d     = A[k * N + k];
+        Float abs_d = d < 0 ? -d : d;
+        if(min_abs_diag > 0 && abs_d > 0 && abs_d < min_abs_diag)
+            d = d < 0 ? -min_abs_diag : min_abs_diag;
+        if(max_abs_diag > 0 && abs_d > max_abs_diag)
+            d = d < 0 ? -max_abs_diag : max_abs_diag;
+        diag_recip[i * N + k] = (d != static_cast<Float>(0))
+                                    ? (static_cast<Float>(1) / d)
+                                    : static_cast<Float>(0);
+    }
+
+    bool ok = corex_ldlt_factorize_inplace<N>(A);
+
+    if(ok)
+    {
+        Float invA[N * N];
+        corex_ldlt_explicit_inverse<N>(A, invA);
+        for(int idx = 0; idx < N * N; ++idx)
+            diag_inv[i * 144 + idx] = invA[idx];
+        if(block_status) block_status[i] = 1;
+    }
+    else
+    {
+        for(int idx = 0; idx < N * N; ++idx)
+            diag_inv[i * 144 + idx] = static_cast<Float>(0);
+        for(int k = 0; k < N; ++k)
+            diag_inv[i * 144 + k * N + k] = diag_recip[i * N + k];
+        if(block_status) block_status[i] = 0;
+    }
+}
+
+// Apply z = A^{-1} * r as an unconditional 12x12 mat-vec per body. This is
+// the runtime-hot kernel that runs once per PCG iteration, so it must stay
+// branch-free (the SPD pivot fallback is folded into `diag_inv` at extract
+// time so the apply path is identical for accepted and fallback bodies).
+__global__ void kernel_abd_block_inverse_apply(
+    int n, const Float* diag_inv, const Float* r, Float* z, const IndexT* converged)
+{
+    if(*converged != 0) return;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= n) return;
+
+    constexpr int N = 12;
+    Float ri[N];
+    for(int k = 0; k < N; ++k)
+        ri[k] = r[i * N + k];
+
+    for(int row = 0; row < N; ++row)
+    {
+        Float s = static_cast<Float>(0);
+        for(int col = 0; col < N; ++col)
+            s += diag_inv[i * 144 + col * N + row] * ri[col];
+        z[i * N + row] = s;
+    }
 }
 
 __global__ void kernel_abd_precond_extract(int          n,
@@ -196,6 +422,8 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
     muda::DeviceBuffer<Float> struct_block_inv; // 4 conservative 3x3 inverses per body
     muda::DeviceBuffer<int> struct_block_mask;
     bool struct_block_enabled = false;
+    muda::DeviceBuffer<int> block_inv_status; // 1 = LDLT accepted, 0 = Jacobi fallback
+    bool block_inverse_enabled = false;
 
     virtual void do_build(BuildInfo& info) override
     {
@@ -234,6 +462,8 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
                 Float max_abs_diag = std::numeric_limits<Float>::max();
                 bool  clamp_enabled = parse_precond_diag_clamp(min_abs_diag, max_abs_diag);
                 struct_block_enabled = struct_block_precond_enabled();
+                block_inverse_enabled =
+                    !struct_block_enabled && block_inverse_precond_enabled();
                 int blocks = (n + 255) / 256;
                 if(struct_block_enabled)
                 {
@@ -245,18 +475,59 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
                     struct_block_inv.resize(0);
                     struct_block_mask.resize(0);
                 }
-                kernel_abd_precond_extract<<<blocks, 256>>>(
-                    n,
-                    (const Float*)diag_hessian.data(),
-                    (Float*)jacobi_recip.data(),
-                    min_abs_diag,
-                    max_abs_diag,
-                    struct_block_enabled ? 1 : 0,
-                    struct_block_enabled ? (Float*)struct_block_inv.data() : nullptr,
-                    struct_block_enabled ? (int*)struct_block_mask.data() : nullptr);
+                if(block_inverse_enabled)
+                {
+                    diag_inv.resize(n);
+                    block_inv_status.resize(n);
+                    // Smaller block size: each thread holds a 12x12 working matrix
+                    // (>= 144 doubles) plus LDLT temporaries. Keeping the block at
+                    // 64 threads avoids excessive local-memory spilling versus the
+                    // 256-thread Jacobi extract above.
+                    constexpr int kBlk = 64;
+                    int  ldlt_blocks   = (n + kBlk - 1) / kBlk;
+                    kernel_abd_precond_extract_block_inverse<<<ldlt_blocks, kBlk>>>(
+                        n,
+                        (const Float*)diag_hessian.data(),
+                        (Float*)diag_inv.data(),
+                        (Float*)jacobi_recip.data(),
+                        (int*)block_inv_status.data(),
+                        min_abs_diag,
+                        max_abs_diag);
+                }
+                else
+                {
+                    block_inv_status.resize(0);
+                    kernel_abd_precond_extract<<<blocks, 256>>>(
+                        n,
+                        (const Float*)diag_hessian.data(),
+                        (Float*)jacobi_recip.data(),
+                        min_abs_diag,
+                        max_abs_diag,
+                        struct_block_enabled ? 1 : 0,
+                        struct_block_enabled ? (Float*)struct_block_inv.data() : nullptr,
+                        struct_block_enabled ? (int*)struct_block_mask.data() : nullptr);
+                }
                 checkCudaErrors(cudaGetLastError());
                 if(std::getenv("UIPC_COREX_ABD_PRECOND_SKIP_SYNC") == nullptr)
                     checkCudaErrors(cudaDeviceSynchronize());
+                if(block_inverse_enabled
+                   && (block_inverse_precond_stats_enabled()
+                       || std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM")))
+                {
+                    std::vector<int> h_status(n);
+                    cudaMemcpy(h_status.data(),
+                               block_inv_status.data(),
+                               sizeof(int) * h_status.size(),
+                               cudaMemcpyDeviceToHost);
+                    SizeT accepted = 0;
+                    for(int v : h_status)
+                        accepted += v ? 1 : 0;
+                    SizeT rejected = static_cast<SizeT>(n) - accepted;
+                    logger::info("[corex_abd_precond_block_inv] bodies={} accepted={} rejected={}",
+                                 n,
+                                 accepted,
+                                 rejected);
+                }
                 if(clamp_enabled || std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM"))
                     logger::info("[corex_precond_diag] bodies={} clamp={} min_abs_diag={} max_abs_diag={}",
                                  n,
@@ -337,7 +608,16 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
             if(n > 0)
             {
                 int blocks = (n + 255) / 256;
-                if(struct_block_enabled && struct_block_inv.size() > 0)
+                if(block_inverse_enabled && diag_inv.size() > 0)
+                {
+                    kernel_abd_block_inverse_apply<<<blocks, 256>>>(
+                        n,
+                        (const Float*)diag_inv.data(),
+                        (const Float*)info.r().data(),
+                        (Float*)info.z().data(),
+                        (const IndexT*)converged.data());
+                }
+                else if(struct_block_enabled && struct_block_inv.size() > 0)
                 {
                     kernel_abd_struct_block_apply<<<blocks, 256>>>(
                         n,
