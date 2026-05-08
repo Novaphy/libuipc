@@ -54,3 +54,8 @@ tools/cuda_api_inventory_out/
 # Tool-internal build artifacts
 tools/*/build_*/
 tools/*/logs/
+
+/PACKAGE-README.md
+/SUMMARY.md
+/SUMMARY_*.md
+/docs/
