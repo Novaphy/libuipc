@@ -4,9 +4,7 @@
 #include <contact_system/global_contact_manager.h>
 #include <sim_engine.h>
 #include <utils/corex_phase_profile.h>
-#include <muda/check/check_cuda_errors.h>
 #include <algorithm>
-#include <cstdlib>
 
 namespace uipc::backend
 {
@@ -28,37 +26,6 @@ class SimSystemCreator<cuda::GlobalTrajectoryFilter>
 namespace uipc::backend::cuda
 {
 REGISTER_SIM_SYSTEM(GlobalTrajectoryFilter);
-
-namespace
-{
-__global__ void kernel_min_toi(int n, const Float* tois, Float* out)
-{
-    __shared__ Float block_min[256];
-    int tid = threadIdx.x;
-    int i   = blockIdx.x * blockDim.x + threadIdx.x;
-
-    Float local = 1.0f;
-    while(i < n)
-    {
-        Float v = tois[i];
-        if(v == 0.0f)
-            v = 1.0f;
-        local = min(local, v);
-        i += blockDim.x * gridDim.x;
-    }
-
-    block_min[tid] = local;
-    __syncthreads();
-    for(int stride = blockDim.x / 2; stride > 0; stride >>= 1)
-    {
-        if(tid < stride)
-            block_min[tid] = min(block_min[tid], block_min[tid + stride]);
-        __syncthreads();
-    }
-    if(tid == 0)
-        atomicMin(reinterpret_cast<int*>(out), __float_as_int(block_min[0]));
-}
-}  // namespace
 
 void GlobalTrajectoryFilter::do_build()
 {
@@ -83,7 +50,6 @@ void GlobalTrajectoryFilter::Impl::init()
 {
     auto filter_view = filters.view();
     tois.resize(filter_view.size());
-    min_toi.resize(1);
     h_tois.resize(filter_view.size());
     // Default to "no restriction": toi = 1.0.
     // Individual filters may reduce it when they detect upcoming impacts.
@@ -186,21 +152,10 @@ Float GlobalTrajectoryFilter::Impl::filter_toi(Float alpha)
         }
         h_min_toi = *std::min_element(h_tois.begin(), h_tois.end());
     }
-    else if(std::getenv("UIPC_COREX_TOI_DEVICE_MIN") == nullptr)
+    else
     {
         tois.view().copy_to(h_tois.data());
         h_min_toi = *std::min_element(h_tois.begin(), h_tois.end());
-    }
-    else
-    {
-        Float init = 1.0f;
-        checkCudaErrors(cudaMemcpy(min_toi.data(), &init, sizeof(Float), cudaMemcpyHostToDevice));
-        constexpr int block = 256;
-        int n = static_cast<int>(filter_view.size());
-        int grid = std::max(1, std::min((n + block - 1) / block, 8));
-        kernel_min_toi<<<grid, block>>>(n, tois.data(), min_toi.data());
-        checkCudaErrors(cudaGetLastError());
-        checkCudaErrors(cudaMemcpy(&h_min_toi, min_toi.data(), sizeof(Float), cudaMemcpyDeviceToHost));
     }
 
     auto ret = h_min_toi < 1.0 ? h_min_toi : 1.0;

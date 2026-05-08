@@ -464,30 +464,6 @@ constexpr bool PrintKernelZeroDistance = false;
 
 namespace
 {
-bool corex_contact_early_active_filter_enabled()
-{
-    return std::getenv("UIPC_COREX_CONTACT_EARLY_ACTIVE_FILTER") != nullptr;
-}
-
-Float corex_contact_early_active_scale()
-{
-    const char* env = std::getenv("UIPC_COREX_CONTACT_EARLY_ACTIVE_SCALE");
-    if(!env || env[0] == '\0')
-        return static_cast<Float>(4.0);
-
-    char*  end = nullptr;
-    double v   = std::strtod(env, &end);
-    if(end == env || v < 1.0)
-        return static_cast<Float>(4.0);
-    return static_cast<Float>(v);
-}
-
-bool corex_contact_early_active_stats_enabled()
-{
-    return std::getenv("UIPC_COREX_CONTACT_EARLY_ACTIVE_STATS") != nullptr
-        || std::getenv("UIPC_COREX_CONTACT_EARLY_ACTIVE_FILTER") != nullptr;
-}
-
 bool corex_selected_set_diag_enabled()
 {
     const char* env = std::getenv("UIPC_COREX_SELECTED_SET_DIAG");
@@ -754,8 +730,6 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
     auto Es      = info.surf_edges();
     auto Fs      = info.surf_triangles();
     const bool trace_simplex_filter = (std::getenv("UIPC_COREX_TRACE_SIMPLEX_FILTER") != nullptr);
-    const bool  early_active_filter = corex_contact_early_active_filter_enabled();
-    const Float early_active_scale  = corex_contact_early_active_scale();
 
     if(trace_simplex_filter)
     {
@@ -1214,9 +1188,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
              v2b = info.v2b().viewer().name("v2b"),
              body_self_collision = info.body_self_collision().viewer().name("body_self_collision"),
              d_hats = info.d_hats().viewer().name("d_hats"),
-             alpha  = alpha,
-             early_active_filter = early_active_filter,
-             early_active_scale = early_active_scale] __device__(IndexT i, IndexT j)
+             alpha  = alpha] __device__(IndexT i, IndexT j)
             {
                 const auto& E0 = Es(i);
                 const auto& E1 = Es(j);
@@ -1271,28 +1243,6 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
                        E0_0, E0_1, E1_0, E1_1, dE0_0, dE0_1, dE1_0, dE1_1, expand))
                     return false;
 
-                if(early_active_filter)
-                {
-                    Vector2 range = D_range(thickness, d_hat);
-                    Vector4i flag0 =
-                        distance::edge_edge_distance_flag(E0_0, E0_1, E1_0, E1_1);
-                    Float D0;
-                    distance::edge_edge_distance2(flag0, E0_0, E0_1, E1_0, E1_1, D0);
-
-                    Vector3 E0_0t = E0_0 + dE0_0;
-                    Vector3 E0_1t = E0_1 + dE0_1;
-                    Vector3 E1_0t = E1_0 + dE1_0;
-                    Vector3 E1_1t = E1_1 + dE1_1;
-                    Vector4i flag1 =
-                        distance::edge_edge_distance_flag(E0_0t, E0_1t, E1_0t, E1_1t);
-                    Float D1;
-                    distance::edge_edge_distance2(flag1, E0_0t, E0_1t, E1_0t, E1_1t, D1);
-
-                    Float conservative_upper = range.y() * early_active_scale;
-                    if(D0 >= conservative_upper && D1 >= conservative_upper)
-                        return false;
-                }
-
                 return true;
             },
             candidate_AllE_AllE_pairs);
@@ -1317,9 +1267,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
              v2b = info.v2b().viewer().name("v2b"),
              body_self_collision = info.body_self_collision().viewer().name("body_self_collision"),
              d_hats = info.d_hats().viewer().name("d_hats"),
-             alpha  = alpha,
-             early_active_filter = early_active_filter,
-             early_active_scale = early_active_scale] __device__(IndexT i, IndexT j)
+             alpha  = alpha] __device__(IndexT i, IndexT j)
             {
                 auto V = Vs(i);
                 auto F = Fs(j);
@@ -1375,28 +1323,6 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
                 if(!distance::point_triangle_ccd_broadphase(P, F0, F1, F2, dP, dF0, dF1, dF2, expand))
                     return false;
 
-                if(early_active_filter)
-                {
-                    Vector2 range = D_range(thickness, d_hat);
-                    Vector4i flag0 =
-                        distance::point_triangle_distance_flag(P, F0, F1, F2);
-                    Float D0;
-                    distance::point_triangle_distance2(flag0, P, F0, F1, F2, D0);
-
-                    Vector3 Pt  = P + dP;
-                    Vector3 F0t = F0 + dF0;
-                    Vector3 F1t = F1 + dF1;
-                    Vector3 F2t = F2 + dF2;
-                    Vector4i flag1 =
-                        distance::point_triangle_distance_flag(Pt, F0t, F1t, F2t);
-                    Float D1;
-                    distance::point_triangle_distance2(flag1, Pt, F0t, F1t, F2t, D1);
-
-                    Float conservative_upper = range.y() * early_active_scale;
-                    if(D0 >= conservative_upper && D1 >= conservative_upper)
-                        return false;
-                }
-
                 return true;
             },
             candidate_AllP_AllT_pairs);
@@ -1418,7 +1344,6 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
     using namespace muda;
     const bool trace_filter_active_diag =
         (std::getenv("UIPC_COREX_TRACE_FILTER_ACTIVE_DIAG") != nullptr);
-    const bool early_active_stats = corex_contact_early_active_stats_enabled();
     const bool selected_set_diag = corex_selected_set_diag_enabled();
     const bool selected_set_hash_diag = corex_selected_set_hash_diag_enabled();
     const bool view_slice_output = corex_filter_view_slice_enabled();
@@ -1808,24 +1733,6 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
         PE_count = selected_PE_count;
         PT_count = selected_PT_count;
         EE_count = selected_EE_count;
-
-        if(early_active_stats)
-        {
-            static int early_active_log_call = 0;
-            if(early_active_log_call < 10 || (early_active_log_call % 50 == 0))
-            {
-                spdlog::info("[corex_contact_early_stats] PP_cands={} CodimPE_cands={} PT_cands={} EE_cands={} selected_PP={} selected_PE={} selected_PT={} selected_EE={}",
-                             static_cast<int>(N_PCoimP),
-                             static_cast<int>(N_CodimPE),
-                             static_cast<int>(N_PTs),
-                             static_cast<int>(N_EEs),
-                             PP_count,
-                             PE_count,
-                             PT_count,
-                             EE_count);
-            }
-            ++early_active_log_call;
-        }
 
         if(selected_set_diag)
         {

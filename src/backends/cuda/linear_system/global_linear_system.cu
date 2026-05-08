@@ -35,6 +35,18 @@ bool corex_matrix_row_hotspot_diag_enabled()
     const char* env = std::getenv("UIPC_COREX_MATRIX_ROW_HOTSPOT_DIAG");
     return env && env[0] != '\0' && env[0] != '0';
 }
+
+bool corex_env_enabled(const char* name)
+{
+    const char* env = std::getenv(name);
+    return env && env[0] != '\0' && env[0] != '0';
+}
+
+bool corex_linear_sync_enabled(const char* skip_env)
+{
+    return !corex_env_enabled("UIPC_COREX_LINEAR_SKIP_SYNC")
+           && !corex_env_enabled(skip_env);
+}
 }  // namespace
 
 SizeT GlobalLinearSystem::dof_count() const
@@ -545,7 +557,8 @@ void GlobalLinearSystem::Impl::build_linear_system()
         logger::info("[corex_trace][precond_asm] pre-precond sync begin");
     trace("pre-precond sync: begin");
     profile_t0 = corex_profile::now_ms();
-    checkCudaErrors(cudaDeviceSynchronize());
+    if(corex_linear_sync_enabled("UIPC_COREX_SKIP_PRE_PRECOND_SYNC"))
+        checkCudaErrors(cudaDeviceSynchronize());
     corex_profile::log_phase("linear",
                              "pre_preconditioner_sync",
                              -1,
@@ -572,7 +585,8 @@ void GlobalLinearSystem::Impl::build_linear_system()
     if(corex_trace)
         logger::info("[corex_trace][precond_asm] post-precond sync begin");
     profile_t0 = corex_profile::now_ms();
-    checkCudaErrors(cudaDeviceSynchronize());
+    if(corex_linear_sync_enabled("UIPC_COREX_SKIP_POST_PRECOND_SYNC"))
+        checkCudaErrors(cudaDeviceSynchronize());
     corex_profile::log_phase("linear",
                              "post_preconditioner_sync",
                              -1,
@@ -835,7 +849,7 @@ void GlobalLinearSystem::Impl::solve_linear_system()
     if(corex_trace)
         logger::info("[corex_trace] solve_linear_system: pre-sync");
     auto profile_t0 = corex_profile::now_ms();
-    if(std::getenv("UIPC_COREX_SKIP_PRE_PCG_SYNC") == nullptr)
+    if(corex_linear_sync_enabled("UIPC_COREX_SKIP_PRE_PCG_SYNC"))
         checkCudaErrors(cudaDeviceSynchronize());
     corex_profile::log_phase("linear",
                              "pre_pcg_sync",

@@ -1,6 +1,6 @@
 # CoreX 稳定有效优化汇总
 
-日期：2026-05-05
+日期：2026-05-05，更新至 2026-05-07
 
 ## 文档目的
 
@@ -246,6 +246,90 @@
 - `UIPC_COREX_ABD_DYTOPO_SERIAL=1`
 - `UIPC_COREX_ABD_DYTOPO_PARALLEL=0`
 
+### 9. Triangle AABB build 同步保守移除
+
+来源报告：
+
+- `corex-fps-improvement-report-2026-05-06.md`
+- `corex-next-round-aabb-guard-report-2026-05-06.md`
+- `corex-linear-quality-next-round-report-2026-05-06.md`
+
+有效改动：
+
+- CoreX `StacklessBVHSimplexTrajectoryFilter` 默认跳过 triangle AABB build 后的全设备同步。
+- 该改动只移除 triangle 阶段同步，保留 point/edge 阶段的保守同步；这比 `UIPC_COREX_FILTER_AABB_ASYNC=1` 全量异步更接近可默认化的风险边界。
+
+验证与收益：
+
+- correctness gates 通过：`simple90`、`simple300`、`stack120`。
+- 同源默认 baseline：
+  - `wb400`：`196s`，PCG sum `168525`，PCG max `178`
+- triangle-only AABB async 默认化验证：
+  - `wb150`：`53s`，PCG sum `46491`，PCG max `179`
+  - `wb400`：`186s`，PCG sum `172834`，PCG max `176`
+  - 未发现 NaN、exception、assert、abort 或 max-iteration marker。
+- 后续轻量 A/B 也确认 triangle-only mask 有真实 wall-time upside，但完整全异步会引入 PCG outlier，因此只保留这一项保守默认。
+
+回退/诊断开关：
+
+- `UIPC_COREX_FILTER_AABB_ASYNC_MASK=0`
+- `UIPC_COREX_FILTER_AABB_ASYNC=1` 仍只适合诊断，不默认。
+
+### 10. ABD 12x12 block-inverse 预条件子默认化
+
+来源报告：
+
+- `corex-block-inverse-precond-report-2026-05-06.md`
+
+有效改动：
+
+- 将 CoreX ABD diagonal preconditioner 从逐自由度 Jacobi reciprocal 升级为每个 ABD body 一个完整 SPD `12x12` block inverse。
+- 实现使用纯 `Float` LDLT factorization、pivot rejection 和显式 inverse construction；失败 body 回退到同一 `diag_inv` buffer 内的 Jacobi diagonal inverse。
+- Apply 阶段使用 branch-free `12x12` mat-vec，恢复 NVIDIA 路径中“块逆预条件”的算法形态，而不是只优化单个 kernel。
+
+验证与收益：
+
+- correctness gates 通过：
+  - `simple90` / `simple300` / `stack120`：无 NaN、exception、`reached max_iter`
+- `wb400` 同源 A/B：
+  - Jacobi：`167s`，PCG calls `2558`，PCG sum `168717`，PCG max `183`
+  - Block-inv：`146s`，PCG calls `2428`，PCG sum `88478`，PCG max `122`
+  - wall `-12.6%`，PCG iter sum `-47.6%`，PCG max `-33.3%`
+- 回归：
+  - `domino600`：`85s -> 51s`
+  - `wb800`：`326s` 完成 800 frames，`0` rejected bodies，无失败标记
+- 最新默认路径复跑：
+  - `wb400`：`143.956s`
+  - PCG calls `2457`，PCG sum `88441`，PCG max `122`
+  - 失败标记 `0`
+
+回退开关：
+
+- `UIPC_COREX_ABD_PRECOND_BLOCK_INVERSE=0`
+- `UIPC_COREX_ABD_PRECOND_DIAG_JACOBI=1`
+
+### 11. PCG pinned scalar readback 默认化
+
+来源：
+
+- 后续 PCG scalar readback 优化与 2026-05-07 默认路径复测。
+
+有效改动：
+
+- CoreX PCG 的 dot/dotnorm reduction 尾部使用 pinned host scalar slot 做 `cudaMemcpyAsync`，再用一次 stream sync 取回 scalar。
+- 该路径替代旧的 `cudaDeviceSynchronize()` 加 `DeviceVar<Float>::operator Float()` 隐式同步读回，减少每次 scalar reduction 尾部的 host-device 边界成本。
+- 它不改变 PCG 数值公式、收敛判据或矩阵/preconditioner 内容，因此风险低于 fused SpMV-dot、跳过 SpMV sync 或残差替换。
+
+验证与收益：
+
+- 默认开启后，`wb80` 与 block-inverse baseline 保持同一稳定区间。
+- 最新 `wb400` 默认复跑在 pinned scalar 默认开启下得到 `143.956s`，优于此前 `146s` 级别 block-inverse baseline。
+- 该收益是小幅清障型收益，不是 PCG iteration count 的主要下降来源；主要 iteration 降幅来自第 10 节的 block-inverse preconditioner。
+
+回退开关：
+
+- `UIPC_COREX_PCG_PINNED_SCALAR=0`
+
 ## 明确排除的非稳定默认候选
 
 以下路径是有价值的实验或诊断，但根据当前报告不能计入“稳定有效默认优化”：
@@ -260,7 +344,18 @@
 - ABD BDF1 energy/GH、tolerance、vertex、body-iota GPU 路径：正确性通过，但长跑 wall 或 PCG/Newton 指标不支持默认化。
 - Contact early-active filtering：减少部分 raw candidates，但 wall 和 PCG 变差。
 - PE diagonal regularization、PE kappa scaling、后续 SPD diagonal boosting：局部或短跑信号不满足稳定 `wb400` / PCG-max 标准。
-- Structured/block preconditioner：诊断价值保留，但当前没有稳定默认收益记录。
+- 早期 3x3 structured/block preconditioner：诊断价值保留，但没有稳定默认收益记录；不同于第 10 节已默认化的完整 `12x12` block-inverse。
+- device double mixed precision：`LDLT_DOUBLE` / `PCG_REDUCE_DOUBLE` 在 `simple90` 或 `wb80` 冒烟阶段出现 NaN/Inf/max-iter，已删除或保持非生产路径。
+- float-only scaled LDLT 与 PCG residual replacement：稳定但 `wb150`/`wb80` 收益接近噪声，未默认化。
+- CPU fallback GPU migration 全 opt-in 组合：
+  - `UIPC_COREX_ORTHO_POTENTIAL_GPU=1`
+  - `UIPC_COREX_ABD_ENERGY_GPU=1`
+  - `UIPC_COREX_ABD_TOLERANCE_GPU=1`
+  - `UIPC_COREX_TOI_GPU=1`
+  - `UIPC_COREX_FILTER_TOI_SKIP_PRE_SYNC=1`
+  - `UIPC_COREX_LINEAR_SKIP_SYNC=1`
+  - `UIPC_COREX_DYTOPO_UPPER_BOUND_COMPACTION=1`
+  - `wb400` 为 `160.741s`，PCG sum `99412`，慢于默认 block-inverse 路径 `143.956s` / PCG sum `88441`，因此不能默认化。
 
 ## 稳定默认路径演进时间线
 
@@ -273,6 +368,9 @@
 5. PCG fused `rz/norm` 后，v15 default 从 `319s` 到 `296s`。
 6. `filter_active` 等价去同步后，默认回归中 `wrecking_ball400` 约 `288s`。
 7. ABD DyTopo 并行 assembly 是后续最明确的大收益，`wrecking_ball400` 约 `180s`。
+8. Triangle AABB build 同步保守移除后，`wrecking_ball400` 约 `186s`，但全 AABB async 因 PCG outlier 不默认。
+9. ABD `12x12` block-inverse preconditioner 默认化后，`wrecking_ball400` 从 `167s` 到 `146s`，PCG sum 从 `168717` 降到 `88478`。
+10. PCG pinned scalar readback 默认开启后，最新默认复跑 `wrecking_ball400` 为 `143.956s`，是当前 CoreX 默认路径最好记录。
 
 ## 当前稳定优化的共同特征
 
@@ -284,9 +382,12 @@
 - 当 CoreX 兼容适配额外引入 contact 或 conversion 工作时，尽量恢复到 NVIDIA 更接近的算法形态。
 
 后续报告已经显示，继续做大范围环境变量 sweep 的收益有限。剩余差距主要与高 PE/EE contact load、matrix row imbalance 和 PCG iteration count 相关，新的默认候选需要围绕这些长跑指标验证，而不能只看 `wb80/wb150` 短跑 wall time。
+
+5 月 6-7 日的结果还说明：把 CPU fallback 机械地搬到 GPU 不一定变快。NVIDIA 路径本身也会保留少量 host scalar / small-array 边界；真正有效的是恢复 NVIDIA 的算法形态（例如 ABD block inverse），或消除明确的 CoreX-only 串行热路径，而不是无条件消除所有 D2H。
+
 # CoreX Stable Effective Optimizations Summary
 
-Date: 2026-05-05
+Date: 2026-05-05, updated through 2026-05-07
 
 ## Purpose
 
@@ -551,6 +652,104 @@ Rollback:
 - `UIPC_COREX_ABD_DYTOPO_SERIAL=1`
 - `UIPC_COREX_ABD_DYTOPO_PARALLEL=0`
 
+### 9. Conservative Triangle AABB Build Sync Removal
+
+Source reports:
+
+- `corex-fps-improvement-report-2026-05-06.md`
+- `corex-next-round-aabb-guard-report-2026-05-06.md`
+- `corex-linear-quality-next-round-report-2026-05-06.md`
+
+Effective change:
+
+- CoreX now skips the device-wide synchronization after triangle AABB build in
+  `StacklessBVHSimplexTrajectoryFilter` by default.
+- This only removes the triangle-stage sync while keeping point/edge stages
+  conservative. It is much narrower than full `UIPC_COREX_FILTER_AABB_ASYNC=1`.
+
+Validation and impact:
+
+- Correctness gates passed: `simple90`, `simple300`, `stack120`.
+- Same-source default baseline:
+  - `wb400`: `196s`, PCG sum `168525`, PCG max `178`
+- Defaulted triangle-only AABB async:
+  - `wb150`: `53s`, PCG sum `46491`, PCG max `179`
+  - `wb400`: `186s`, PCG sum `172834`, PCG max `176`
+  - no NaN, exception, assert, abort, or max-iteration markers.
+- Later lightweight A/B confirmed real wall-time upside from triangle-only mask,
+  while full AABB async produced PCG outliers and stayed diagnostic-only.
+
+Rollback/diagnostic controls:
+
+- `UIPC_COREX_FILTER_AABB_ASYNC_MASK=0`
+- `UIPC_COREX_FILTER_AABB_ASYNC=1` remains diagnostic-only.
+
+### 10. ABD 12x12 Block-Inverse Preconditioner Default
+
+Source report:
+
+- `corex-block-inverse-precond-report-2026-05-06.md`
+
+Effective change:
+
+- Upgraded the CoreX ABD diagonal preconditioner from per-DoF Jacobi reciprocals
+  to one full SPD `12x12` block inverse per ABD body.
+- The implementation uses pure `Float` LDLT factorization, pivot rejection, and
+  explicit inverse construction. Rejected bodies fall back to Jacobi inside the
+  same `diag_inv` buffer.
+- The apply path is a branch-free `12x12` mat-vec, restoring the NVIDIA-style
+  block-inverse algorithmic choice instead of only optimizing a single kernel.
+
+Validation and impact:
+
+- Correctness gates passed:
+  - `simple90` / `simple300` / `stack120`: no NaN, exception, or
+    `reached max_iter`.
+- Same-build `wb400` A/B:
+  - Jacobi: `167s`, PCG calls `2558`, PCG sum `168717`, PCG max `183`
+  - Block-inv: `146s`, PCG calls `2428`, PCG sum `88478`, PCG max `122`
+  - wall `-12.6%`, PCG iter sum `-47.6%`, PCG max `-33.3%`
+- Regression:
+  - `domino600`: `85s -> 51s`
+  - `wb800`: `326s` for 800 frames, `0` rejected bodies, no failure markers
+- Latest default rerun:
+  - `wb400`: `143.956s`
+  - PCG calls `2457`, PCG sum `88441`, PCG max `122`
+  - failure markers `0`
+
+Rollback:
+
+- `UIPC_COREX_ABD_PRECOND_BLOCK_INVERSE=0`
+- `UIPC_COREX_ABD_PRECOND_DIAG_JACOBI=1`
+
+### 11. PCG Pinned Scalar Readback Default
+
+Source:
+
+- Follow-up PCG scalar-readback optimization and 2026-05-07 default rerun.
+
+Effective change:
+
+- CoreX PCG dot/dotnorm reduction tails use a pinned host scalar slot with
+  `cudaMemcpyAsync`, followed by one stream synchronization.
+- This replaces the older `cudaDeviceSynchronize()` plus implicit
+  `DeviceVar<Float>::operator Float()` readback sequence.
+- It does not change PCG formulas, convergence criteria, matrix contents, or the
+  preconditioner, so it is lower risk than fused SpMV-dot, skipping SpMV sync, or
+  residual replacement.
+
+Validation and impact:
+
+- With the default enabled, `wb80` stays in the block-inverse baseline range.
+- The latest `wb400` default rerun with pinned scalar enabled completed in
+  `143.956s`, slightly better than the prior `146s` block-inverse baseline.
+- This is a small cleanup win. The major PCG iteration reduction comes from the
+  block-inverse preconditioner in section 10.
+
+Rollback:
+
+- `UIPC_COREX_PCG_PINNED_SCALAR=0`
+
 ## Explicitly Excluded From Stable-Effective List
 
 The following were useful experiments or diagnostics but should not be counted as
@@ -569,8 +768,24 @@ stable effective default optimizations based on the current reports:
   wall time.
 - PE diagonal regularization, PE kappa scaling, and later SPD diagonal boosting:
   short-run or local signals did not satisfy stable `wb400`/PCG-max criteria.
-- Structured/block preconditioner experiments: opt-in diagnostics remain useful,
-  but no stable default win is recorded.
+- Earlier 3x3 structured/block preconditioner experiments: opt-in diagnostics
+  remain useful, but no stable default win is recorded. This is distinct from
+  the full `12x12` block-inverse preconditioner defaulted in section 10.
+- Device-double mixed precision: `LDLT_DOUBLE` / `PCG_REDUCE_DOUBLE` produced
+  NaN, Inf, or max-iter failures in `simple90`/`wb80` smoke tests and should not
+  be used as production paths.
+- Float-only scaled LDLT and PCG residual replacement: stable, but benefits on
+  `wb80`/`wb150` were noise-level or regressed longer gates.
+- CPU-fallback GPU migration all-opt-in combination:
+  - `UIPC_COREX_ORTHO_POTENTIAL_GPU=1`
+  - `UIPC_COREX_ABD_ENERGY_GPU=1`
+  - `UIPC_COREX_ABD_TOLERANCE_GPU=1`
+  - `UIPC_COREX_TOI_GPU=1`
+  - `UIPC_COREX_FILTER_TOI_SKIP_PRE_SYNC=1`
+  - `UIPC_COREX_LINEAR_SKIP_SYNC=1`
+  - `UIPC_COREX_DYTOPO_UPPER_BOUND_COMPACTION=1`
+  - `wb400` completed in `160.741s`, PCG sum `99412`, which is slower than the
+    default block-inverse path at `143.956s` / PCG sum `88441`.
 
 ## Timeline Of Stable Defaults
 
@@ -585,6 +800,12 @@ Approximate progression from the recorded reports:
    in its default regression.
 7. ABD DyTopo parallel assembly produced the strongest later win, with `wb400`
    around `180s`.
+8. Conservative triangle AABB build sync removal produced a `wb400` result around
+   `186s`, while full AABB async stayed rejected due to PCG outliers.
+9. ABD `12x12` block-inverse preconditioner defaulting reduced `wb400` from
+   `167s` to `146s`, with PCG sum dropping from `168717` to `88478`.
+10. PCG pinned scalar readback defaulting plus latest rerun gives the current best
+    CoreX default record: `wb400 = 143.956s`.
 
 ## Current Stable Baseline Takeaway
 
@@ -602,3 +823,9 @@ The later reports show that further progress is unlikely to come from broad
 environment-variable sweeps. The remaining gap is tied to high PE/EE contact load,
 matrix row imbalance, and PCG iteration count, so future default candidates should
 be validated against those long-run metrics before promotion.
+
+The May 6-7 results also show that mechanically moving CPU fallback work to GPU is
+not always beneficial. The NVIDIA path itself keeps some small host scalar or
+small-array boundaries. The effective wins came from restoring NVIDIA's algorithmic
+shape, such as ABD block inverse, or removing clear CoreX-only serial hot paths,
+not from eliminating every D2H boundary unconditionally.

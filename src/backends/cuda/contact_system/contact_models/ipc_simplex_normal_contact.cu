@@ -55,30 +55,6 @@ bool corex_pe_outlier_diag_enabled()
     return env && env[0] != '\0' && env[0] != '0';
 }
 
-Float corex_pe_diag_reg()
-{
-    const char* env = std::getenv("UIPC_COREX_PE_DIAG_REG");
-    if(!env || env[0] == '\0')
-        return static_cast<Float>(0);
-    char*  end = nullptr;
-    double v   = std::strtod(env, &end);
-    if(end == env || v <= 0.0)
-        return static_cast<Float>(0);
-    return static_cast<Float>(v);
-}
-
-Float corex_pe_kappa_scale()
-{
-    const char* env = std::getenv("UIPC_COREX_PE_KAPPA_SCALE");
-    if(!env || env[0] == '\0')
-        return static_cast<Float>(1);
-    char*  end = nullptr;
-    double v   = std::strtod(env, &end);
-    if(end == env || v <= 0.0)
-        return static_cast<Float>(1);
-    return static_cast<Float>(v);
-}
-
 Float corex_env_float(const char* name, Float fallback)
 {
     const char* env = std::getenv(name);
@@ -89,18 +65,6 @@ Float corex_env_float(const char* name, Float fallback)
     if(end == env)
         return fallback;
     return static_cast<Float>(v);
-}
-
-bool corex_contact_spd_condition_enabled()
-{
-    const char* env = std::getenv("UIPC_COREX_CONTACT_SPD_CONDITION");
-    return env && env[0] != '\0' && env[0] != '0';
-}
-
-bool corex_contact_spd_condition_pt_enabled()
-{
-    const char* env = std::getenv("UIPC_COREX_CONTACT_SPD_CONDITION_PT");
-    return env && env[0] != '\0' && env[0] != '0';
 }
 
 struct CorexContactSpdStats
@@ -855,35 +819,13 @@ class IPCSimplexNormalContact final : public SimplexNormalContact
         auto ee_count = (IndexT)info.EEs().size();
         auto pt_count = (IndexT)info.PTs().size();
         auto total    = pt_count + ee_count + pe_count + pp_count;
-        Float pe_diag_reg = corex_pe_diag_reg();
-        Float pe_kappa_scale = corex_pe_kappa_scale();
-        const bool spd_condition = corex_contact_spd_condition_enabled() && !info.gradient_only();
-        Float spd_ratio_trigger =
-            corex_env_float("UIPC_COREX_CONTACT_SPD_RATIO_TRIGGER", static_cast<Float>(0.25));
-        Float spd_diag_scale =
-            spd_condition
-                ? corex_env_float("UIPC_COREX_CONTACT_SPD_DIAG_SCALE", static_cast<Float>(1e-4))
-                : static_cast<Float>(0);
-        Float pp_diag_scale = corex_env_float("UIPC_COREX_CONTACT_SPD_PP_DIAG_SCALE", spd_diag_scale);
-        Float pe_cond_diag_scale = corex_env_float("UIPC_COREX_CONTACT_SPD_PE_DIAG_SCALE", spd_diag_scale);
-        Float ee_diag_scale = corex_env_float("UIPC_COREX_CONTACT_SPD_EE_DIAG_SCALE", spd_diag_scale);
-        Float pt_diag_scale =
-            corex_contact_spd_condition_pt_enabled()
-                ? corex_env_float("UIPC_COREX_CONTACT_SPD_PT_DIAG_SCALE", spd_diag_scale)
-                : static_cast<Float>(0);
-        if(pe_diag_reg > static_cast<Float>(0) && !info.gradient_only())
-            spdlog::info("[corex_pe_diag_reg] value={}", static_cast<double>(pe_diag_reg));
-        if(pe_kappa_scale != static_cast<Float>(1) && !info.gradient_only())
-            spdlog::info("[corex_pe_kappa_scale] value={}",
-                         static_cast<double>(pe_kappa_scale));
-        if(spd_condition)
-            spdlog::info("[corex_contact_spd_condition] ratio_trigger={} diag_scale={} PT={} EE={} PE={} PP={}",
-                         static_cast<double>(spd_ratio_trigger),
-                         static_cast<double>(spd_diag_scale),
-                         static_cast<double>(pt_diag_scale),
-                         static_cast<double>(ee_diag_scale),
-                         static_cast<double>(pe_cond_diag_scale),
-                         static_cast<double>(pp_diag_scale));
+        constexpr Float pe_diag_reg = static_cast<Float>(0);
+        constexpr Float pe_kappa_scale = static_cast<Float>(1);
+        constexpr Float spd_ratio_trigger = static_cast<Float>(0.25);
+        constexpr Float pp_diag_scale = static_cast<Float>(0);
+        constexpr Float pe_cond_diag_scale = static_cast<Float>(0);
+        constexpr Float ee_diag_scale = static_cast<Float>(0);
+        constexpr Float pt_diag_scale = static_cast<Float>(0);
 
         // CoreX: use explicit __global__ kernels (lambdas miscompile)
         const bool spd_diag_enabled =

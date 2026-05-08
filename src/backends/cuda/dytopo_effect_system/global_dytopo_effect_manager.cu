@@ -10,6 +10,7 @@
 #include <uipc/common/zip.h>
 #include <energy_component_flags.h>
 #include <utils/corex_phase_profile.h>
+#include <cstdlib>
 
 namespace uipc::backend
 {
@@ -461,96 +462,8 @@ inline bool corex_matconv_trace()
     return std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
 }
 
-inline bool corex_matconv_async_enabled()
-{
-    return std::getenv("UIPC_COREX_MATCONV_ASYNC") != nullptr;
-}
-
-inline bool corex_matconv_block_reduce_enabled()
-{
-    const char* env = std::getenv("UIPC_COREX_MATCONV_BLOCK_REDUCE");
-    return env && env[0] != '\0' && env[0] != '0';
-}
-
-inline bool corex_matconv_nvidia_seg_reduce_enabled()
-{
-    const char* env = std::getenv("UIPC_COREX_MATCONV_NVIDIA_SEG_REDUCE");
-    return env && env[0] != '\0' && env[0] != '0';
-}
-
-inline int corex_matconv_seg_threshold()
-{
-    const char* env = std::getenv("UIPC_COREX_MATCONV_SEG_THRESHOLD");
-    if(!env || env[0] == '\0')
-        return 16;
-
-    int value = std::atoi(env);
-    return value > 1 ? value : 2;
-}
-
-inline bool corex_matconv_seg_hist_enabled()
-{
-    const char* env = std::getenv("UIPC_COREX_MATCONV_SEG_HIST");
-    return env && env[0] != '\0' && env[0] != '0';
-}
-
-inline void corex_log_segment_histogram(const char* tag, const int* unique_counts, int out_count)
-{
-    if(!corex_matconv_seg_hist_enabled() || out_count <= 0)
-        return;
-
-    std::vector<int> counts(static_cast<size_t>(out_count));
-    cudaMemcpy(counts.data(),
-               unique_counts,
-               counts.size() * sizeof(int),
-               cudaMemcpyDeviceToHost);
-
-    int max_count = 0;
-    long long total = 0;
-    int bins[7] = {0, 0, 0, 0, 0, 0, 0};
-    for(int count : counts)
-    {
-        total += count;
-        if(count > max_count)
-            max_count = count;
-        if(count <= 1)
-            ++bins[0];
-        else if(count <= 2)
-            ++bins[1];
-        else if(count <= 4)
-            ++bins[2];
-        else if(count <= 8)
-            ++bins[3];
-        else if(count <= 16)
-            ++bins[4];
-        else if(count <= 32)
-            ++bins[5];
-        else
-            ++bins[6];
-    }
-
-    std::fprintf(stderr,
-                 "[corex_matconv_seg_hist] tag=%s segments=%d inputs=%lld max=%d "
-                 "le1=%d le2=%d le4=%d le8=%d le16=%d le32=%d gt32=%d\n",
-                 tag,
-                 out_count,
-                 total,
-                 max_count,
-                 bins[0],
-                 bins[1],
-                 bins[2],
-                 bins[3],
-                 bins[4],
-                 bins[5],
-                 bins[6]);
-    std::fflush(stderr);
-}
-
 inline void corex_matconv_sync_if_needed(const char* name)
 {
-    if(corex_matconv_async_enabled() && !corex_matconv_trace())
-        return;
-
     auto start = corex_profile::now_ms();
     cudaDeviceSynchronize();
     corex_profile::log_phase(
@@ -654,8 +567,7 @@ static inline int grid_for(int n) { return (n + kBlock - 1) / kBlock; }
 void launch_hash_ij(int N, const int* row_indices, const int* col_indices,
                     uint64_t* ij_hash, int* sort_index)
 {
-    if(!corex_matconv_async_enabled() || corex_matconv_trace())
-        corex_matconv_sync_if_needed("hash_ij_pre");
+    corex_matconv_sync_if_needed("hash_ij_pre");
     if(corex_matconv_trace())
     {
         cudaError_t pre2 = cudaGetLastError();
@@ -950,55 +862,9 @@ void launch_segmental_reduce_3x3_blocked(int N, const int* segment_ids,
                                          BlockT3* out_blocks,
                                          int out_count)
 {
-    if(corex_matconv_nvidia_seg_reduce_enabled())
-    {
-        corex_log_segment_histogram("3x3", unique_counts, out_count);
-        const int threshold = corex_matconv_seg_threshold();
-        cudaMemsetAsync(out_blocks, 0, out_count * sizeof(BlockT3));
-        corex_matconv_sync_if_needed("segmental_reduce_3x3_hybrid_memset");
-        if(out_count > 0)
-        {
-            {
-                MatconvPhase phase("segmental_reduce_3x3_hybrid_small");
-                kernel_segmental_reduce_3x3_hybrid_small<<<grid_for(N), kBlock>>>(
-                    N, segment_ids, unique_counts, in_blocks, out_blocks, out_count, threshold);
-                corex_matconv_sync_if_needed("segmental_reduce_3x3_hybrid_small");
-            }
-            {
-                MatconvPhase phase("segmental_reduce_3x3_hybrid_large");
-                kernel_segmental_reduce_3x3_hybrid_large<<<out_count, kBlock>>>(
-                    N, unique_counts, offsets, in_blocks, out_blocks, out_count, threshold);
-                corex_matconv_sync_if_needed("segmental_reduce_3x3_hybrid_large");
-            }
-        }
-        return;
-    }
-
-    if(!corex_matconv_block_reduce_enabled())
-    {
-        launch_segmental_reduce_3x3(N, segment_ids, in_blocks, out_blocks, out_count);
-        return;
-    }
-
-    if(corex_matconv_trace())
-    {
-        fmt::println(stderr, "[corex_seg3x3_block] enter N={} out_count={}", N, out_count);
-        std::fflush(stderr);
-    }
-
-    if(out_count > 0)
-    {
-        MatconvPhase phase("segmental_reduce_3x3_blocked");
-        kernel_segmental_reduce_3x3_blocked<<<out_count, kBlock>>>(
-            N, unique_counts, offsets, in_blocks, out_blocks, out_count);
-        cudaError_t e = cudaGetLastError();
-        if(corex_matconv_trace())
-        {
-            fmt::println(stderr, "[corex_seg3x3_block] kernel launch err={}", cudaGetErrorString(e));
-            std::fflush(stderr);
-        }
-        corex_matconv_sync_if_needed("segmental_reduce_3x3_blocked");
-    }
+    (void)unique_counts;
+    (void)offsets;
+    launch_segmental_reduce_3x3(N, segment_ids, in_blocks, out_blocks, out_count);
 }
 
 static __global__ void kernel_segmental_reduce_3x1_linear(int N,
@@ -1189,55 +1055,9 @@ void launch_segmental_reduce_3x1_blocked(int N, const int* segment_ids,
                                          VecT3* out_vecs,
                                          int out_count)
 {
-    if(corex_matconv_nvidia_seg_reduce_enabled())
-    {
-        corex_log_segment_histogram("3x1", unique_counts, out_count);
-        const int threshold = corex_matconv_seg_threshold();
-        cudaMemsetAsync(out_vecs, 0, out_count * sizeof(VecT3));
-        corex_matconv_sync_if_needed("segmental_reduce_3x1_hybrid_memset");
-        if(out_count > 0)
-        {
-            {
-                MatconvPhase phase("segmental_reduce_3x1_hybrid_small");
-                kernel_segmental_reduce_3x1_hybrid_small<<<grid_for(N), kBlock>>>(
-                    N, segment_ids, unique_counts, in_vecs, out_vecs, out_count, threshold);
-                corex_matconv_sync_if_needed("segmental_reduce_3x1_hybrid_small");
-            }
-            {
-                MatconvPhase phase("segmental_reduce_3x1_hybrid_large");
-                kernel_segmental_reduce_3x1_hybrid_large<<<out_count, kBlock>>>(
-                    N, unique_counts, offsets, in_vecs, out_vecs, out_count, threshold);
-                corex_matconv_sync_if_needed("segmental_reduce_3x1_hybrid_large");
-            }
-        }
-        return;
-    }
-
-    if(!corex_matconv_block_reduce_enabled())
-    {
-        launch_segmental_reduce_3x1(N, segment_ids, in_vecs, out_vecs, out_count);
-        return;
-    }
-
-    if(corex_matconv_trace())
-    {
-        fmt::println(stderr, "[corex_seg3x1_block] enter N={} out_count={}", N, out_count);
-        std::fflush(stderr);
-    }
-
-    if(out_count > 0)
-    {
-        MatconvPhase phase("segmental_reduce_3x1_blocked");
-        kernel_segmental_reduce_3x1_blocked<<<out_count, kBlock>>>(
-            N, unique_counts, offsets, in_vecs, out_vecs, out_count);
-        cudaError_t e = cudaGetLastError();
-        if(corex_matconv_trace())
-        {
-            fmt::println(stderr, "[corex_seg3x1_block] kernel launch err={}", cudaGetErrorString(e));
-            std::fflush(stderr);
-        }
-        corex_matconv_sync_if_needed("segmental_reduce_3x1_blocked");
-    }
+    (void)unique_counts;
+    (void)offsets;
+    launch_segmental_reduce_3x1(N, segment_ids, in_vecs, out_vecs, out_count);
 }
 
 }  // namespace uipc::backend::cuda::corex_matconv

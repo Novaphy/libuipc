@@ -83,7 +83,6 @@ class GlobalTrajectoryFilter final : public SimSystem
 
 
         muda::DeviceBuffer<Float> tois;
-        muda::DeviceBuffer<Float> min_toi;
         vector<Float>             h_tois;
     };
 

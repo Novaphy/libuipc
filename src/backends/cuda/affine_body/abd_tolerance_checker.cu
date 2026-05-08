@@ -7,6 +7,14 @@
 
 namespace uipc::backend::cuda
 {
+namespace
+{
+bool corex_abd_tolerance_gpu_enabled()
+{
+    return std::getenv("UIPC_COREX_ABD_TOLERANCE_GPU") != nullptr
+           || std::getenv("UIPC_COREX_ABD_GPU") != nullptr;
+}
+}  // namespace
 
 __global__ void kernel_abd_tolerance_check(int n,
                                             const Vector12* __restrict__ dqs,
@@ -67,7 +75,7 @@ class ABDToleranceChecker final : public NewtonToleranceChecker
         int n = static_cast<int>(dqs.size());
 
         if(std::getenv("UIPC_COREX_ABD_TOLERANCE_HOST_FALLBACK")
-           || std::getenv("UIPC_COREX_ABD_TOLERANCE_GPU") == nullptr)
+           || !corex_abd_tolerance_gpu_enabled())
         {
             std::vector<Vector12> h_dq(n);
             cudaMemcpy(h_dq.data(), dqs.data(), n * sizeof(Vector12), cudaMemcpyDeviceToHost);
