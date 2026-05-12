@@ -15,7 +15,7 @@ base_vcpkg_json = {
     'dependencies': [
         {
             'name': 'eigen3',
-            'version>=': '3.4.0'
+            'version>=': '5.0.1'
         },
         {
             'name': 'catch2',
@@ -39,7 +39,7 @@ base_vcpkg_json = {
         },
         {
             'name': 'dylib',
-            'version>=': '2.2.1'
+            'version>=': '3.0.1'
         },
         {
             'name': 'nlohmann-json',
@@ -72,6 +72,12 @@ base_vcpkg_json = {
     ],
     
     'overrides':[
+        # CoreX CUDA compilation is incompatible with the old Eigen 3.4.0
+        # SparseMatrix header resolved by the baseline.
+        {
+            'name': 'eigen3',
+            'version': '5.0.1',
+        },
         # fix fmt version
         {
             'name': 'fmt',
@@ -81,6 +87,12 @@ base_vcpkg_json = {
         {
             'name': 'spdlog',
             'version': '1.12.0',
+        },
+        # CoreX loader code uses dylib v3 API: dylib::library and
+        # dylib::decorations. The baseline still resolves 2.2.1 unless pinned.
+        {
+            'name': 'dylib',
+            'version': '3.0.1',
         }
     ]
 }
