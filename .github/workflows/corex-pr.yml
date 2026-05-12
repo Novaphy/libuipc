@@ -102,12 +102,14 @@ jobs:
         run: |
           set -euo pipefail
           GPU="${COREX_GPU:-0}"
-          ./build_corex_ci/Release/bin/corex_demo \
+          cd build_corex_ci
+          ./Release/bin/corex_demo \
             --backend cuda --scene simple --frames 90 --gpu "$GPU"
 
       - name: Smoke stack120
         run: |
           set -euo pipefail
           GPU="${COREX_GPU:-0}"
-          ./build_corex_ci/Release/bin/corex_demo \
+          cd build_corex_ci
+          ./Release/bin/corex_demo \
             --backend cuda --scene stack --frames 120 --gpu "$GPU"

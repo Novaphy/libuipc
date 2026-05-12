@@ -95,5 +95,6 @@ jobs:
           if [ -n "${COREX_VISIBLE_DEVICES:-}" ]; then
             export CUDA_VISIBLE_DEVICES="$COREX_VISIBLE_DEVICES"
           fi
-          ./build_corex_ci/Release/bin/corex_demo \
+          cd build_corex_ci
+          ./Release/bin/corex_demo \
             --backend cuda --scene wrecking_ball --frames 400 --gpu "$GPU"

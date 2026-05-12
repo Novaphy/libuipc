@@ -101,6 +101,20 @@ build_corex_online_verified/Release/bin/libuipc_backend_cuda.so
 build_corex_online_verified/Release/bin/corex_demo
 ```
 
+运行 `corex_demo` 时需要从 build 目录内启动，这样程序会把 `module_dir` 解析到 `Release/bin`，并正确加载 `libuipc_backend_cuda.so`：
+
+```bash
+cd /root/libuipc_corex-corex-iluvatar-port/build_corex_online_verified
+./Release/bin/corex_demo --backend cuda --scene simple --frames 90 --gpu "${COREX_GPU:-0}"
+```
+
+CI 中的 smoke test 同样采用这种方式：
+
+```bash
+cd build_corex_ci
+./Release/bin/corex_demo --backend cuda --scene simple --frames 90 --gpu "$GPU"
+```
+
 ## 必须固定的依赖版本
 
 为了保证在线复现，需要显式固定以下两个依赖：
