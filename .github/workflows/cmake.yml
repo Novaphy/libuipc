@@ -58,19 +58,6 @@ jobs:
         if: matrix.os == 'windows-2022'
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Install pkg-config (Windows)
-        # The vcpkg dylib package (both v2.2.1 and v3.x) installs a
-        # dylibConfig.cmake whose first action is `find_package(PkgConfig
-        # REQUIRED)`. The windows-2022 runner image does not ship pkg-config
-        # by default, so install pkgconfiglite via chocolatey to unblock
-        # `find_package(dylib)` in src/core/CMakeLists.txt.
-        if: matrix.os == 'windows-2022'
-        shell: pwsh
-        run: |
-          choco install pkgconfiglite -y --no-progress
-          # Make pkg-config visible to subsequent steps
-          echo "C:\ProgramData\chocolatey\bin" >> $env:GITHUB_PATH
-
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -83,18 +70,12 @@ jobs:
 
       - name: Setup vcpkg
         id: vcpkg
-        # NOTE: revision must match VCPKG_BASE_LINE in scripts/gen_vcpkg_json.py
-        # (vcpkg tag 2025.7.25). Using `master` causes vcpkg to ignore the
-        # baseline declared in vcpkg-configuration.json and pull whatever is
-        # latest, which on Windows breaks because the master tip ships
-        # dylib v3+ whose dylibConfig.cmake unconditionally requires PkgConfig
-        # (not present on the windows-2022 runner image).
         uses: johnwason/vcpkg-action@v6
         with:
           manifest-dir: "${{ github.workspace }}/build"
           triplet: ${{ matrix.os == 'windows-2022' && 'x64-windows-release' || 'x64-linux' }}
-          cache-key: ${{ matrix.os }}-2025-07-25
-          revision: dd3097e305afa53f7b4312371f62058d2e665320
+          cache-key: ${{ matrix.os }}
+          revision: master
           token: ${{ github.token }}
           github-binarycache: true
           fetch-depth: "0"

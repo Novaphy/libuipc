@@ -1,3 +1,4 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #include <affine_body/abd_time_integrator.h>
 #include <time_integrator/bdf1_flag.h>
 #include <muda/check/check_cuda_errors.h>
@@ -5,7 +6,6 @@
 namespace uipc::backend::cuda
 {
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 
 __global__ void bdf1_predict_dof_kernel(int             n,
                                         Float           dt,
@@ -52,7 +52,6 @@ __global__ void bdf1_update_state_kernel(int             n,
     q_vs[i] = (qs[i] - q_prevs[i]) * inv_dt;
 }
 
-#endif
 
 class ABDBDF1Integrator final : public ABDTimeIntegrator
 {
@@ -71,7 +70,6 @@ class ABDBDF1Integrator final : public ABDTimeIntegrator
         using namespace muda;
         const int n = static_cast<int>(info.qs().size());
 
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
         if(n > 0)
         {
             constexpr int block = 128;
@@ -89,7 +87,49 @@ class ABDBDF1Integrator final : public ABDTimeIntegrator
             checkCudaErrors(cudaGetLastError());
             checkCudaErrors(cudaDeviceSynchronize());
         }
+    }
+
+    virtual void do_update_state(UpdateVelocityInfo& info) override
+    {
+        using namespace muda;
+        const int n = static_cast<int>(info.qs().size());
+
+        if(n > 0)
+        {
+            constexpr int block = 128;
+            int grid            = (n + block - 1) / block;
+            bdf1_update_state_kernel<<<grid, block>>>(
+                n, Float(1) / info.dt(), info.qs().data(), info.q_prevs().data(), info.q_vs().data());
+            checkCudaErrors(cudaGetLastError());
+            checkCudaErrors(cudaDeviceSynchronize());
+        }
+    }
+};
+
+REGISTER_SIM_SYSTEM(ABDBDF1Integrator);
+}  // namespace uipc::backend::cuda
 #else
+#include <affine_body/abd_time_integrator.h>
+#include <time_integrator/bdf1_flag.h>
+
+namespace uipc::backend::cuda
+{
+class ABDBDF1Integrator final : public ABDTimeIntegrator
+{
+  public:
+    using ABDTimeIntegrator::ABDTimeIntegrator;
+
+    void do_build(BuildInfo& info) override
+    {
+        // require the BDF1 flag
+        require<BDF1Flag>();
+    }
+
+    virtual void do_init(InitInfo& info) override {}
+
+    virtual void do_predict_dof(PredictDofInfo& info) override
+    {
+        using namespace muda;
         ParallelFor()
             .file_line(__FILE__, __LINE__)
             .apply(info.qs().size(),
@@ -103,6 +143,7 @@ class ABDBDF1Integrator final : public ABDTimeIntegrator
                     external_force_accs = info.external_force_accs().cviewer().name("external_force_accs"),
                     dt = info.dt()] __device__(int i) mutable
                    {
+                       // record previous q
                        auto& q_prev = q_prevs(i);
                        q_prev       = qs(i);
 
@@ -110,12 +151,15 @@ class ABDBDF1Integrator final : public ABDTimeIntegrator
                        auto& g         = affine_gravity(i);
                        auto& f_ext_acc = external_force_accs(i);
 
+                       // 0) fixed: q_tilde = q_prev;
                        Vector12 q_tilde = q_prev;
 
                        if(!is_fixed(i))
                        {
+                           // 1) static problem: q_tilde = q_prev + (g + f_ext_acc) * dt * dt;
                            q_tilde += (g + f_ext_acc) * dt * dt;
 
+                           // 2) dynamic problem q_tilde = q_prev + q_v * dt + (g + f_ext_acc) * dt * dt;
                            if(is_dynamic(i))
                            {
                                q_tilde += q_v * dt;
@@ -124,25 +168,11 @@ class ABDBDF1Integrator final : public ABDTimeIntegrator
 
                        q_tildes(i) = q_tilde;
                    });
-#endif
     }
 
     virtual void do_update_state(UpdateVelocityInfo& info) override
     {
         using namespace muda;
-        const int n = static_cast<int>(info.qs().size());
-
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-        if(n > 0)
-        {
-            constexpr int block = 128;
-            int grid            = (n + block - 1) / block;
-            bdf1_update_state_kernel<<<grid, block>>>(
-                n, Float(1) / info.dt(), info.qs().data(), info.q_prevs().data(), info.q_vs().data());
-            checkCudaErrors(cudaGetLastError());
-            checkCudaErrors(cudaDeviceSynchronize());
-        }
-#else
         ParallelFor()
             .file_line(__FILE__, __LINE__)
             .apply(info.qs().size(),
@@ -158,9 +188,9 @@ class ABDBDF1Integrator final : public ABDTimeIntegrator
 
                        q_v = (q - q_prev) * (1.0 / dt);
                    });
-#endif
     }
 };
 
 REGISTER_SIM_SYSTEM(ABDBDF1Integrator);
 }  // namespace uipc::backend::cuda
+#endif

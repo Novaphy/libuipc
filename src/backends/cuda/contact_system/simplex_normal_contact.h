@@ -36,6 +36,7 @@ class SimplexNormalContact : public ContactReporter
         muda::CBufferView<Vector3> prev_positions() const;
         muda::CBufferView<Vector3> rest_positions() const;
         muda::CBufferView<IndexT>  contact_element_ids() const;
+        muda::CBufferView<IndexT>  body_ids() const;
         Float                      d_hat() const;
         muda::CBufferView<Float>   d_hats() const;
         Float                      dt() const;

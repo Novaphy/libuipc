@@ -1,3 +1,4 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #pragma once
 #include <type_define.h>
 #include <muda/ext/eigen/evd.h>
@@ -7,7 +8,6 @@ namespace uipc::backend::cuda
 template <int N>
 UIPC_HOST UIPC_DEVICE void make_spd(Matrix<Float, N, N>& H)
 {
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #if defined(UIPC_FLOAT_SCALAR) && UIPC_FLOAT_SCALAR
     // CoreX + float: float operations are correct on CoreX FPU, so Jacobi EVD
     // converges properly.  Use eigenvalue projection (clamp negatives to zero)
@@ -120,7 +120,18 @@ UIPC_HOST UIPC_DEVICE void make_spd(Matrix<Float, N, N>& H)
             H(i, i) += shift;
     }
 #endif
+}
+}
 #else
+#pragma once
+#include <type_define.h>
+#include <muda/ext/eigen/evd.h>
+
+namespace uipc::backend::cuda
+{
+template <int N>
+UIPC_GENERIC void make_spd(Matrix<Float, N, N>& H)
+{
     Vector<Float, N>    eigen_values;
     Matrix<Float, N, N> eigen_vectors;
     muda::eigen::template evd<Float, N>(H, eigen_values, eigen_vectors);
@@ -130,6 +141,6 @@ UIPC_HOST UIPC_DEVICE void make_spd(Matrix<Float, N, N>& H)
         v       = v < 0.0 ? 0.0 : v;
     }
     H = eigen_vectors * eigen_values.asDiagonal() * eigen_vectors.transpose();
+}
+}
 #endif
-}
-}

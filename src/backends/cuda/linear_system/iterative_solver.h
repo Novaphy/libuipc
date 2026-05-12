@@ -33,6 +33,9 @@ class IterativeSolver : public SimSystem
                               muda::CVarView<IndexT>        converged);
     bool accuracy_statisfied(muda::DenseVectorView<Float> r);
     muda::LinearSystemContext& ctx() const;
+    SizeT linear_system_triplet_count() const;
+    SizeT linear_system_local_preconditioner_count() const;
+    SizeT linear_system_no_preconditioner_count() const;
 
   private:
     friend class GlobalLinearSystem;

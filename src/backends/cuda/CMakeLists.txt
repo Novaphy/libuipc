@@ -26,30 +26,12 @@ find_package(CUDAToolkit REQUIRED)
 uipc_add_backend(cuda)
 
 # basic setup
-#
-# NOTE on uipc_io:
-# The sanity-check sources under src/backends/cuda/sanity_check/* (compiled
-# only on the NVIDIA path; filtered out on Corex by the `_corex.{cu,h,...}`
-# / `/backends/cuda/sanity_check/` rules below) call
-# `uipc::geometry::SimplicialComplexIO::{ctor,write}` to dump debug meshes
-# when a sanity check fails. Those symbols live in `uipc_io.dll` (see
-# src/io/CMakeLists.txt). On Linux the resulting `.so` is allowed to leave
-# undefined references to be resolved at load time, so the missing link
-# edge silently worked. On Windows MSVC every `__imp_*` reference must be
-# satisfied at link time by an explicit import library, so the missing
-# `uipc_io` link edge surfaces as
-#   LNK2019 / LNK1120 unresolved external symbol
-#       __imp_??0SimplicialComplexIO@geometry@uipc@@QEAA@XZ
-#       __imp_?write@SimplicialComplexIO@geometry@uipc@@QEAAX...
-# in uipc_backend_cuda.dll. Add the dependency explicitly so both
-# platforms link cleanly.
 target_link_libraries(cuda PUBLIC
     muda::muda
     CUDA::cublas
     CUDA::cusparse
     CUDA::cusolver
     uipc_geometry
-    uipc_io
 )
 
 # add CCCL include directory for CUDA 13.0 compatibility
@@ -141,16 +123,28 @@ if(NOT UIPC_MUDA_USE_COREX)
 endif()
 
 if(UIPC_MUDA_USE_COREX)
+    list(FILTER SOURCES EXCLUDE REGEX "/finite_element/finite_element_external_force_(manager|reporter)\\.(cu|h)$")
+    list(FILTER SOURCES EXCLUDE REGEX "/finite_element/finite_element_external_vertex_force\\.cu$")
+    list(FILTER SOURCES EXCLUDE REGEX "/finite_element/constraints/finite_element_external_vertex_force_constraint\\.(cu|h)$")
     list(FILTER SOURCES EXCLUDE REGEX "/backends/cuda/sanity_check/")
+    # NVIDIA-only modules added by the rebase: distance_diagnoser & joint_dof system.
+    # These reference uipc::backend::cuda APIs that do not exist on the Corex branch
+    # (joint_dof_manager, distance_diagnoser sanity reporting). Excluded on Corex,
+    # built-and-linked on NVIDIA.
+    list(FILTER SOURCES EXCLUDE REGEX "/backends/cuda/distance_system/")
+    list(FILTER SOURCES EXCLUDE REGEX "/backends/cuda/joint_dof_system/")
 endif()
 
-# Note: the previously-needed exclusion rules for
-# finite_element/finite_element_external_force_{manager,reporter}.{cu,h},
-# finite_element/finite_element_external_vertex_force.cu, and
-# finite_element/constraints/finite_element_external_vertex_force_constraint.{cu,h}
-# have been removed: those files were dead code (referenced nonexistent fields
-# on FiniteElementMethod::Impl, used nowhere) and the source files themselves
-# have been deleted from the tree.
+# These FEM external-force module files were added on top of upstream during the
+# Corex port but reference fields (vertex_external_forces / vertex_external_force_accs)
+# that do NOT exist in upstream FiniteElementMethod::Impl. They are not used by
+# corex_demo and break the NVIDIA build, so drop them on the NVIDIA path too to
+# stay byte-equivalent to /root/src.
+if(NOT UIPC_MUDA_USE_COREX)
+    list(FILTER SOURCES EXCLUDE REGEX "/finite_element/finite_element_external_force_(manager|reporter)\\.(cu|h)$")
+    list(FILTER SOURCES EXCLUDE REGEX "/finite_element/finite_element_external_vertex_force\\.cu$")
+    list(FILTER SOURCES EXCLUDE REGEX "/finite_element/constraints/finite_element_external_vertex_force_constraint\\.(cu|h)$")
+endif()
 
 target_sources(cuda PRIVATE ${SOURCES})
 uipc_target_set_relative_source_file(cuda)

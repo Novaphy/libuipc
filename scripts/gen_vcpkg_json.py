@@ -81,14 +81,6 @@ base_vcpkg_json = {
         {
             'name': 'spdlog',
             'version': '1.12.0',
-        },
-        # Pin dylib to v2.2.1 (header-only). dylib v3+ ships a CONFIG package
-        # whose dylibConfig.cmake unconditionally requires PkgConfig, which is
-        # not available on Windows GitHub runners. v2 is header-only and has
-        # no transitive dependencies.
-        {
-            'name': 'dylib',
-            'version': '2.2.1',
         }
     ]
 }

@@ -1,5 +1,6 @@
 #include <linear_system/iterative_solver.h>
 #include <linear_system/global_linear_system.h>
+#include <linear_system/local_preconditioner.h>
 namespace uipc::backend::cuda
 {
 void IterativeSolver::do_build()
@@ -47,6 +48,21 @@ bool IterativeSolver::accuracy_statisfied(muda::DenseVectorView<Float> r)
 muda::LinearSystemContext& IterativeSolver::ctx() const
 {
     return m_system->m_impl.ctx;
+}
+
+SizeT IterativeSolver::linear_system_triplet_count() const
+{
+    return m_system->m_impl.bcoo_A.triplet_count();
+}
+
+SizeT IterativeSolver::linear_system_local_preconditioner_count() const
+{
+    return m_system->m_impl.local_preconditioners.view().size();
+}
+
+SizeT IterativeSolver::linear_system_no_preconditioner_count() const
+{
+    return m_system->m_impl.no_precond_diag_subsystem_indices.size();
 }
 
 void IterativeSolver::solve(GlobalLinearSystem::SolvingInfo& info)

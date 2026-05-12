@@ -1,3 +1,4 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #include <affine_body/inter_affine_body_constitution.h>
 #include <affine_body/constraints/external_articulation_constraint_function.h>
 #include <affine_body/constitutions/joint_limit_penalty.h>
@@ -330,3 +331,5 @@ class AffineBodyPrismaticJointLimit final : public InterAffineBodyConstitution
 
 REGISTER_SIM_SYSTEM(AffineBodyPrismaticJointLimit);
 }  // namespace uipc::backend::cuda
+#else
+#endif

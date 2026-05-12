@@ -298,6 +298,11 @@ muda::CBufferView<IndexT> SimplexNormalContact::BaseInfo::contact_element_ids() 
     return m_impl->global_vertex_manager->contact_element_ids();
 }
 
+muda::CBufferView<IndexT> SimplexNormalContact::BaseInfo::body_ids() const
+{
+    return m_impl->global_vertex_manager->body_ids();
+}
+
 Float SimplexNormalContact::BaseInfo::d_hat() const
 {
     return m_impl->global_contact_manager->d_hat();

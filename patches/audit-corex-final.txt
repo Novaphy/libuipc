@@ -1,0 +1,36 @@
+COSMETIC:    include/uipc/common/details/smart_pointer.inl
+COSMETIC:    include/uipc/diff_sim/sparse_coo_view.h
+COSMETIC:    include/uipc/geometry/simplicial_complex_attributes.h
+COSMETIC:    src/backends/common/sim_engine.cpp
+COSMETIC:    src/backends/cuda/affine_body/abd_line_search_reporter.h
+COSMETIC:    src/backends/cuda/affine_body/abd_tolerance_checker.cu
+COSMETIC:    src/backends/cuda/affine_body/bdf/abd_bdf1_time_integrator.cu
+COSMETIC:    src/backends/cuda/affine_body/constitutions/affine_body_revolute_joint_function.h
+COSMETIC:    src/backends/cuda/affine_body/constraints/soft_transform_constraint.cu
+COSMETIC:    src/backends/cuda/affine_body/inter_affine_body_constitution.cu
+COSMETIC:    src/backends/cuda/affine_body/inter_affine_body_constitution.h
+COSMETIC:    src/backends/cuda/algorithm/details/matrix_converter.inl
+COSMETIC:    src/backends/cuda/algorithm/givens.hpp
+COSMETIC:    src/backends/cuda/collision_detection/details/stackless_bvh.inl
+COSMETIC:    src/backends/cuda/collision_detection/filters/stackless_bvh_simplex_trajectory_filter.h
+COSMETIC:    src/backends/cuda/contact_system/contact_models/ipc_simplex_normal_contact.cu
+COSMETIC:    src/backends/cuda/contact_system/global_contact_manager.h
+COSMETIC:    src/backends/cuda/engine/sim_engine_do_init.cu
+COSMETIC:    src/backends/cuda/entrance.cpp
+COSMETIC:    src/backends/cuda/global_geometry/global_vertex_manager.cu
+COSMETIC:    src/backends/cuda/linear_system/global_linear_system.cu
+COSMETIC:    src/backends/cuda/linear_system/spmv.cu
+COSMETIC:    src/backends/cuda/utils/distance/details/ccd.inl
+COSMETIC:    src/backends/cuda/utils/distance/details/edge_edge.inl
+COSMETIC:    src/backends/cuda/utils/distance/details/edge_edge_mollifier.inl
+COSMETIC:    src/backends/cuda/utils/distance/details/point_edge.inl
+COSMETIC:    src/backends/cuda/utils/distance/details/point_point.inl
+COSMETIC:    src/backends/cuda/utils/distance/details/point_triangle.inl
+COSMETIC:    src/backends/cuda/utils/friction_utils.h
+COSMETIC:    src/backends/cuda/utils/make_spd.h
+COSMETIC:    src/backends/cuda/utils/matrix_assembler.h
+COSMETIC:    src/backends/cuda/utils/matrix_unpacker.h
+COSMETIC:    src/io/simplicial_complex_io.cpp
+COSMETIC:    src/io/urdf_io.cpp
+
+Summary: ok=133 cosmetic=34 fail=0 missing=0 total=167

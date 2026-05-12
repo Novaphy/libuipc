@@ -1,3 +1,4 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #include <affine_body/inter_affine_body_constitution.h>
 #include <affine_body/constitutions/joint_limit_penalty.h>
 #include <affine_body/utils.h>
@@ -343,3 +344,5 @@ class AffineBodyRevoluteJointLimit final : public InterAffineBodyConstitution
 
 REGISTER_SIM_SYSTEM(AffineBodyRevoluteJointLimit);
 }  // namespace uipc::backend::cuda
+#else
+#endif

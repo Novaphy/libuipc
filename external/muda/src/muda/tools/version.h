@@ -24,22 +24,7 @@
 #endif
 
 
-// Iluvatar Corex 4.4+ ships cudaMallocAsync / cudaFreeAsync (verified at runtime
-// on Iluvatar MR-V100). The toolchain still reports CUDART_VERSION=10020, so the
-// vanilla version gate below would (wrongly) keep the sync-only path. When the
-// build sets UIPC_COREX_ASYNC_MEMORY=1 (via CMake option UIPC_COREX_USE_ASYNC_MEMORY),
-// force the async path on regardless of the reported CUDART version.
-#if defined(UIPC_COREX_ASYNC_MEMORY) && UIPC_COREX_ASYNC_MEMORY
-
-#ifndef MUDA_WITH_ASYNC_MEMORY_ALLOC_FREE
-#define MUDA_WITH_ASYNC_MEMORY_ALLOC_FREE
-#endif
-namespace muda
-{
-constexpr bool DEFAULT_ASYNC_ALLOC_FREE = true;
-}
-
-#elif(MUDA_CUDACC_VER_MAJOR >= 11) && (MUDA_CUDACC_VER_MINOR >= 2)
+#if(MUDA_CUDACC_VER_MAJOR >= 11) && (MUDA_CUDACC_VER_MINOR >= 2)
 
 #define MUDA_WITH_ASYNC_MEMORY_ALLOC_FREE
 namespace muda

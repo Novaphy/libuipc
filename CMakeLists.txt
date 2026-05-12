@@ -72,6 +72,12 @@ if(UIPC_MUDA_USE_COREX)
     # GCC10 + oneTBB on this environment may fail with PSTL's legacy tbb::task backend.
     # Force serial PSTL backend for build-only compatibility.
     add_compile_definitions(_PSTL_PAR_BACKEND_SERIAL=1 _GLIBCXX_USE_TBB_PAR_BACKEND=0)
+
+    # Project-wide Corex compatibility macro. ALL targets must see this consistently
+    # because shared headers in include/ have #if defined(UIPC_COREX_CUDA10_COMPAT)
+    # ABI switches; mismatched definitions across targets would cause silent ODR
+    # violations and link errors.
+    add_compile_definitions(UIPC_COREX_CUDA10_COMPAT)
 endif()
 
 # Propagate UIPC_CUDA_ARCHITECTURES to CMake's CUDA variable so generators (VS, etc.)

@@ -1,3 +1,4 @@
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #pragma once
 #include <affine_body/inter_affine_body_constraint.h>
 
@@ -52,3 +53,5 @@ class AffineBodyPrismaticJointExternalForceConstraint final : public InterAffine
     Impl m_impl;
 };
 }  // namespace uipc::backend::cuda
+#else
+#endif

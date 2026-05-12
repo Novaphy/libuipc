@@ -237,6 +237,16 @@ class ABDJacobiDyadicMass
 
     MUDA_HOST MUDA_DEVICE Float mass() const { return m_mass; }
 
+    MUDA_HOST MUDA_DEVICE const Vector3& mass_times_x_bar() const
+    {
+        return m_mass_times_x_bar;
+    }
+
+    MUDA_HOST MUDA_DEVICE const Matrix3x3& mass_times_dyadic_x_bar() const
+    {
+        return m_mass_times_dyadic_x_bar;
+    }
+
     /**
      * @brief Inertia tensor about center of mass (3x3).
      * Derived from second moment about origin: I_cm = I^O - m(|c|^2 I_3 - c c^T),

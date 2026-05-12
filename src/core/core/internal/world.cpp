@@ -16,7 +16,7 @@ namespace uipc::core::internal
 {
 static S<internal::Engine> lock(const W<internal::Engine>& e)
 {
-    UIPC_ASSERT(!e.expired(), "Engine is expired, did you throw the `Engine`?");
+    UIPC_ASSERT_THROW(!e.expired(), "Engine is expired, did you throw the `Engine`?");
     return e.lock();
 }
 
@@ -202,13 +202,13 @@ const FeatureCollection& World::features() const
 
 SanityChecker& World::sanity_checker()
 {
-    UIPC_ASSERT(m_sanity_checker, "SanityChecker is not initialized. You should call World::init() first.");
+    UIPC_ASSERT_THROW(m_sanity_checker, "SanityChecker is not initialized. You should call World::init() first.");
     return *m_sanity_checker;
 }
 
 const SanityChecker& World::sanity_checker() const
 {
-    UIPC_ASSERT(m_sanity_checker, "SanityChecker is not initialized. You should call World::init() first.");
+    UIPC_ASSERT_THROW(m_sanity_checker, "SanityChecker is not initialized. You should call World::init() first.");
     return *m_sanity_checker;
 }
 

@@ -26,6 +26,7 @@
 #include <thrust/fill.h>
 #include <thrust/reduce.h>
 #include <thrust/execution_policy.h>
+#include <cstdlib>
 
 namespace uipc::backend::cuda
 {
@@ -49,8 +50,16 @@ class StacklessBVH
       public:
         Float reserve_ratio;
         Config()
-            : reserve_ratio(1.2)
+            : reserve_ratio(2.0)
         {
+            const char* env = std::getenv("UIPC_COREX_BVH_QUERY_RESERVE_RATIO");
+            if(env && env[0] != '\0')
+            {
+                char*  end = nullptr;
+                double v   = std::strtod(env, &end);
+                if(end != env && v >= 1.0)
+                    reserve_ratio = static_cast<Float>(v);
+            }
         }
     };
 
