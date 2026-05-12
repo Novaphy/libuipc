@@ -1,0 +1,115 @@
+name: CoreX PR
+
+on:
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+concurrency:
+  group: corex-pr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-smoke:
+    runs-on: [self-hosted, linux, corex]
+    timeout-minutes: 60
+
+    env:
+      VCPKG_FORCE_SYSTEM_BINARIES: "1"
+      CMAKE_BUILD_PARALLEL_LEVEL: "8"
+      LIBUIPC_VCPKG_ROOT: ${{ vars.LIBUIPC_VCPKG_ROOT }}
+      LIBUIPC_DISABLE_ALL_PROXY: ${{ vars.LIBUIPC_DISABLE_ALL_PROXY }}
+      COREX_CUDA_ARCH: ${{ vars.COREX_CUDA_ARCH }}
+      COREX_GPU: ${{ vars.COREX_GPU }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Show runner environment
+        run: |
+          set -euo pipefail
+          cmake --version
+          ninja --version
+          python3 --version
+          git --version
+          /usr/local/corex/bin/clang++ --version
+
+      - name: Prepare online vcpkg
+        run: |
+          set -euo pipefail
+
+          if [ "${LIBUIPC_DISABLE_ALL_PROXY:-1}" != "0" ]; then
+            unset ALL_PROXY all_proxy
+          fi
+
+          VCPKG_ROOT="${LIBUIPC_VCPKG_ROOT:-$HOME/vcpkg}"
+          if [ -d "$VCPKG_ROOT/.git" ] && [ "$(git -C "$VCPKG_ROOT" rev-parse --is-shallow-repository)" = "false" ]; then
+            git -C "$VCPKG_ROOT" fetch --filter=blob:none origin
+            git -C "$VCPKG_ROOT" checkout master
+            git -C "$VCPKG_ROOT" pull --ff-only --filter=blob:none
+          else
+            rm -rf "$VCPKG_ROOT"
+            git clone --filter=blob:none https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"
+          fi
+
+          "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+
+      - name: Configure CoreX
+        run: |
+          set -euo pipefail
+
+          if [ "${LIBUIPC_DISABLE_ALL_PROXY:-1}" != "0" ]; then
+            unset ALL_PROXY all_proxy
+          fi
+
+          CUDA_ARCH="${COREX_CUDA_ARCH:-ivcore11}"
+          BUILD_DIR="$PWD/build_corex_ci"
+          CMAKE_ARGS=(
+            -S "$PWD"
+            -B "$BUILD_DIR"
+            -G Ninja
+            -DCMAKE_BUILD_TYPE=Release
+            -DUIPC_USING_LOCAL_VCPKG=ON
+            -DUIPC_WITH_CUDA_BACKEND=ON
+            -DUIPC_MUDA_SOURCE_DIR="$PWD/external/muda"
+            -DUIPC_MUDA_USE_COREX=ON
+            -DUIPC_USE_FLOAT=ON
+            -DUIPC_COREX_CUDA_ARCHITECTURES="$CUDA_ARCH"
+            -DCMAKE_CUDA_COMPILER="$PWD/cmake/corex-clang-cuda-wrapper.sh"
+            -DUIPC_BUILD_EXAMPLES=ON
+            -DUIPC_BUILD_TESTS=OFF
+            -DUIPC_BUILD_COREX_API_TESTS=ON
+            -DUIPC_BUILD_BENCHMARKS=OFF
+          )
+
+          VCPKG_ROOT="${LIBUIPC_VCPKG_ROOT:-$HOME/vcpkg}"
+          test -x "$VCPKG_ROOT/vcpkg"
+          CMAKE_ARGS+=(
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+          )
+
+          cmake "${CMAKE_ARGS[@]}"
+
+      - name: Build corex_demo
+        run: |
+          set -euo pipefail
+          cmake --build build_corex_ci --target corex_demo --config Release -j"${CMAKE_BUILD_PARALLEL_LEVEL}"
+
+      - name: Smoke simple90
+        run: |
+          set -euo pipefail
+          GPU="${COREX_GPU:-0}"
+          cd build_corex_ci
+          ./Release/bin/corex_demo \
+            --backend cuda --scene simple --frames 90 --gpu "$GPU"
+
+      - name: Smoke stack120
+        run: |
+          set -euo pipefail
+          GPU="${COREX_GPU:-0}"
+          cd build_corex_ci
+          ./Release/bin/corex_demo \
+            --backend cuda --scene stack --frames 120 --gpu "$GPU"
