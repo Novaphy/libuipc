@@ -47,12 +47,12 @@ jobs:
 
           VCPKG_ROOT="${LIBUIPC_VCPKG_ROOT:-$HOME/vcpkg}"
           if [ -d "$VCPKG_ROOT/.git" ] && [ "$(git -C "$VCPKG_ROOT" rev-parse --is-shallow-repository)" = "false" ]; then
-            git -C "$VCPKG_ROOT" fetch --filter=blob:none origin
+            git -C "$VCPKG_ROOT" fetch --filter=blob:none origin master || git -C "$VCPKG_ROOT" fetch origin master
             git -C "$VCPKG_ROOT" checkout master
-            git -C "$VCPKG_ROOT" pull --ff-only --filter=blob:none
+            git -C "$VCPKG_ROOT" merge --ff-only origin/master
           else
             rm -rf "$VCPKG_ROOT"
-            git clone --filter=blob:none https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"
+            git clone --filter=blob:none https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT" || git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"
           fi
 
           "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
