@@ -65,11 +65,20 @@ if(UIPC_MUDA_USE_COREX)
     # Clang/Corex may not define __CUDA_ARCH__ during device compilation; force
     # MUDA_GENERIC to __host__ __device__ so device kernels can call shared helpers.
     target_compile_definitions(cuda PRIVATE MUDA_FORCE_HD_GENERIC=1)
-    # Corex toolchain path uses clang CUDA frontend; disable RDC for compatibility.
-    set_target_properties(cuda PROPERTIES
-        CUDA_SEPARABLE_COMPILATION OFF
-        CUDA_RESOLVE_DEVICE_SYMBOLS OFF
-    )
+    # Real CoreX uses a clang-like CUDA frontend and cannot accept nvcc-style
+    # RDC. Forced compat builds on NVIDIA still use nvcc, so keep device linking
+    # enabled there or dlopen sees unresolved CUDA registration symbols.
+    if(CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA")
+        set_target_properties(cuda PROPERTIES
+            CUDA_SEPARABLE_COMPILATION ON
+            CUDA_RESOLVE_DEVICE_SYMBOLS ON
+        )
+    else()
+        set_target_properties(cuda PROPERTIES
+            CUDA_SEPARABLE_COMPILATION OFF
+            CUDA_RESOLVE_DEVICE_SYMBOLS OFF
+        )
+    endif()
 endif()
 
 # Non-Corex toolchains (NVCC) may still benefit from RDC.
