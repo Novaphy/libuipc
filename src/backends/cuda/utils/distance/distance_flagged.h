@@ -15,9 +15,7 @@ namespace uipc::backend::cuda::distance
 template <typename T>
 MUDA_HOST MUDA_DEVICE constexpr T ee_parallel_rel_tol()
 {
-    constexpr T eps        = std::numeric_limits<T>::epsilon();
-    constexpr T scaled_eps = T(64) * eps;
-    return scaled_eps > T(1e-12) ? scaled_eps : T(1e-12);
+    return T(1e-12);
 }
 
 namespace detail
