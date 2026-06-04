@@ -235,9 +235,9 @@ int main(int argc, char** argv)
     config["contact"]["d_hat"]              = 0.01;
     config["line_search"]["max_iter"]       = 64;
     config["newton"]["max_iter"]           = 100;
-    // Corex: prefer the non-fused PCG path for stability/compatibility.
-    // (fused_pcg uses a more aggressive fused-kernel implementation that may stall on some CUDA-compat runtimes)
-    config["linear_system"]["solver"]        = "linear_pcg";
+    // GIPC full mode is performance-oriented: keep the linear solve on the fused
+    // device path so SpMV, dot, updates, and convergence checks avoid extra launches.
+    config["linear_system"]["solver"]        = "fused_pcg";
     config["linear_system"]["tol_rate"]      = 1e-3;
     config["linear_system"]["check_interval"] = 1;
     config["sanity_check"]["enable"]       = 1;
@@ -935,4 +935,3 @@ int main(int argc, char** argv)
     fmt::println("Wrote OBJ sequence to: {}", output);
     return 0;
 }
-

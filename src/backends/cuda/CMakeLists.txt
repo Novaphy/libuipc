@@ -42,12 +42,22 @@ endif()
 
 target_compile_features(cuda PUBLIC cxx_std_${_uipc_cuda_standard})
 target_include_directories(cuda PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+if(UIPC_ENABLE_GIPC_FULL)
+    target_compile_definitions(cuda PUBLIC UIPC_ENABLE_GIPC_FULL=1)
+endif()
 if(UIPC_ENABLE_GIPC_NATIVE_CONTACT)
     target_compile_definitions(cuda PUBLIC UIPC_ENABLE_GIPC_NATIVE_CONTACT=1)
 endif()
 if(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE)
     target_compile_definitions(cuda PUBLIC UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE=1)
 endif()
+if(UIPC_ENABLE_GIPC_FRICTION)
+    target_compile_definitions(cuda PUBLIC UIPC_ENABLE_GIPC_FRICTION=1)
+endif()
+if(UIPC_ENABLE_GIPC_MAS)
+    target_compile_definitions(cuda PUBLIC UIPC_ENABLE_GIPC_MAS=1)
+endif()
+target_compile_definitions(cuda PUBLIC UIPC_GIPC_RANK=${UIPC_GIPC_RANK})
 set_target_properties(cuda PROPERTIES
     # Default to non-RDC. Corex/clang-CUDA does not accept nvcc's -rdc=true,
     # and most of our kernels do not require separable compilation.
@@ -117,6 +127,7 @@ endif()
 
 # all files in this directory
 file(GLOB_RECURSE SOURCES "*.cu" "*.h" "*.hpp" "*.cpp" "*.inl")
+list(FILTER SOURCES EXCLUDE REGEX "/gipc/reference/")
 
 # ------------------------------------------------------------------------------
 # Source filter for two-environment build

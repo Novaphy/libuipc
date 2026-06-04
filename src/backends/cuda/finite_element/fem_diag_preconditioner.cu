@@ -7,6 +7,7 @@
 #include <global_geometry/global_vertex_manager.h>
 #include <kernel_cout.h>
 #include <muda/ext/eigen/log_proxy.h>
+#include <uipc/builtin/attribute_name.h>
 #include <uipc/geometry/simplicial_complex.h>
 
 namespace uipc::backend::cuda
@@ -45,6 +46,15 @@ class FEMDiagPreconditioner : public LocalPreconditioner
                         "FEMDiagPreconditioner: mesh_part found, "
                         "deferring to FEMMASPreconditioner.");
                 }
+#if defined(UIPC_ENABLE_GIPC_MAS) && UIPC_ENABLE_GIPC_MAS
+                auto cuid = geo.meta().find<U64>(builtin::constitution_uid);
+                if(!cuid || cuid->view()[0] != 0ull)
+                {
+                    throw SimSystemException(
+                        "FEMDiagPreconditioner: GIPC MAS enabled, "
+                        "deferring partitionable FEM geometry to FEMMASPreconditioner.");
+                }
+#endif
             }
         }
 

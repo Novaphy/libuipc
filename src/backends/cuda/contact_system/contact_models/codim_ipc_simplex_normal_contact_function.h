@@ -1,6 +1,9 @@
 #ifndef UIPC_ENABLE_GIPC_NATIVE_CONTACT
 #define UIPC_ENABLE_GIPC_NATIVE_CONTACT 0
 #endif
+#ifndef UIPC_GIPC_RANK
+#define UIPC_GIPC_RANK 1
+#endif
 
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #pragma once
@@ -846,13 +849,47 @@ namespace sym::codim_ipc_simplex_contact
             return finite(d_hat_sqrt) && d_hat_sqrt > Float(0);
         }
 
-        inline __device__ Float lambda_barrier_gn(Float kappa, Float I, Float domain)
+        inline __device__ Float lambda_barrier_gipc(Float kappa, Float I, Float domain)
         {
             Float logI = log(I);
             Float I2   = I * I;
+#if UIPC_GIPC_RANK == 2
+            Float L2 = logI * logI;
+            Float poly = Float(4) * I + logI - Float(3) * I2 * L2
+                       + Float(6) * I * logI - Float(2) * I2
+                       + I * L2 - Float(7) * I2 * logI - Float(2);
+            Float lambda = -(Float(4) * kappa * domain * domain * poly) / I;
+#elif UIPC_GIPC_RANK == 3
+            Float L2 = logI * logI;
+            Float poly = Float(24) * I + Float(3) * logI - Float(6) * I2 * L2
+                       + Float(18) * I * logI - Float(12) * I2
+                       + Float(2) * I * L2 - Float(21) * I2 * logI - Float(12);
+            Float lambda = (Float(2) * kappa * domain * domain * logI * poly) / I;
+#elif UIPC_GIPC_RANK == 4
+            Float L2 = logI * logI;
+            Float poly = Float(24) * I + Float(2) * logI - Float(3) * I2 * L2
+                       + Float(12) * I * logI - Float(12) * I2
+                       + I * L2 - Float(14) * I2 * logI - Float(12);
+            Float lambda = -(Float(4) * kappa * domain * domain * L2 * poly) / I;
+#elif UIPC_GIPC_RANK == 5
+            Float L2 = logI * logI;
+            Float L3 = L2 * logI;
+            Float poly = Float(80) * I + Float(5) * logI - Float(6) * I2 * L2
+                       + Float(30) * I * logI - Float(40) * I2
+                       + Float(2) * I * L2 - Float(35) * I2 * logI - Float(40);
+            Float lambda = (Float(2) * kappa * domain * domain * L3 * poly) / I;
+#elif UIPC_GIPC_RANK == 6
+            Float L2 = logI * logI;
+            Float L4 = L2 * L2;
+            Float poly = Float(60) * I + Float(3) * logI - Float(3) * I2 * L2
+                       + Float(18) * I * logI - Float(30) * I2
+                       + I * L2 - Float(21) * I2 * logI - Float(30);
+            Float lambda = -(Float(4) * kappa * domain * domain * L4 * poly) / I;
+#else
             Float poly = Float(6) * I + Float(2) * I * logI
                        - Float(7) * I2 - Float(6) * I2 * logI + Float(1);
             Float lambda = (Float(2) * kappa * domain * domain * poly) / I;
+#endif
             if(!finite(lambda) || lambda < Float(0))
                 return Float(0);
             return lambda;
@@ -870,7 +907,7 @@ namespace sym::codim_ipc_simplex_contact
                 return false;
 
             Float domain = d_hat_sqrt * d_hat_sqrt;
-            coeff = lambda_barrier_gn(kappa, I, domain);
+            coeff = lambda_barrier_gipc(kappa, I, domain);
             return finite(coeff) && coeff >= Float(0);
         }
 

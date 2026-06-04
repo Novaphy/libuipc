@@ -134,10 +134,10 @@ class FEMMASPreconditioner : public LocalPreconditioner
         fem_linear_subsystem        = &require<FEMLinearSubsystem>();
         auto& global_vertex_manager = require<GlobalVertexManager>();
 
-        // MAS activates if ANY FEM geometry has mesh_part attribute.
-        // Unpartitioned meshes get diagonal (block-Jacobi) fallback internally.
+        // MAS activates on explicit mesh_part, or automatically in GIPC full
+        // mode for FEM geometries that can be partitioned internally.
         auto geo_slots      = world().scene().geometries();
-        bool found_any_part = false;
+        bool found_mas_candidate = false;
         for(SizeT i = 0; i < geo_slots.size(); i++)
         {
             auto& geo = geo_slots[i]->geometry();
@@ -145,18 +145,30 @@ class FEMMASPreconditioner : public LocalPreconditioner
             if(sc && sc->dim() >= 1)
             {
                 auto mesh_part = sc->vertices().find<IndexT>("mesh_part");
-                if(mesh_part)
+                bool use_mas = mesh_part != nullptr;
+#if defined(UIPC_ENABLE_GIPC_MAS) && UIPC_ENABLE_GIPC_MAS
+                auto cuid     = geo.meta().find<U64>(builtin::constitution_uid);
+                bool is_empty = cuid && cuid->view()[0] == kEmptyConstitutionUID;
+                use_mas       = use_mas || !is_empty;
+#endif
+                if(use_mas)
                 {
-                    found_any_part = true;
+                    found_mas_candidate = true;
                     break;
                 }
             }
         }
 
-        if(!found_any_part)
+        if(!found_mas_candidate)
         {
             throw SimSystemException("FEMMASPreconditioner: No 'mesh_part' attribute found on any geometry.");
         }
+
+#if defined(UIPC_ENABLE_GIPC_MAS) && UIPC_ENABLE_GIPC_MAS
+        logger::info("FEMMASPreconditioner: GIPC MAS enabled; missing mesh_part on FEM "
+                     "geometry will be auto-partitioned into {}-vertex blocks.",
+                     BANKSIZE);
+#endif
 
         info.connect(fem_linear_subsystem);
     }
@@ -231,7 +243,26 @@ class FEMMASPreconditioner : public LocalPreconditioner
 
             auto mesh_part = sc->vertices().find<IndexT>("mesh_part");
             if(!mesh_part)
+            {
+#if defined(UIPC_ENABLE_GIPC_MAS) && UIPC_ENABLE_GIPC_MAS
+                auto cuid     = geo.meta().find<U64>(builtin::constitution_uid);
+                bool is_empty = cuid && cuid->view()[0] == kEmptyConstitutionUID;
+                if(is_empty)
+                    continue;
+
+                has_parts = true;
+                for(SizeT v = 0; v < geo_info.vertex_count; v++)
+                {
+                    part_ids[geo_info.vertex_offset + v] =
+                        partition_offset + static_cast<IndexT>(v / BANKSIZE);
+                }
+                partition_offset += static_cast<IndexT>(
+                    (geo_info.vertex_count + BANKSIZE - 1) / BANKSIZE);
                 continue;
+#else
+                continue;
+#endif
+            }
 
             has_parts      = true;
             auto part_view = mesh_part->view();
@@ -598,10 +629,10 @@ class FEMMASPreconditioner : public LocalPreconditioner
         fem_linear_subsystem        = &require<FEMLinearSubsystem>();
         auto& global_vertex_manager = require<GlobalVertexManager>();
 
-        // MAS activates if ANY FEM geometry has mesh_part attribute.
-        // Unpartitioned meshes get diagonal (block-Jacobi) fallback internally.
+        // MAS activates on explicit mesh_part, or automatically in GIPC full
+        // mode for FEM geometries that can be partitioned internally.
         auto geo_slots      = world().scene().geometries();
-        bool found_any_part = false;
+        bool found_mas_candidate = false;
         for(SizeT i = 0; i < geo_slots.size(); i++)
         {
             auto& geo = geo_slots[i]->geometry();
@@ -609,18 +640,30 @@ class FEMMASPreconditioner : public LocalPreconditioner
             if(sc && sc->dim() >= 1)
             {
                 auto mesh_part = sc->vertices().find<IndexT>("mesh_part");
-                if(mesh_part)
+                bool use_mas = mesh_part != nullptr;
+#if defined(UIPC_ENABLE_GIPC_MAS) && UIPC_ENABLE_GIPC_MAS
+                auto cuid     = geo.meta().find<U64>(builtin::constitution_uid);
+                bool is_empty = cuid && cuid->view()[0] == kEmptyConstitutionUID;
+                use_mas       = use_mas || !is_empty;
+#endif
+                if(use_mas)
                 {
-                    found_any_part = true;
+                    found_mas_candidate = true;
                     break;
                 }
             }
         }
 
-        if(!found_any_part)
+        if(!found_mas_candidate)
         {
             throw SimSystemException("FEMMASPreconditioner: No 'mesh_part' attribute found on any geometry.");
         }
+
+#if defined(UIPC_ENABLE_GIPC_MAS) && UIPC_ENABLE_GIPC_MAS
+        logger::info("FEMMASPreconditioner: GIPC MAS enabled; missing mesh_part on FEM "
+                     "geometry will be auto-partitioned into {}-vertex blocks.",
+                     BANKSIZE);
+#endif
 
         info.connect(fem_linear_subsystem);
     }
@@ -695,7 +738,26 @@ class FEMMASPreconditioner : public LocalPreconditioner
 
             auto mesh_part = sc->vertices().find<IndexT>("mesh_part");
             if(!mesh_part)
+            {
+#if defined(UIPC_ENABLE_GIPC_MAS) && UIPC_ENABLE_GIPC_MAS
+                auto cuid     = geo.meta().find<U64>(builtin::constitution_uid);
+                bool is_empty = cuid && cuid->view()[0] == kEmptyConstitutionUID;
+                if(is_empty)
+                    continue;
+
+                has_parts = true;
+                for(SizeT v = 0; v < geo_info.vertex_count; v++)
+                {
+                    part_ids[geo_info.vertex_offset + v] =
+                        partition_offset + static_cast<IndexT>(v / BANKSIZE);
+                }
+                partition_offset += static_cast<IndexT>(
+                    (geo_info.vertex_count + BANKSIZE - 1) / BANKSIZE);
                 continue;
+#else
+                continue;
+#endif
+            }
 
             has_parts      = true;
             auto part_view = mesh_part->view();
