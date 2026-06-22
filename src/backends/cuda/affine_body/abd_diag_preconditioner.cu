@@ -65,11 +65,11 @@ bool block_inverse_precond_enabled()
 
 #if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
     // The matrix-free contact path removes the same contact Hessian blocks from
-    // explicit BCOO assembly but still contributes their diagonal estimate.
-    // On CoreX this makes the 12x12 LDLT preconditioner too sensitive on dense
-    // contact frames; plain Jacobi is slower per PCG step but keeps Newton
-    // convergence stable across long ABD runs such as wrecking_ball 400.
-    return false;
+    // explicit BCOO assembly but still contributes their diagonal estimate. A
+    // pure 12x12 LDLT block inverse is too aggressive on dense CoreX ABD contact
+    // frames; a damped block/Jacobi blend keeps the stronger cross-DoF
+    // preconditioning while preserving the long-run stability of Jacobi.
+    return true;
 #else
     return true;
 #endif
@@ -80,6 +80,27 @@ bool block_inverse_precond_stats_enabled()
     const char* env = std::getenv("UIPC_COREX_ABD_PRECOND_BLOCK_INVERSE_STATS");
     if(!env) return false;
     return env[0] != '\0' && env[0] != '0';
+}
+
+Float block_inverse_precond_mix()
+{
+    const char* env = std::getenv("UIPC_COREX_ABD_PRECOND_BLOCK_MIX");
+    if(!env || env[0] == '\0')
+#if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
+        return Float{0.4};
+#else
+        return Float{1};
+#endif
+
+    char*  end = nullptr;
+    double v   = std::strtod(env, &end);
+    if(end == env)
+        return Float{1};
+    if(v < 0.0)
+        v = 0.0;
+    if(v > 1.0)
+        v = 1.0;
+    return static_cast<Float>(v);
 }
 
 bool corex_abd_precond_sync_enabled()
@@ -269,8 +290,13 @@ __global__ void kernel_abd_precond_extract_block_inverse(
 // the runtime-hot kernel that runs once per PCG iteration, so it must stay
 // branch-free (the SPD pivot fallback is folded into `diag_inv` at extract
 // time so the apply path is identical for accepted and fallback bodies).
-__global__ void kernel_abd_block_inverse_apply(
-    int n, const Float* diag_inv, const Float* r, Float* z, const IndexT* converged)
+__global__ void kernel_abd_block_inverse_apply(int           n,
+                                               const Float*  diag_inv,
+                                               const Float*  diag_recip,
+                                               Float         block_mix,
+                                               const Float*  r,
+                                               Float*        z,
+                                               const IndexT* converged)
 {
     if(*converged != 0) return;
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -286,6 +312,11 @@ __global__ void kernel_abd_block_inverse_apply(
         Float s = static_cast<Float>(0);
         for(int col = 0; col < N; ++col)
             s += diag_inv[i * 144 + col * N + row] * ri[col];
+        if(block_mix < static_cast<Float>(1))
+        {
+            const Float j = diag_recip[i * N + row] * ri[row];
+            s = block_mix * s + (static_cast<Float>(1) - block_mix) * j;
+        }
         z[i * N + row] = s;
     }
 }
@@ -333,6 +364,7 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
     muda::DeviceBuffer<Float> jacobi_recip; // 12 reciprocals per body
     muda::DeviceBuffer<int> block_inv_status; // 1 = LDLT accepted, 0 = Jacobi fallback
     bool block_inverse_enabled = false;
+    Float block_inverse_mix = Float{1};
 
     virtual void do_build(BuildInfo& info) override
     {
@@ -371,6 +403,7 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
                 Float max_abs_diag = std::numeric_limits<Float>::max();
                 bool  clamp_enabled = parse_precond_diag_clamp(min_abs_diag, max_abs_diag);
                 block_inverse_enabled = block_inverse_precond_enabled();
+                block_inverse_mix = block_inverse_precond_mix();
                 int blocks = (n + 255) / 256;
                 if(block_inverse_enabled)
                 {
@@ -486,6 +519,8 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
                     kernel_abd_block_inverse_apply<<<blocks, 256>>>(
                         n,
                         (const Float*)diag_inv.data(),
+                        (const Float*)jacobi_recip.data(),
+                        block_inverse_mix,
                         (const Float*)info.r().data(),
                         (Float*)info.z().data(),
                         (const IndexT*)converged.data());
