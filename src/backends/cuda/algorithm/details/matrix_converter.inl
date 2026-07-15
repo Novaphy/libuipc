@@ -61,16 +61,6 @@ inline int corex_compact_hash_sort_end_bit(SizeT rows, SizeT cols)
 
 inline int corex_readback_int(const muda::DeviceVar<int>& value)
 {
-    static const bool pinned_enabled = [] {
-        const char* env = std::getenv("UIPC_COREX_MATCONV_PINNED_COUNT");
-        if(env && env[0] != '\0')
-            return env[0] != '0';
-        return true;
-    }();
-
-    if(!pinned_enabled)
-        return value;
-
     static int* pinned = nullptr;
     if(!pinned)
     {
