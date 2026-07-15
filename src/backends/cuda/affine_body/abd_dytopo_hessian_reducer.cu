@@ -457,7 +457,7 @@ void ABDDyTopoHessianReducer::reduce_body_triplets(IndexT body_count)
 
     {
         corex_profile::ScopedPhase phase("abd_dytopo_reducer", "body_reduce_12x12");
-        constexpr int kBlockEntries = 256;
+        constexpr int kBlockEntries = 192;
         kernel_reduce_sorted_blocks_12x12<<<unique_count, kBlockEntries>>>(
             unique_count,
             m_body_unique_hashes.data(),
