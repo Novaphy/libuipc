@@ -46,6 +46,7 @@ class ABDDyTopoHessianReducer
 
     muda::DeviceBuffer<uint64_t> m_body_hash_input;
     muda::DeviceBuffer<uint64_t> m_body_hash;
+    muda::DeviceBuffer<uint64_t> m_body_unique_hashes;
     muda::DeviceBuffer<int>      m_body_sort_index_input;
     muda::DeviceBuffer<int>      m_body_sort_index;
 

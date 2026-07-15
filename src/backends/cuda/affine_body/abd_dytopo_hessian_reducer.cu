@@ -274,7 +274,8 @@ __global__ void kernel_copy_sorted_blocks_12x12(int                n,
 
 __global__ void kernel_reduce_sorted_blocks_12x12(
     int                           n,
-    const MatrixConverterIntPair* unique_pairs,
+    const uint64_t*               unique_hashes,
+    int                           col_count,
     const int*                    unique_counts,
     const int*                    offsets,
     const Matrix12x12*            sorted_vals,
@@ -287,8 +288,9 @@ __global__ void kernel_reduce_sorted_blocks_12x12(
 
     if(threadIdx.x == 0)
     {
-        dst_rows[seg] = unique_pairs[seg].x;
-        dst_cols[seg] = unique_pairs[seg].y;
+        const uint64_t hash = unique_hashes[seg];
+        dst_rows[seg] = static_cast<int>(hash / static_cast<uint64_t>(col_count));
+        dst_cols[seg] = static_cast<int>(hash % static_cast<uint64_t>(col_count));
     }
 
     if(threadIdx.x >= 12 * 12)
@@ -399,7 +401,6 @@ void ABDDyTopoHessianReducer::reduce_body_triplets(IndexT body_count)
     loose_resize(m_body_hash, body_triplet_count);
     loose_resize(m_body_sort_index_input, body_triplet_count);
     loose_resize(m_body_sort_index, body_triplet_count);
-    loose_resize(m_body_pairs, body_triplet_count);
     loose_resize(m_body_blocks_sorted, body_triplet_count);
 
     {
@@ -424,14 +425,6 @@ void ABDDyTopoHessianReducer::reduce_body_triplets(IndexT body_count)
     }
 
     {
-        corex_profile::ScopedPhase phase("abd_dytopo_reducer", "body_decode_hash");
-        corex_matconv::launch_decode_hash_compact(body_triplet_count,
-                                                  m_body_hash.data(),
-                                                  static_cast<int>(body_count),
-                                                  reinterpret_cast<int*>(m_body_pairs.data()));
-    }
-
-    {
         corex_profile::ScopedPhase phase("abd_dytopo_reducer", "body_copy_sorted_blocks");
         constexpr int kBlk = 256;
         kernel_copy_sorted_blocks_12x12<<<(body_triplet_count + kBlk - 1) / kBlk, kBlk>>>(
@@ -442,13 +435,13 @@ void ABDDyTopoHessianReducer::reduce_body_triplets(IndexT body_count)
         checkCudaErrors(cudaGetLastError());
     }
 
-    loose_resize(m_body_unique_pairs, body_triplet_count);
+    loose_resize(m_body_unique_hashes, body_triplet_count);
     loose_resize(m_body_unique_counts, body_triplet_count);
 
     {
         corex_profile::ScopedPhase phase("abd_dytopo_reducer", "body_rle_pairs");
-        DeviceRunLengthEncode().Encode(m_body_pairs.data(),
-                                       m_body_unique_pairs.data(),
+        DeviceRunLengthEncode().Encode(m_body_hash.data(),
+                                       m_body_unique_hashes.data(),
                                        m_body_unique_counts.data(),
                                        m_body_unique_count_var.data(),
                                        body_triplet_count);
@@ -459,7 +452,7 @@ void ABDDyTopoHessianReducer::reduce_body_triplets(IndexT body_count)
     if(unique_count == 0)
         return;
 
-    m_body_unique_pairs.unsafe_resize_no_construct(unique_count);
+    m_body_unique_hashes.unsafe_resize_no_construct(unique_count);
     m_body_unique_counts.unsafe_resize_no_construct(unique_count);
     m_body_offsets.unsafe_resize_no_construct(unique_count);
 
@@ -478,7 +471,8 @@ void ABDDyTopoHessianReducer::reduce_body_triplets(IndexT body_count)
         constexpr int kBlockEntries = 256;
         kernel_reduce_sorted_blocks_12x12<<<unique_count, kBlockEntries>>>(
             unique_count,
-            m_body_unique_pairs.data(),
+            m_body_unique_hashes.data(),
+            static_cast<int>(body_count),
             m_body_unique_counts.data(),
             m_body_offsets.data(),
             m_body_blocks_sorted.data(),
