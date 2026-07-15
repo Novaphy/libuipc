@@ -375,6 +375,12 @@ void GlobalDyTopoEffectManager::Impl::_distribute(ComputeDyTopoEffectInfo& info)
             }
 
             const auto N = sorted_dytopo_effect_hessian.triplet_count();
+            if(N == 0)
+            {
+                classified_info.m_hessians = classified_hessians.view();
+                receiver->receive(classified_info);
+                continue;
+            }
 
             // +1 for calculate the total count
             loose_resize(selected_hessian, N + 1);
@@ -1498,6 +1504,12 @@ void GlobalDyTopoEffectManager::Impl::_distribute(ComputeDyTopoEffectInfo& info)
         if(!info.m_gradient_only && !classify_info.is_empty())
         {
             const auto N = sorted_dytopo_effect_hessian.triplet_count();
+            if(N == 0)
+            {
+                classified_info.m_hessians = classified_hessians.view();
+                receiver->receive(classified_info);
+                continue;
+            }
 
             // +1 for calculate the total count
             loose_resize(selected_hessian, N + 1);
