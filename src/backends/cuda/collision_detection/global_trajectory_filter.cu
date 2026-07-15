@@ -27,6 +27,69 @@ namespace uipc::backend::cuda
 {
 REGISTER_SIM_SYSTEM(GlobalTrajectoryFilter);
 
+namespace
+{
+struct CorexTOIReadbackBuffer
+{
+    Float*       pinned = nullptr;
+    size_t       capacity = 0;
+    cudaStream_t stream = nullptr;
+    cudaEvent_t  ready = nullptr;
+
+    CorexTOIReadbackBuffer()
+    {
+        checkCudaErrors(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        checkCudaErrors(cudaEventCreateWithFlags(&ready, cudaEventDisableTiming));
+    }
+
+    Float* ensure(size_t count)
+    {
+        if(count <= capacity)
+            return pinned;
+
+        if(pinned)
+        {
+            checkCudaErrors(cudaFreeHost(pinned));
+            pinned = nullptr;
+            capacity = 0;
+        }
+
+        Float* tmp = nullptr;
+        if(cudaMallocHost(reinterpret_cast<void**>(&tmp), sizeof(Float) * count)
+           == cudaSuccess)
+        {
+            pinned = tmp;
+            capacity = count;
+        }
+        return pinned;
+    }
+};
+
+bool corex_copy_tois_to_host(const Float* device_tois,
+                             Float*       host_tois,
+                             size_t       count)
+{
+    if(count == 0)
+        return true;
+
+    static CorexTOIReadbackBuffer readback;
+    Float* pinned = readback.ensure(count);
+    if(!pinned)
+        return false;
+
+    checkCudaErrors(cudaEventRecord(readback.ready, nullptr));
+    checkCudaErrors(cudaStreamWaitEvent(readback.stream, readback.ready, 0));
+    checkCudaErrors(cudaMemcpyAsync(pinned,
+                                    device_tois,
+                                    sizeof(Float) * count,
+                                    cudaMemcpyDeviceToHost,
+                                    readback.stream));
+    checkCudaErrors(cudaStreamSynchronize(readback.stream));
+    std::copy(pinned, pinned + count, host_tois);
+    return true;
+}
+}  // namespace
+
 void GlobalTrajectoryFilter::do_build()
 {
     auto& config               = world().scene().config();
@@ -139,9 +202,13 @@ Float GlobalTrajectoryFilter::Impl::filter_toi(Float alpha)
     }
     Float h_min_toi = 1.0f;
 
+    const bool copied_to_host =
+        corex_copy_tois_to_host(tois.data(), h_tois.data(), filter_view.size());
+
     if constexpr(uipc::RUNTIME_CHECK)
     {
-        tois.view().copy_to(h_tois.data());
+        if(!copied_to_host)
+            tois.view().copy_to(h_tois.data());
         for(auto&& [i, toi] : enumerate(h_tois))
         {
             // Some filters may output toi=0 when no candidates exist (meaning "no restriction").
@@ -154,7 +221,8 @@ Float GlobalTrajectoryFilter::Impl::filter_toi(Float alpha)
     }
     else
     {
-        tois.view().copy_to(h_tois.data());
+        if(!copied_to_host)
+            tois.view().copy_to(h_tois.data());
         h_min_toi = *std::min_element(h_tois.begin(), h_tois.end());
     }
 
