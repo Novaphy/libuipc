@@ -20,7 +20,9 @@ std::atomic<unsigned long long>& corex_bdf1_gh_call_count()
 
 void corex_trace_bdf1_gh_call(int n, bool gradient_only, bool gpu_path)
 {
-    if(std::getenv("UIPC_COREX_ABD_BDF1_TRACE_GH") == nullptr)
+    static const bool trace_bdf1_gh =
+        std::getenv("UIPC_COREX_ABD_BDF1_TRACE_GH") != nullptr;
+    if(!trace_bdf1_gh)
         return;
     auto call = corex_bdf1_gh_call_count().fetch_add(1, std::memory_order_relaxed) + 1;
     std::fprintf(stderr,
@@ -206,38 +208,6 @@ class AffineBodyBDF1Kinetic final : public AffineBodyKinetic
         if(n <= 0)
             return;
 
-        if(std::getenv("UIPC_COREX_ABD_BDF1_HOST_FALLBACK")
-           || std::getenv("UIPC_COREX_ABD_BDF1_ENERGY_HOST_FALLBACK"))
-        {
-            std::vector<Vector12>           h_q(n), h_qt(n);
-            std::vector<ABDJacobiDyadicMass> h_m(n);
-            std::vector<IndexT>             h_fixed(n), h_ext(n);
-            std::vector<Float>              h_e(n);
-
-            cudaMemcpy(h_q.data(), info.qs().data(), n * sizeof(Vector12), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_qt.data(), info.q_tildes().data(), n * sizeof(Vector12), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_m.data(), info.masses().data(), n * sizeof(ABDJacobiDyadicMass), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_fixed.data(), info.is_fixed().data(), n * sizeof(IndexT), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_ext.data(), info.external_kinetic().data(), n * sizeof(IndexT), cudaMemcpyDeviceToHost);
-
-            for(int i = 0; i < n; ++i)
-            {
-                if(h_fixed[i] || h_ext[i])
-                {
-                    h_e[i] = 0.0;
-                }
-                else
-                {
-                    Vector12 dq   = h_q[i] - h_qt[i];
-                    Vector12 M_dq = h_m[i] * dq;
-                    h_e[i]        = 0.5 * dq.dot(M_dq);
-                }
-            }
-
-            cudaMemcpy((void*)info.energies().data(), h_e.data(), n * sizeof(Float), cudaMemcpyHostToDevice);
-            return;
-        }
-
         constexpr int block = 256;
         int           grid  = (n + block - 1) / block;
         kernel_abd_bdf1_energy<<<grid, block>>>(n,
@@ -258,47 +228,7 @@ class AffineBodyBDF1Kinetic final : public AffineBodyKinetic
         if(n <= 0)
             return;
 
-        const bool use_gpu_path =
-            !(std::getenv("UIPC_COREX_ABD_BDF1_HOST_FALLBACK")
-              || std::getenv("UIPC_COREX_ABD_BDF1_GRADIENT_HESSIAN_HOST_FALLBACK"));
-        corex_trace_bdf1_gh_call(n, info.gradient_only(), use_gpu_path);
-
-        if(!use_gpu_path)
-        {
-            refresh_hessian_cache_if_needed(n, info.masses().data(), info.is_fixed().data());
-
-            h_q_cache.resize(n);
-            h_qtilde_cache.resize(n);
-            h_grad_cache.resize(n);
-
-            cudaMemcpy(h_q_cache.data(), info.qs().data(), n * sizeof(Vector12), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_qtilde_cache.data(),
-                       info.q_tildes().data(),
-                       n * sizeof(Vector12),
-                       cudaMemcpyDeviceToHost);
-
-            bool grad_only = info.gradient_only();
-            for(int i = 0; i < n; ++i)
-            {
-                Vector12 dq = h_q_cache[i] - h_qtilde_cache[i];
-                h_grad_cache[i] = h_mass_cache[i] * dq;
-                if(h_fixed_cache[i])
-                    h_grad_cache[i] = Vector12::Zero();
-            }
-
-            cudaMemcpy((void*)info.gradients().data(),
-                       h_grad_cache.data(),
-                       n * sizeof(Vector12),
-                       cudaMemcpyHostToDevice);
-            if(!grad_only)
-            {
-                cudaMemcpy((void*)info.hessians().data(),
-                           cached_kinetic_hessians.data(),
-                           n * sizeof(Matrix12x12),
-                           cudaMemcpyDeviceToDevice);
-            }
-            return;
-        }
+        corex_trace_bdf1_gh_call(n, info.gradient_only(), true);
 
         constexpr int block = 256;
         int           grid  = (n + block - 1) / block;
