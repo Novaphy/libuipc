@@ -109,12 +109,27 @@ void LinearFusedPCG::do_build(BuildInfo& info)
                  check_interval);
 }
 
+void fused_initialize_x_r(muda::DenseVectorView<Float>  x,
+                          muda::CDenseVectorView<Float> b,
+                          muda::DenseVectorView<Float>  r)
+{
+    using namespace muda;
+    ParallelFor()
+        .file_line(__FILE__, __LINE__)
+        .apply(x.size(),
+               [x = x.viewer().name("x"),
+                b = b.cviewer().name("b"),
+                r = r.viewer().name("r")] __device__(int i) mutable
+               {
+                   x(i) = Float{0};
+                   r(i) = b(i);
+               });
+}
+
 void LinearFusedPCG::do_solve(GlobalLinearSystem::SolvingInfo& info)
 {
     auto x = info.x();
     auto b = info.b();
-
-    x.buffer_view().fill(0);
 
     auto N = x.size();
     if(r.capacity() < N)
@@ -130,6 +145,8 @@ void LinearFusedPCG::do_solve(GlobalLinearSystem::SolvingInfo& info)
     z.resize(N);
     p.resize(N);
     Ap.resize(N);
+
+    fused_initialize_x_r(x, b, r.view());
 
     auto iter = fused_pcg(x, b, max_iter_ratio * b.size());
 
@@ -389,9 +406,6 @@ SizeT LinearFusedPCG::fused_pcg(muda::DenseVectorView<Float>  x,
 
     SizeT k     = 0;
     d_converged = 0;
-
-    // r = b - A*x, but x0 = 0 so r = b
-    r.buffer_view().copy_from(b.buffer_view());
 
     // z = P^{-1} * r
     {
