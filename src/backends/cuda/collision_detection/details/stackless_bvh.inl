@@ -1494,6 +1494,8 @@ inline void StacklessBVH::Impl::StacklessCDSharedOtherPointsTrianglesNoMask(
     muda::CBufferView<Vector3>  displacements,
     muda::CBufferView<Float>    thicknesses,
     muda::CBufferView<Float>    d_hats,
+    muda::CBufferView<Float>    triangle_thicknesses,
+    muda::CBufferView<Float>    triangle_d_hats,
     Float                       alpha,
     muda::CBufferView<IndexT>   vertex_to_body,
     muda::CBufferView<IndexT>   body_self_collision,
@@ -1522,6 +1524,8 @@ inline void StacklessBVH::Impl::StacklessCDSharedOtherPointsTrianglesNoMask(
              dxs        = displacements.viewer().name("displacements"),
              thicknesses = thicknesses.viewer().name("thicknesses"),
              d_hats     = d_hats.viewer().name("d_hats"),
+             triangle_thicknesses = triangle_thicknesses.viewer().name("triangle_thicknesses"),
+             triangle_d_hats = triangle_d_hats.viewer().name("triangle_d_hats"),
              alpha,
              v2b        = vertex_to_body.viewer().name("v2b"),
              body_self_collision = body_self_collision.viewer().name("body_self_collision"),
@@ -1587,15 +1591,10 @@ inline void StacklessBVH::Impl::StacklessCDSharedOtherPointsTrianglesNoMask(
                                         Vector3 F1 = Ps(F[1]);
                                         Vector3 F2 = Ps(F[2]);
 
-                                        Float thickness = PT_thickness(
-                                            thicknesses(V),
-                                            thicknesses(F[0]),
-                                            thicknesses(F[1]),
-                                            thicknesses(F[2]));
-                                        Float d_hat = PT_d_hat(d_hats(V),
-                                                               d_hats(F[0]),
-                                                               d_hats(F[1]),
-                                                               d_hats(F[2]));
+                                        Float thickness =
+                                            thicknesses(V) + triangle_thicknesses(j);
+                                        Float d_hat =
+                                            (d_hats(V) + triangle_d_hats(j)) * Float{0.5};
                                         Float expand = d_hat + thickness;
                                         if(alpha == static_cast<Float>(0))
                                         {
@@ -2198,6 +2197,8 @@ inline bool StacklessBVH::query_points_triangles_no_mask_launch(
     muda::CBufferView<Vector3>  displacements,
     muda::CBufferView<Float>    thicknesses,
     muda::CBufferView<Float>    d_hats,
+    muda::CBufferView<Float>    triangle_thicknesses,
+    muda::CBufferView<Float>    triangle_d_hats,
     Float                       alpha,
     muda::CBufferView<IndexT>   vertex_to_body,
     muda::CBufferView<IndexT>   body_self_collision,
@@ -2229,6 +2230,8 @@ inline bool StacklessBVH::query_points_triangles_no_mask_launch(
                                                                displacements,
                                                                thicknesses,
                                                                d_hats,
+                                                               triangle_thicknesses,
+                                                               triangle_d_hats,
                                                                alpha,
                                                                vertex_to_body,
                                                                body_self_collision,
@@ -2248,6 +2251,8 @@ inline void StacklessBVH::query_points_triangles_no_mask(
     muda::CBufferView<Vector3>  displacements,
     muda::CBufferView<Float>    thicknesses,
     muda::CBufferView<Float>    d_hats,
+    muda::CBufferView<Float>    triangle_thicknesses,
+    muda::CBufferView<Float>    triangle_d_hats,
     Float                       alpha,
     muda::CBufferView<IndexT>   vertex_to_body,
     muda::CBufferView<IndexT>   body_self_collision,
@@ -2260,6 +2265,8 @@ inline void StacklessBVH::query_points_triangles_no_mask(
                                                           displacements,
                                                           thicknesses,
                                                           d_hats,
+                                                          triangle_thicknesses,
+                                                          triangle_d_hats,
                                                           alpha,
                                                           vertex_to_body,
                                                           body_self_collision,
@@ -2282,6 +2289,8 @@ inline void StacklessBVH::query_points_triangles_no_mask(
                                               displacements,
                                               thicknesses,
                                               d_hats,
+                                              triangle_thicknesses,
+                                              triangle_d_hats,
                                               alpha,
                                               vertex_to_body,
                                               body_self_collision,
