@@ -936,9 +936,9 @@ void ABDLinearSubsystem::Impl::assemble(GlobalLinearSystem::DiagInfo& info)
     else  // contact only
     {
         profile_t0 = corex_profile::now_ms();
-        checkCudaErrors(cudaMemset(info.gradients().buffer_view().data(),
-                                   0,
-                                   sizeof(Float) * info.gradients().size()));
+        checkCudaErrors(cudaMemsetAsync(info.gradients().buffer_view().data(),
+                                        0,
+                                        sizeof(Float) * info.gradients().size()));
         profile_contact_zero_ms += corex_profile::now_ms() - profile_t0;
     }
 
@@ -1013,15 +1013,15 @@ void ABDLinearSubsystem::Impl::_assemble_kinetic_shape(IndexT& hess_offset,
         {
             if(count == 0)
                 return;
-            auto err0 = cudaMemset(body_id_to_shape_gradient.data() + offset,
-                                   0,
-                                   sizeof(Vector12) * count);
+            auto err0 = cudaMemsetAsync(body_id_to_shape_gradient.data() + offset,
+                                        0,
+                                        sizeof(Vector12) * count);
             UIPC_ASSERT(err0 == cudaSuccess,
                         "cudaMemset(shape_gradient) failed: {}",
                         cudaGetErrorString(err0));
-            auto err1 = cudaMemset(body_id_to_shape_hessian.data() + offset,
-                                   0,
-                                   sizeof(Matrix12x12) * count);
+            auto err1 = cudaMemsetAsync(body_id_to_shape_hessian.data() + offset,
+                                        0,
+                                        sizeof(Matrix12x12) * count);
             UIPC_ASSERT(err1 == cudaSuccess,
                         "cudaMemset(shape_hessian) failed: {}",
                         cudaGetErrorString(err1));
@@ -1342,9 +1342,9 @@ void ABDLinearSubsystem::Impl::_assemble_dytopo_effect(IndexT& offset,
 
     if(!has_flags(info.component_flags(), GlobalLinearSystem::ComponentFlags::Complement))
     {
-        checkCudaErrors(cudaMemset(this->diag_hessian.data(),
-                                   0,
-                                   sizeof(Matrix12x12) * this->diag_hessian.size()));
+        checkCudaErrors(cudaMemsetAsync(this->diag_hessian.data(),
+                                        0,
+                                        sizeof(Matrix12x12) * this->diag_hessian.size()));
     }
 
     dytopo_hessian_reducer.build(src_hess,
