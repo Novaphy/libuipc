@@ -50,6 +50,13 @@ class DeviceTripletMatrix
         m_col_indices.resize(nonzero_count);
     }
 
+    void unsafe_resize_triplets_no_construct(size_t nonzero_count)
+    {
+        m_values.unsafe_resize_no_construct(nonzero_count);
+        m_row_indices.unsafe_resize_no_construct(nonzero_count);
+        m_col_indices.unsafe_resize_no_construct(nonzero_count);
+    }
+
     void reserve_triplets(size_t nonzero_count)
     {
         m_values.reserve(nonzero_count);

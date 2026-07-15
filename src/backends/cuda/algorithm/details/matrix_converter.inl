@@ -94,7 +94,7 @@ void MatrixConverter<T, N>::convert(const muda::DeviceTripletMatrix<T, N>& from,
                                     muda::DeviceBCOOMatrix<T, N>&          to)
 {
     to.reshape(from.rows(), from.cols());
-    to.resize_triplets(from.triplet_count());
+    to.unsafe_resize_triplets_no_construct(from.triplet_count());
 
     if(to.triplet_count() == 0)
         return;
@@ -259,10 +259,10 @@ void MatrixConverter<T, N>::_make_unique_indices(const muda::DeviceTripletMatrix
 
     int h_count = corex_readback_int(count);
 
-    unique_ij_pairs.resize(h_count);
-    unique_counts.resize(h_count);
+    unique_ij_pairs.unsafe_resize_no_construct(h_count);
+    unique_counts.unsafe_resize_no_construct(h_count);
 
-    offsets.resize(unique_counts.size());
+    offsets.unsafe_resize_no_construct(unique_counts.size());
 
     {
         corex_profile::ScopedPhase phase("matconv", "triplet_unique_counts_scan");
@@ -277,7 +277,7 @@ void MatrixConverter<T, N>::_make_unique_indices(const muda::DeviceTripletMatrix
         thrust::raw_pointer_cast(row_indices.data()),
         thrust::raw_pointer_cast(col_indices.data()));
 
-    to.resize_triplets(h_count);
+    to.unsafe_resize_triplets_no_construct(h_count);
 }
 
 template <typename T, int N>
@@ -373,8 +373,8 @@ void MatrixConverter<T, N>::_calculate_block_offsets(const muda::DeviceBCOOMatri
     }
     int h_count = corex_readback_int(count);
 
-    unique_indices.resize(h_count);
-    unique_counts.resize(h_count);
+    unique_indices.unsafe_resize_no_construct(h_count);
+    unique_counts.unsafe_resize_no_construct(h_count);
 
     corex_matconv::launch_scatter_col_counts(
         static_cast<int>(unique_counts.size()),
@@ -459,10 +459,10 @@ void MatrixConverter<T, N>::_make_unique_indices(const muda::DeviceDoubletVector
 
     int h_count = corex_readback_int(count);
 
-    unique_indices.resize(h_count);
-    unique_counts.resize(h_count);
+    unique_indices.unsafe_resize_no_construct(h_count);
+    unique_counts.unsafe_resize_no_construct(h_count);
 
-    offsets.resize(unique_counts.size());
+    offsets.unsafe_resize_no_construct(unique_counts.size());
 
     {
         corex_profile::ScopedPhase phase("matconv", "doublet_unique_counts_scan");
