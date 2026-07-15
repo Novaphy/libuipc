@@ -71,6 +71,12 @@ bool block_inverse_precond_stats_enabled()
     return env[0] != '\0' && env[0] != '0';
 }
 
+bool corex_abd_precond_sync_enabled()
+{
+    return std::getenv("UIPC_COREX_ABD_PRECOND_SYNC") != nullptr
+           || std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+}
+
 __device__ inline Float corex_abs(Float v)
 {
     return v < 0 ? -v : v;
@@ -385,7 +391,7 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
                         max_abs_diag);
                 }
                 checkCudaErrors(cudaGetLastError());
-                if(std::getenv("UIPC_COREX_ABD_PRECOND_SKIP_SYNC") == nullptr)
+                if(corex_abd_precond_sync_enabled())
                     checkCudaErrors(cudaDeviceSynchronize());
                 if(block_inverse_enabled
                    && (block_inverse_precond_stats_enabled()
@@ -483,7 +489,7 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
                         (const IndexT*)converged.data());
                 }
                 checkCudaErrors(cudaGetLastError());
-                if(std::getenv("UIPC_COREX_ABD_PRECOND_SKIP_SYNC") == nullptr)
+                if(corex_abd_precond_sync_enabled())
                     checkCudaErrors(cudaDeviceSynchronize());
             }
         }
