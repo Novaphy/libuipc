@@ -1851,7 +1851,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
         checkCudaErrors(cudaMemsetAsync(selected_PT_count.data(), 0, sizeof(IndexT)));
         checkCudaErrors(cudaMemsetAsync(selected_EE_count.data(), 0, sizeof(IndexT)));
 
-        constexpr int block = 256;
+        constexpr int block = 512;
         if(N_PCoimP > 0)
         {
             int n = static_cast<int>(N_PCoimP);
