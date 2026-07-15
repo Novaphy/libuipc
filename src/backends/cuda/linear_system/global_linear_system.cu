@@ -60,6 +60,16 @@ bool corex_force_host_ge2sym_enabled()
     return enabled;
 }
 
+cudaEvent_t corex_preconditioner_ready_event()
+{
+    static cudaEvent_t event = [] {
+        cudaEvent_t e = nullptr;
+        checkCudaErrors(cudaEventCreateWithFlags(&e, cudaEventDisableTiming));
+        return e;
+    }();
+    return event;
+}
+
 bool corex_env_enabled(const char* name)
 {
     const char* env = std::getenv(name);
@@ -610,6 +620,9 @@ void GlobalLinearSystem::Impl::build_linear_system()
         logger::info("[corex_trace][precond_asm] pre-precond sync begin");
     trace("pre-precond sync: begin");
     profile_t0 = corex_profile::now_ms();
+    auto preconditioner_ready = corex_preconditioner_ready_event();
+    checkCudaErrors(cudaEventRecord(preconditioner_ready, nullptr));
+    checkCudaErrors(cudaStreamWaitEvent(ctx.stream(), preconditioner_ready, 0));
     checkCudaErrors(cudaGetLastError());
     corex_profile::log_phase("linear",
                              "pre_preconditioner_sync",
