@@ -164,6 +164,27 @@ int pick_gpu_device(int argc, char** argv)
 
     return gpu;
 }
+
+bool pick_quiet(int argc, char** argv)
+{
+    for(int i = 1; i < argc; ++i)
+    {
+        if(std::string_view{argv[i]} == "--quiet")
+            return true;
+    }
+    return false;
+}
+
+bool pick_write_output(int argc, char** argv)
+{
+    for(int i = 1; i < argc; ++i)
+    {
+        const std::string_view arg{argv[i]};
+        if(arg == "--no-output" || arg == "--no-obj")
+            return false;
+    }
+    return true;
+}
 }  // namespace
 
 int main(int argc, char** argv)
@@ -173,7 +194,9 @@ int main(int argc, char** argv)
     using namespace uipc::geometry;
     using namespace uipc::constitution;
 
-    logger::set_level(spdlog::level::info);
+    const bool quiet        = pick_quiet(argc, argv);
+    const bool write_output = pick_write_output(argc, argv);
+    logger::set_level(quiet ? spdlog::level::warn : spdlog::level::info);
 
     // Explicitly initialize module_dir so backend dylibs are loadable.
     // This avoids relying on implicit defaults that may be invalid on some runtimes.
@@ -890,7 +913,8 @@ int main(int argc, char** argv)
     std::fflush(stderr);
 
     SceneIO sio{scene};
-    sio.write_surface(fmt::format("{}scene_surface_{:04d}.obj", output, 0));
+    if(write_output)
+        sio.write_surface(fmt::format("{}scene_surface_{:04d}.obj", output, 0));
 
     if(engine.backend_name() == "none")
         frames = 1;
@@ -898,7 +922,7 @@ int main(int argc, char** argv)
     for(int i = 1; i < frames; ++i)
     {
 #if defined(UIPC_APP_COREX_BUILD) && UIPC_APP_COREX_BUILD
-        if(i <= 3 || i == frames - 1)
+        if(!quiet && (i <= 3 || i == frames - 1))
         {
             fmt::println(stderr, "[corex_demo] frame {} / {} ...", i, frames);
             std::fflush(stderr);
@@ -907,15 +931,18 @@ int main(int argc, char** argv)
         auto t0 = std::chrono::steady_clock::now();
         world.advance();
         auto t1 = std::chrono::steady_clock::now();
-        world.sync();
+        if(write_output || i == frames - 1)
+            world.sync();
         auto t2 = std::chrono::steady_clock::now();
-        world.retrieve();
+        if(write_output)
+            world.retrieve();
         auto t3 = std::chrono::steady_clock::now();
-        sio.write_surface(fmt::format("{}scene_surface_{:04d}.obj", output, i));
+        if(write_output)
+            sio.write_surface(fmt::format("{}scene_surface_{:04d}.obj", output, i));
         auto t4 = std::chrono::steady_clock::now();
 
         const bool profile_all_frames = std::getenv("UIPC_COREX_PHASE_PROFILE") != nullptr;
-        if(profile_all_frames || i <= 3 || i == frames - 1)
+        if(profile_all_frames || (!quiet && (i <= 3 || i == frames - 1)))
         {
             auto ms = [](auto a, auto b)
             {
@@ -932,6 +959,9 @@ int main(int argc, char** argv)
         }
     }
 
-    fmt::println("Wrote OBJ sequence to: {}", output);
+    if(write_output)
+        fmt::println("Wrote OBJ sequence to: {}", output);
+    else
+        fmt::println("OBJ output disabled for benchmark run.");
     return 0;
 }
