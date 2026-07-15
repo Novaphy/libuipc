@@ -11,6 +11,45 @@
 
 namespace uipc::backend::cuda
 {
+namespace
+{
+struct CorexLineSearchFloatReadback
+{
+    Float*       pinned = nullptr;
+    cudaStream_t stream = nullptr;
+    cudaEvent_t  ready = nullptr;
+
+    CorexLineSearchFloatReadback()
+    {
+        Float* tmp = nullptr;
+        if(cudaMallocHost(reinterpret_cast<void**>(&tmp), sizeof(Float)) == cudaSuccess)
+            pinned = tmp;
+        checkCudaErrors(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        checkCudaErrors(cudaEventCreateWithFlags(&ready, cudaEventDisableTiming));
+    }
+};
+
+inline Float corex_line_search_readback_float(const Float* value)
+{
+    static CorexLineSearchFloatReadback readback;
+    if(!readback.pinned)
+    {
+        Float host_value = 0.0;
+        checkCudaErrors(cudaMemcpy(&host_value, value, sizeof(Float), cudaMemcpyDeviceToHost));
+        return host_value;
+    }
+
+    checkCudaErrors(cudaEventRecord(readback.ready, 0));
+    checkCudaErrors(cudaStreamWaitEvent(readback.stream, readback.ready, 0));
+    checkCudaErrors(cudaMemcpyAsync(readback.pinned,
+                                    value,
+                                    sizeof(Float),
+                                    cudaMemcpyDeviceToHost,
+                                    readback.stream));
+    checkCudaErrors(cudaStreamSynchronize(readback.stream));
+    return *readback.pinned;
+}
+}  // namespace
 
 __global__ void kernel_step_forward(int            n,
                                     Float          alpha,
@@ -193,8 +232,7 @@ void ABDLineSearchReporter::Impl::compute_energy(LineSearcher::ComputeEnergyInfo
         checkCudaErrors(cudaGetLastError());
     }
 
-    Float E = 0.0;
-    total_reporter_energy.view().copy_to(&E);
+    Float E = corex_line_search_readback_float(total_reporter_energy.data());
 
     static const bool trace_linear_system =
         std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
