@@ -104,27 +104,6 @@ void ABDLineSearchReporter::Impl::step_forward(LineSearcher::StepInfo& info)
     if(n <= 0)
         return;
 
-    if(std::getenv("UIPC_COREX_ABD_LINE_SEARCH_HOST_STEP"))
-    {
-        std::vector<IndexT> h_fixed(n);
-        std::vector<Float>  h_qt(n * 12), h_dq(n * 12);
-        checkCudaErrors(cudaMemcpy(h_fixed.data(), abd().body_id_to_is_fixed.data(), n * sizeof(IndexT), cudaMemcpyDeviceToHost));
-        checkCudaErrors(cudaMemcpy(h_qt.data(), abd().body_id_to_q_temp.data(), n * 12 * sizeof(Float), cudaMemcpyDeviceToHost));
-        checkCudaErrors(cudaMemcpy(h_dq.data(), abd().body_id_to_dq.data(), n * 12 * sizeof(Float), cudaMemcpyDeviceToHost));
-
-        std::vector<Float> h_q(h_qt);
-        for(int i = 0; i < n; ++i)
-        {
-            if(h_fixed[i])
-                continue;
-            for(int k = 0; k < 12; ++k)
-                h_q[i * 12 + k] = h_qt[i * 12 + k] + info.alpha * h_dq[i * 12 + k];
-        }
-
-        checkCudaErrors(cudaMemcpy((void*)abd().body_id_to_q.data(), h_q.data(), n * 12 * sizeof(Float), cudaMemcpyHostToDevice));
-        return;
-    }
-
     constexpr int block = 256;
     int           grid  = (n + block - 1) / block;
     kernel_step_forward<<<grid, block>>>(n,
