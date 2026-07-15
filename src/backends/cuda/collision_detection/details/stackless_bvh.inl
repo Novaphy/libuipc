@@ -253,7 +253,8 @@ static __global__ void kernel_reorderNode(int N, int intSize,
                                     const int* tkMap, const int* int_lc,
                                     const uint32_t* int_mark, const int* int_range_y,
                                     const AABB* int_aabb,
-                                    stacklessnode* nodes)
+                                    stacklessnode* nodes,
+                                    int* node_range_y)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(idx >= N) return;
@@ -272,6 +273,7 @@ static __global__ void kernel_reorderNode(int N, int intSize,
     }
     Node.bound = lvs_box[idx];
     nodes[idx + intSize] = Node;
+    node_range_y[idx + intSize] = idx;
 
     if(idx < intSize)
     {
@@ -292,6 +294,7 @@ static __global__ void kernel_reorderNode(int N, int intSize,
             intNode.escape = intEscape + (bLeaf ? intSize : 0);
         }
         nodes[newId] = intNode;
+        node_range_y[newId] = int_range_y[idx];
     }
 }
 
@@ -672,7 +675,7 @@ MUDA_INLINE void StacklessBVH::Impl::reorderNode(int intSize)
     corex_bvh::kernel_reorderNode<<<grid, block>>>(N, intSize,
         RAW_PTR(ext_lca), RAW_PTR(ext_aabb),
         RAW_PTR(tkMap), RAW_PTR(int_lc), RAW_PTR(int_mark), RAW_PTR(int_range_y),
-        RAW_PTR(int_aabb), RAW_PTR(nodes));
+        RAW_PTR(int_aabb), RAW_PTR(nodes), RAW_PTR(node_range_y));
     checkCudaErrors(cudaGetLastError());
 }
 
@@ -764,6 +767,7 @@ inline void StacklessBVH::Impl::build(muda::CBufferView<AABB> aabbs)
     int_aabb.resize(numInternalNodes);
 
     nodes.resize(numNodes);
+    node_range_y.resize(numNodes);
 
 
     // Initialize flags to 0
@@ -824,6 +828,7 @@ void StacklessBVH::Impl::StacklessCDSharedSelf(Pred               pred,
              numObjs    = numObjs,
              _lvs_idx   = ext_idx.viewer().name("_lvs_idx"),
              _nodes     = nodes.viewer().name("_nodes"),
+             _node_range_y = node_range_y.viewer().name("_node_range_y"),
              resCounter = cpNum.viewer().name("resCounter"),
              res        = buffer.viewer().name("res"),
              pred] __device__()
@@ -863,6 +868,11 @@ void StacklessBVH::Impl::StacklessCDSharedSelf(Pred               pred,
                             node.lc     = _nodes(st).lc;
                             node.escape = _nodes(st).escape;
                             node.bound  = _nodes(st).bound;
+                            if(_node_range_y(st) <= tid)
+                            {
+                                st = node.escape;
+                                continue;
+                            }
                             //node = _nodes[st];
                             if(node.bound.intersects(bv))
                             {
@@ -960,6 +970,7 @@ inline void StacklessBVH::Impl::StacklessCDSharedSelfEdgesNoMask(
              numObjs    = numObjs,
              _lvs_idx   = ext_idx.viewer().name("_lvs_idx"),
              _nodes     = nodes.viewer().name("_nodes"),
+             _node_range_y = node_range_y.viewer().name("_node_range_y"),
              edges      = edges.viewer().name("edges"),
              v2b        = vertex_to_body.viewer().name("v2b"),
              body_self_collision = body_self_collision.viewer().name("body_self_collision"),
@@ -1004,6 +1015,11 @@ inline void StacklessBVH::Impl::StacklessCDSharedSelfEdgesNoMask(
                             node.lc     = _nodes(st).lc;
                             node.escape = _nodes(st).escape;
                             node.bound  = _nodes(st).bound;
+                            if(_node_range_y(st) <= tid)
+                            {
+                                st = node.escape;
+                                continue;
+                            }
 
                             if(node.bound.intersects(bv))
                             {

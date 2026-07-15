@@ -254,6 +254,7 @@ class StacklessBVH
 
         muda::DeviceBuffer<ulonglong2> quantNode;
         muda::DeviceBuffer<Node>       nodes;
+        muda::DeviceBuffer<int>        node_range_y;
 
         Config config;
     };
