@@ -59,23 +59,44 @@ inline int corex_compact_hash_sort_end_bit(SizeT rows, SizeT cols)
     return std::min(64, corex_index_sort_end_bit(key_count));
 }
 
-inline int corex_readback_int(const muda::DeviceVar<int>& value)
+struct CorexIntReadback
 {
-    static int* pinned = nullptr;
-    if(!pinned)
+    int*         pinned = nullptr;
+    cudaStream_t stream = nullptr;
+    cudaEvent_t  ready = nullptr;
+
+    CorexIntReadback()
     {
         int* tmp = nullptr;
         if(cudaMallocHost(reinterpret_cast<void**>(&tmp), sizeof(int)) == cudaSuccess)
             pinned = tmp;
+        checkCudaErrors(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        checkCudaErrors(cudaEventCreateWithFlags(&ready, cudaEventDisableTiming));
     }
+};
 
-    if(!pinned)
+inline CorexIntReadback& corex_int_readback()
+{
+    static CorexIntReadback readback;
+    return readback;
+}
+
+inline int corex_readback_int(const muda::DeviceVar<int>& value)
+{
+    auto& readback = corex_int_readback();
+
+    if(!readback.pinned)
         return value;
 
-    checkCudaErrors(cudaMemcpyAsync(
-        pinned, value.data(), sizeof(int), cudaMemcpyDeviceToHost, 0));
-    checkCudaErrors(cudaStreamSynchronize(0));
-    return *pinned;
+    checkCudaErrors(cudaEventRecord(readback.ready, 0));
+    checkCudaErrors(cudaStreamWaitEvent(readback.stream, readback.ready, 0));
+    checkCudaErrors(cudaMemcpyAsync(readback.pinned,
+                                    value.data(),
+                                    sizeof(int),
+                                    cudaMemcpyDeviceToHost,
+                                    readback.stream));
+    checkCudaErrors(cudaStreamSynchronize(readback.stream));
+    return *readback.pinned;
 }
 }  // namespace
 
