@@ -76,7 +76,7 @@ void Logger::current_logger(Logger logger)
     Impl::current_logger_instance() = logger;
 }
 
-Logger Logger::current_logger()
+Logger& Logger::current_logger()
 {
     return Impl::current_logger_instance();
 }

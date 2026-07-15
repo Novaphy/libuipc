@@ -72,7 +72,7 @@ class UIPC_CORE_API Logger
     }
 
     static void   current_logger(Logger logger);
-    static Logger current_logger();
+    static Logger& current_logger();
 
   private:
     void _debug(std::string_view msg);
