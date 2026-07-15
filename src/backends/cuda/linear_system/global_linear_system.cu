@@ -715,8 +715,8 @@ bool GlobalLinearSystem::Impl::_update_subsystem_extent()
     }
     auto blocked_dof = total_dof / DoFBlockSize;
     triplet_A.reshape(blocked_dof, blocked_dof);
-    x.resize(total_dof);
-    b.resize(total_dof);
+    x.unsafe_resize_no_construct(total_dof);
+    b.unsafe_resize_no_construct(total_dof);
 
     if(triplet_count_changed) [[likely]]
     {
@@ -730,7 +730,7 @@ bool GlobalLinearSystem::Impl::_update_subsystem_extent()
         triplet_A.reserve_triplets(reserve_count);
         bcoo_A.reserve_triplets(reserve_count);
     }
-    triplet_A.resize_triplets(total_triplet);
+    triplet_A.unsafe_resize_triplets_no_construct(total_triplet);
 
     if(total_dof == 0 || total_triplet == 0) [[unlikely]]
     {
