@@ -181,11 +181,14 @@ void GlobalTrajectoryFilter::filter_active()
 Float GlobalTrajectoryFilter::Impl::filter_toi(Float alpha)
 {
     auto profile_t0 = corex_profile::now_ms();
-    // Reset tois for this evaluation. Some filters may early-out and not write toi,
-    // so we must keep a valid default (1.0) to avoid bogus min-toi=0.
-    tois.fill(1.0f);
 
     auto filter_view = filters.view();
+    // Reset only when multiple filters may contribute. With a single filter the
+    // filter owns the scalar and writes the no-restriction value itself, avoiding
+    // a tiny but very high-frequency fill kernel in line search.
+    if(filter_view.size() > 1)
+        tois.fill(1.0f);
+
     for(auto&& [i, filter] : enumerate(filter_view))
     {
         auto profile_filter_t0 = corex_profile::now_ms();
