@@ -381,7 +381,7 @@ void SimEngine::advance()
                     }
 
                     bool converged  = convergence_check(newton_iter);
-                    bool terminated = converged && (newton_iter >= newton_min_iter);
+                    bool terminated = converged && (newton_iter + 1 >= newton_min_iter);
                     if(terminated)
                     {
                         commit_converged_step(alpha);
