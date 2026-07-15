@@ -590,8 +590,7 @@ void GlobalLinearSystem::Impl::build_linear_system()
         logger::info("[corex_trace][precond_asm] pre-precond sync begin");
     trace("pre-precond sync: begin");
     profile_t0 = corex_profile::now_ms();
-    if(corex_linear_sync_enabled("UIPC_COREX_SKIP_PRE_PRECOND_SYNC"))
-        checkCudaErrors(cudaDeviceSynchronize());
+    checkCudaErrors(cudaGetLastError());
     corex_profile::log_phase("linear",
                              "pre_preconditioner_sync",
                              -1,
@@ -618,8 +617,7 @@ void GlobalLinearSystem::Impl::build_linear_system()
     if(corex_trace)
         logger::info("[corex_trace][precond_asm] post-precond sync begin");
     profile_t0 = corex_profile::now_ms();
-    if(corex_linear_sync_enabled("UIPC_COREX_SKIP_POST_PRECOND_SYNC"))
-        checkCudaErrors(cudaDeviceSynchronize());
+    checkCudaErrors(cudaGetLastError());
     corex_profile::log_phase("linear",
                              "post_preconditioner_sync",
                              -1,
