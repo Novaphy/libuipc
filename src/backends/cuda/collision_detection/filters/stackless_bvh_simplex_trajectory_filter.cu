@@ -1385,9 +1385,7 @@ int corex_filter_aabb_async_mask()
         if(env && env[0] != '\0')
             return env[0] != '0' ? 0xF : 0;
 
-        // Keep CoreX default synchronized. AABB async can change selected-set evolution
-        // on this path, so it remains opt-in through the mask env.
-        return 0;
+        return 0xB;
     }();
     return mask;
 }
@@ -1565,7 +1563,7 @@ static __global__ void kernel_block_valid_counts4(int             n_pp,
                                                   const Vector4i* in_ee,
                                                   int*            block_counts)
 {
-    __shared__ int s_prefix[256];
+    __shared__ int s_count[256];
 
     const int tid = threadIdx.x;
     const int bid = blockIdx.x;
@@ -1595,19 +1593,18 @@ static __global__ void kernel_block_valid_counts4(int             n_pp,
         flag = (i < n_ee && in_ee[i](0) != -1) ? 1 : 0;
     }
 
-    s_prefix[tid] = flag;
+    s_count[tid] = flag;
     __syncthreads();
 
-    for(int offset = 1; offset < blockDim.x; offset <<= 1)
+    for(int stride = blockDim.x >> 1; stride > 0; stride >>= 1)
     {
-        int v = tid >= offset ? s_prefix[tid - offset] : 0;
-        __syncthreads();
-        s_prefix[tid] += v;
+        if(tid < stride)
+            s_count[tid] += s_count[tid + stride];
         __syncthreads();
     }
 
-    if(tid == blockDim.x - 1)
-        block_counts[bid] = s_prefix[tid];
+    if(tid == 0)
+        block_counts[bid] = s_count[0];
 }
 
 static __global__ void kernel_block_scatter_valid4(int             n_pp,
@@ -1757,7 +1754,9 @@ static void corex_block_stable_select_valid4(int                     n_pp,
 
     kernel_zero_selected_counts4<<<1, 1>>>(pp_count, pe_count, pt_count, ee_count);
     if(grid <= 0)
+    {
         return;
+    }
 
     corex_filter_loose_resize(block_counts, grid);
     corex_filter_loose_resize(block_offsets, grid);
@@ -2113,7 +2112,9 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info,
 
     static const bool mask_fast_enabled = [] {
         const char* env = std::getenv("UIPC_COREX_FILTER_MASK_FAST");
-        return env && env[0] != '\0' && env[0] == '1';
+        if(env && env[0] != '\0')
+            return env[0] != '0';
+        return true;
     }();
     const int contact_mask_mode =
         mask_fast_enabled ? contact_mask_fast_mode : MaskFastNone;
@@ -2131,7 +2132,9 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info,
                 return static_cast<int>(v);
         }
         const char* env = std::getenv("UIPC_COREX_FILTER_NOMASK_TRAVERSAL");
-        return (env && env[0] != '\0' && env[0] == '1') ? 0x7 : 0;
+        if(env && env[0] != '\0')
+            return env[0] != '0' ? 0x7 : 0;
+        return 0x6;
     }();
     static const bool trace_simplex_filter =
         (std::getenv("UIPC_COREX_TRACE_SIMPLEX_FILTER") != nullptr);
@@ -2853,25 +2856,19 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info,
                     auto V = Vs(i);
                     auto F = Fs(j);
 
-                    if(!subscene_mask_fast)
-                    {
-                        Vector4i scids = {subscene_element_ids(V),
-                                          subscene_element_ids(F[0]),
-                                          subscene_element_ids(F[1]),
-                                          subscene_element_ids(F[2])};
-                        if(!allow_PT_contact_fast(subscene_mask_mode, subscene_mask_tabular, scids))
-                            return false;
-                    }
+                    Vector4i scids = {subscene_element_ids(V),
+                                      subscene_element_ids(F[0]),
+                                      subscene_element_ids(F[1]),
+                                      subscene_element_ids(F[2])};
+                    if(!allow_PT_contact_fast(subscene_mask_mode, subscene_mask_tabular, scids))
+                        return false;
 
-                    if(!contact_mask_fast)
-                    {
-                        Vector4i cids = {contact_element_ids(V),
-                                         contact_element_ids(F[0]),
-                                         contact_element_ids(F[1]),
-                                         contact_element_ids(F[2])};
-                        if(!allow_PT_contact_fast(contact_mask_mode, contact_mask_tabular, cids))
-                            return false;
-                    }
+                    Vector4i cids = {contact_element_ids(V),
+                                     contact_element_ids(F[0]),
+                                     contact_element_ids(F[1]),
+                                     contact_element_ids(F[2])};
+                    if(!allow_PT_contact_fast(contact_mask_mode, contact_mask_tabular, cids))
+                        return false;
 
                     // discard if the point is on the triangle
                     if(F[0] == V || F[1] == V || F[2] == V)
@@ -3627,8 +3624,12 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
         }();
         static const bool block_stable_select_enabled = [] {
             const char* env = std::getenv("UIPC_COREX_FILTER_BLOCK_STABLE_SELECT");
-            return env && env[0] != '\0' && env[0] == '1';
+            if(env && env[0] != '\0')
+                return env[0] != '0';
+            return true;
         }();
+        selected_counts.resize(4);
+        IndexT* selected_count_data = selected_counts.data();
         if(block_stable_select_enabled)
         {
             corex_profile::ScopedPhase phase("contact_filter_detail", "select_all_fused");
@@ -3646,10 +3647,10 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
                                              PEs.data(),
                                              PTs.data(),
                                              EEs.data(),
-                                             selected_PP_count.data(),
-                                             selected_PE_count.data(),
-                                             selected_PT_count.data(),
-                                             selected_EE_count.data());
+                                             selected_count_data + 0,
+                                             selected_count_data + 1,
+                                             selected_count_data + 2,
+                                             selected_count_data + 3);
         }
         else if(ordered_scan_select_enabled)
         {
@@ -3734,20 +3735,22 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
             checkCudaErrors(cudaMemsetAsync(selected_EE_count.data(), 0, sizeof(IndexT)));
         }
 
-        selected_counts.resize(4);
-        kernel_pack_selected_counts<<<1, 1>>>(
-            selected_PP_count.data(),
-            selected_PE_count.data(),
-            selected_PT_count.data(),
-            selected_EE_count.data(),
-            selected_counts.data());
+        if(!block_stable_select_enabled)
+        {
+            kernel_pack_selected_counts<<<1, 1>>>(
+                selected_PP_count.data(),
+                selected_PE_count.data(),
+                selected_PT_count.data(),
+                selected_EE_count.data(),
+                selected_count_data);
+        }
 
         IndexT h_selected_counts[4] = {0, 0, 0, 0};
         {
             corex_profile::ScopedPhase count_phase("contact_filter_detail",
                                                    "select_count_readback");
             checkCudaErrors(cudaMemcpy(h_selected_counts,
-                                       selected_counts.data(),
+                                       selected_count_data,
                                        sizeof(h_selected_counts),
                                        cudaMemcpyDeviceToHost));
         }

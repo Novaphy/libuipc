@@ -293,6 +293,8 @@ class StacklessBVH
         muda::DeviceVar<AABB>      scene_box;  // external bounding boxes
         muda::DeviceBuffer<uint32_t> flags;
         muda::DeviceBuffer<uint32_t> mtcode;  // external morton codes
+        muda::DeviceBuffer<uint32_t> mtcode_sorted;
+        muda::DeviceBuffer<int32_t>  sorted_id_input;
         muda::DeviceBuffer<int32_t>  sorted_id;
         muda::DeviceBuffer<int32_t>  primMap;
         muda::DeviceBuffer<int>      metric;

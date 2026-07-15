@@ -1,6 +1,7 @@
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #include <cuda_device/builtin.h>
 #include <muda/launch.h>
+#include <muda/cub/device/device_radix_sort.h>
 #include <thrust/device_ptr.h>
 #define RAW_PTR(x) thrust::raw_pointer_cast((x).data())
 
@@ -32,6 +33,13 @@ constexpr uint   MaxIndex  = 0xFFFFFFFFFFFFFFFFu >> offset3;
 
 constexpr uint MAX_CD_NUM_PER_VERT = 64;
 constexpr int  MAX_RES_PER_BLOCK   = 2048;
+
+static __global__ void kernel_fill_u32(uint32_t* data, int n, uint32_t value)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i < n)
+        data[i] = value;
+}
 
 struct PlainAABB
 {
@@ -810,6 +818,8 @@ inline void StacklessBVH::Impl::build(muda::CBufferView<AABB> aabbs)
 
 
     mtcode.resize(numObjs);
+    mtcode_sorted.resize(numObjs);
+    sorted_id_input.resize(numObjs);
     sorted_id.resize(numObjs);
     primMap.resize(numObjs);
     ext_aabb.resize(numObjs);
@@ -836,41 +846,79 @@ inline void StacklessBVH::Impl::build(muda::CBufferView<AABB> aabbs)
     node_range_y.resize(numNodes);
 
 
-    // Initialize flags to 0
-    thrust::fill(thrust::device, flags.data(), flags.data() + flags.size(), 0);
-    thrust::fill(thrust::device, ext_mark.data(), ext_mark.data() + ext_mark.size(), 7);
-    thrust::fill(thrust::device, ext_lca.data(), ext_lca.data() + ext_lca.size(), 0);
-    thrust::fill(thrust::device, ext_par.data(), ext_par.data() + ext_par.size(), 0);
+    if(flags.size() > 0)
+        checkCudaErrors(cudaMemsetAsync(RAW_PTR(flags), 0, sizeof(uint32_t) * flags.size()));
+    if(ext_lca.size() > 0)
+        checkCudaErrors(cudaMemsetAsync(RAW_PTR(ext_lca), 0, sizeof(int) * ext_lca.size()));
+    if(ext_par.size() > 0)
+        checkCudaErrors(cudaMemsetAsync(RAW_PTR(ext_par), 0, sizeof(uint32_t) * ext_par.size()));
+    if(ext_mark.size() > 0)
+    {
+        constexpr int block = 256;
+        int grid = (static_cast<int>(ext_mark.size()) + block - 1) / block;
+        corex_bvh::kernel_fill_u32<<<grid, block>>>(
+            RAW_PTR(ext_mark), static_cast<int>(ext_mark.size()), uint32_t{7});
+        checkCudaErrors(cudaGetLastError());
+    }
 
-    calcMaxBVFromBox(aabbs, scene_box.view());
+    {
+        calcMaxBVFromBox(aabbs, scene_box.view());
+    }
 
-    calcMCsFromBox(aabbs, scene_box.view(), mtcode.view());
+    {
+        calcMCsFromBox(aabbs, scene_box.view(), mtcode.view());
+    }
 
     auto null_stream = thrust::cuda::par.on(nullptr);
 
-    thrust::sequence(null_stream, sorted_id.data(), sorted_id.data() + sorted_id.size());
-    thrust::sort_by_key(
-        null_stream, mtcode.data(), mtcode.data() + mtcode.size(), sorted_id.data());
+    {
+        thrust::sequence(null_stream,
+                         sorted_id_input.data(),
+                         sorted_id_input.data() + sorted_id_input.size());
+        muda::DeviceRadixSort().SortPairs(mtcode.data(),
+                                          mtcode_sorted.data(),
+                                          sorted_id_input.data(),
+                                          sorted_id.data(),
+                                          mtcode.size(),
+                                          0,
+                                          30);
+        mtcode.view().copy_from(mtcode_sorted.view());
+    }
 
-    calcInverseMapping();
+    {
+        calcInverseMapping();
+    }
 
-    buildPrimitivesFromBox(aabbs);
+    {
+        buildPrimitivesFromBox(aabbs);
+    }
 
-    calcExtNodeSplitMetrics();
+    {
+        calcExtNodeSplitMetrics();
+    }
 
-    buildIntNodes(numObjs);
+    {
+        buildIntNodes(numObjs);
+    }
 
-    thrust::exclusive_scan(
-        null_stream, count.data(), count.data() + count.size(), offsetTable.data());
+    {
+        thrust::exclusive_scan(
+            null_stream, count.data(), count.data() + count.size(), offsetTable.data());
+    }
 
-    calcIntNodeOrders(numObjs);
+    {
+        calcIntNodeOrders(numObjs);
+    }
 
-    // fill the last ext_lca to -1
-    thrust::fill(null_stream, ext_lca.data() + numObjs, ext_lca.data() + numObjs + 1, -1);
+    {
+        // fill the last ext_lca to -1
+        thrust::fill(null_stream, ext_lca.data() + numObjs, ext_lca.data() + numObjs + 1, -1);
+        updateBvhExtNodeLinks(numObjs);
+    }
 
-    updateBvhExtNodeLinks(numObjs);
-
-    reorderNode(numInternalNodes);
+    {
+        reorderNode(numInternalNodes);
+    }
 }
 
 template <typename Pred>

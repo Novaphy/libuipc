@@ -413,14 +413,16 @@ void SimEngine::advance()
                         Timer timer{"Line Search Iteration"};
                         m_line_search_iter = line_search_iter;
 
+                        if(converged)
+                        {
+                            commit_converged_step(alpha);
+                            break;
+                        }
+
                         // Compute Test Energy:
                         //  * Step Forward => x = x_0 + alpha * dx
                         //  * Compute New Energy => E
                         Float E = compute_energy(alpha);
-
-                        // To prevent numerical energy (fake-) increasing caused by tiny dx
-                        if(converged)
-                            break;
 
                         // Check Energy Decrease
                         // TODO: maybe better condition like Wolfe condition/Armijo condition in the future
