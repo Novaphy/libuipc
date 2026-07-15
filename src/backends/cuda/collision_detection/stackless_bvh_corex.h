@@ -289,6 +289,7 @@ class StacklessBVH
         void        calcIntNodeOrders(int size);
         void        updateBvhExtNodeLinks(int size);
         void        reorderNode(int intSize);
+        void        updateRefitNodeBounds(int intSize);
         muda::CBufferView<AABB> objs;  // external AABBs, should be kept valid
         muda::DeviceVar<AABB>      scene_box;  // external bounding boxes
         muda::DeviceBuffer<uint32_t> flags;

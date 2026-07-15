@@ -342,6 +342,25 @@ static __global__ void kernel_reorderNode(int N, int intSize,
     }
 }
 
+static __global__ void kernel_updateRefitNodeBounds(int            N,
+                                                    int            intSize,
+                                                    const AABB*    lvs_box,
+                                                    const int*     tkMap,
+                                                    const AABB*    int_aabb,
+                                                    stacklessnode* nodes)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= N) return;
+
+    nodes[idx + intSize].bound = lvs_box[idx];
+
+    if(idx < intSize)
+    {
+        int newId = tkMap[idx];
+        nodes[newId].bound = int_aabb[idx];
+    }
+}
+
 static __global__ void kernel_refitIntNodes(int             size,
                                             const uint32_t* ext_par,
                                             const AABB*     ext_aabb,
@@ -753,6 +772,23 @@ MUDA_INLINE void StacklessBVH::Impl::reorderNode(int intSize)
     checkCudaErrors(cudaGetLastError());
 }
 
+MUDA_INLINE void StacklessBVH::Impl::updateRefitNodeBounds(int intSize)
+{
+    using namespace culbvh;
+    using namespace muda;
+    int N = intSize + 1;
+    if(N == 0) return;
+
+    int block = 256, grid = (N + block - 1) / block;
+    corex_bvh::kernel_updateRefitNodeBounds<<<grid, block>>>(N,
+                                                             intSize,
+                                                             RAW_PTR(ext_aabb),
+                                                             RAW_PTR(tkMap),
+                                                             RAW_PTR(int_aabb),
+                                                             RAW_PTR(nodes));
+    checkCudaErrors(cudaGetLastError());
+}
+
 MUDA_INLINE bool StacklessBVH::Impl::can_refit(muda::CBufferView<AABB> aabbs) const
 {
     auto numObjs = aabbs.size();
@@ -786,9 +822,12 @@ inline void StacklessBVH::Impl::refit(muda::CBufferView<AABB> aabbs)
 
     if(numInternalNodes > 0)
     {
-        thrust::fill(thrust::device, flags.data(), flags.data() + flags.size(), 0);
-
         int block = 256;
+        int flag_grid = (static_cast<int>(flags.size()) + block - 1) / block;
+        corex_bvh::kernel_fill_u32<<<flag_grid, block>>>(
+            RAW_PTR(flags), static_cast<int>(flags.size()), uint32_t{0});
+        checkCudaErrors(cudaGetLastError());
+
         int grid  = (numObjs + block - 1) / block;
         corex_bvh::kernel_refitIntNodes<<<grid, block>>>(numObjs,
                                                          RAW_PTR(ext_par),
@@ -802,7 +841,7 @@ inline void StacklessBVH::Impl::refit(muda::CBufferView<AABB> aabbs)
         checkCudaErrors(cudaGetLastError());
     }
 
-    reorderNode(numInternalNodes);
+    updateRefitNodeBounds(numInternalNodes);
 }
 
 inline void StacklessBVH::Impl::build(muda::CBufferView<AABB> aabbs)
