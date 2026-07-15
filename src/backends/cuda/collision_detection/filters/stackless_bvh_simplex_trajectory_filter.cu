@@ -247,8 +247,6 @@ static __global__ void kernel_filter_toi_EE(
 static inline void corex_filter_active_post_launch()
 {
     cudaGetLastError();
-    if(std::getenv("UIPC_COREX_FILTER_ACTIVE_SYNC") != nullptr)
-        cudaDeviceSynchronize();
 }
 
 MUDA_DEVICE MUDA_INLINE Float corex_sqr(Float x)
