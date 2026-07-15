@@ -653,6 +653,20 @@ static __global__ void kernel_mark_partition(int N, const int* unique_counts,
     sorted_partition[offsets[i] + unique_counts[i] - 1] = 1;
 }
 
+static __global__ void kernel_fill_segment_ids_from_offsets(int N,
+                                                            const int* unique_counts,
+                                                            const int* offsets,
+                                                            int* segment_ids)
+{
+    int seg = blockIdx.x;
+    if(seg >= N) return;
+
+    const int begin = offsets[seg];
+    const int count = unique_counts[seg];
+    for(int j = threadIdx.x; j < count; j += blockDim.x)
+        segment_ids[begin + j] = seg;
+}
+
 static __global__ void kernel_write_unique_indices(int N, const int* unique_indices,
                                                    int* dst_indices)
 {
@@ -765,6 +779,17 @@ void launch_mark_partition(int N, const int* unique_counts,
     MatconvPhase phase("mark_partition");
     kernel_mark_partition<<<grid_for(N), kBlock>>>(N, unique_counts, offsets, sorted_partition);
     corex_matconv_sync_if_needed("mark_partition");
+}
+
+void launch_fill_segment_ids_from_offsets(int N, const int* unique_counts,
+                                          const int* offsets, int* segment_ids)
+{
+    if(N <= 0)
+        return;
+    MatconvPhase phase("fill_segment_ids_from_offsets");
+    kernel_fill_segment_ids_from_offsets<<<N, kBlock>>>(
+        N, unique_counts, offsets, segment_ids);
+    corex_matconv_sync_if_needed("fill_segment_ids_from_offsets");
 }
 
 void launch_write_unique_indices(int N, const int* unique_indices, int* dst_indices)

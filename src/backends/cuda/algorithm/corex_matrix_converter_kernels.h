@@ -24,6 +24,9 @@ void launch_write_unique_ij(int N, const int* unique_ij_pairs_xy,
 void launch_mark_partition(int N, const int* unique_counts,
                            const int* offsets, int* sorted_partition);
 
+void launch_fill_segment_ids_from_offsets(int N, const int* unique_counts,
+                                          const int* offsets, int* segment_ids);
+
 void launch_write_unique_indices(int N, const int* unique_indices, int* dst_indices);
 
 void launch_scatter_col_counts(int N, const int* unique_indices,

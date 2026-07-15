@@ -286,24 +286,15 @@ void MatrixConverter<T, N>::_make_unique_block_warp_reduction(
 {
     using namespace muda;
 
-    loose_resize(sorted_partition_input, ij_pairs.size());
     loose_resize(sorted_partition_output, ij_pairs.size());
 
-    checkCudaErrors(cudaMemsetAsync(thrust::raw_pointer_cast(sorted_partition_input.data()),
-                                    0,
-                                    sorted_partition_input.size() * sizeof(int)));
-    corex_matconv::launch_mark_partition(
-        static_cast<int>(unique_counts.size()),
-        thrust::raw_pointer_cast(unique_counts.data()),
-        thrust::raw_pointer_cast(offsets.data()),
-        thrust::raw_pointer_cast(sorted_partition_input.data()));
-
-    // scatter
     {
-        corex_profile::ScopedPhase phase("matconv", "triplet_partition_scan");
-        DeviceScan().ExclusiveSum(sorted_partition_input.data(),
-                                  sorted_partition_output.data(),
-                                  sorted_partition_input.size());
+        corex_profile::ScopedPhase phase("matconv", "triplet_fill_segment_ids");
+        corex_matconv::launch_fill_segment_ids_from_offsets(
+            static_cast<int>(unique_counts.size()),
+            thrust::raw_pointer_cast(unique_counts.data()),
+            thrust::raw_pointer_cast(offsets.data()),
+            thrust::raw_pointer_cast(sorted_partition_output.data()));
     }
 
     auto blocks = to.values();
@@ -484,24 +475,15 @@ void MatrixConverter<T, N>::_make_unique_segment_warp_reduction(
 {
     using namespace muda;
 
-    loose_resize(sorted_partition_input, indices_sorted.size());
     loose_resize(sorted_partition_output, indices_sorted.size());
 
-    checkCudaErrors(cudaMemsetAsync(thrust::raw_pointer_cast(sorted_partition_input.data()),
-                                    0,
-                                    sorted_partition_input.size() * sizeof(int)));
-    corex_matconv::launch_mark_partition(
-        static_cast<int>(unique_counts.size()),
-        thrust::raw_pointer_cast(unique_counts.data()),
-        thrust::raw_pointer_cast(offsets.data()),
-        thrust::raw_pointer_cast(sorted_partition_input.data()));
-
-    // scatter
     {
-        corex_profile::ScopedPhase phase("matconv", "doublet_partition_scan");
-        DeviceScan().ExclusiveSum(sorted_partition_input.data(),
-                                  sorted_partition_output.data(),
-                                  sorted_partition_input.size());
+        corex_profile::ScopedPhase phase("matconv", "doublet_fill_segment_ids");
+        corex_matconv::launch_fill_segment_ids_from_offsets(
+            static_cast<int>(unique_counts.size()),
+            thrust::raw_pointer_cast(unique_counts.data()),
+            thrust::raw_pointer_cast(offsets.data()),
+            thrust::raw_pointer_cast(sorted_partition_output.data()));
     }
 
     auto segments = to.values();
