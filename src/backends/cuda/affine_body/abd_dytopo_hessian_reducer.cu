@@ -450,9 +450,12 @@ void ABDDyTopoHessianReducer::build(muda::CTripletMatrixView<Float, 3> raw_hessi
 
     m_node_triplets.reshape(raw_hessians.total_rows(), raw_hessians.total_cols());
     m_node_triplets.unsafe_resize_triplets_no_construct(raw_count);
-    m_node_blocks.resize(raw_hessians.total_rows(), raw_hessians.total_cols(), 0);
-    m_body_triplets.resize(body_count, body_count, 0);
-    m_body_blocks.resize(body_count, body_count, 0);
+    m_node_blocks.reshape(raw_hessians.total_rows(), raw_hessians.total_cols());
+    m_node_blocks.unsafe_resize_triplets_no_construct(0);
+    m_body_triplets.reshape(body_count, body_count);
+    m_body_triplets.unsafe_resize_triplets_no_construct(0);
+    m_body_blocks.reshape(body_count, body_count);
+    m_body_blocks.unsafe_resize_triplets_no_construct(0);
 
     if(raw_count == 0)
         return;
