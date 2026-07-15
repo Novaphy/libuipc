@@ -347,6 +347,41 @@ __global__ void kernel_abd_srbk_spmv(int               n,
             atomicAdd(&y[col_base + k], y_col(k));
     }
 }
+
+__global__ void kernel_abd_srbk_spmv_rows(int               n,
+                                          Float             a,
+                                          const int*        rows,
+                                          const int*        cols,
+                                          const Matrix12x12* vals,
+                                          const Float*      x,
+                                          Float*            y)
+{
+    int tid       = blockIdx.x * blockDim.x + threadIdx.x;
+    int block_id  = tid / 12;
+    int local_row = tid - block_id * 12;
+    if(block_id >= n)
+        return;
+
+    const int row = rows[block_id];
+    const int col = cols[block_id];
+    const auto& H = vals[block_id];
+
+    const int row_base = row * 12;
+    const int col_base = col * 12;
+
+    Float y_row = 0;
+    for(int k = 0; k < 12; ++k)
+        y_row += H(local_row, k) * x[col_base + k];
+    atomicAdd(&y[row_base + local_row], a * y_row);
+
+    if(row != col)
+    {
+        Float y_col = 0;
+        for(int k = 0; k < 12; ++k)
+            y_col += H(k, local_row) * x[row_base + k];
+        atomicAdd(&y[col_base + local_row], a * y_col);
+    }
+}
 }  // namespace
 
 void ABDDyTopoHessianReducer::reduce_body_triplets(IndexT body_count)
@@ -583,8 +618,9 @@ void ABDDyTopoHessianReducer::spmv(Float                         a,
         return;
 
     corex_profile::ScopedPhase phase("abd_dytopo_reducer", "srbk_body_spmv");
-    constexpr int kBlk = 128;
-    kernel_abd_srbk_spmv<<<(block_count + kBlk - 1) / kBlk, kBlk>>>(
+    constexpr int kBlk = 256;
+    const int     work = block_count * 12;
+    kernel_abd_srbk_spmv_rows<<<(work + kBlk - 1) / kBlk, kBlk>>>(
         block_count,
         a,
         m_body_blocks.row_indices().data(),
