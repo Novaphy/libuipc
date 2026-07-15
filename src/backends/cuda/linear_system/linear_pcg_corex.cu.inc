@@ -35,7 +35,8 @@ constexpr Float pcg_tol_floor()
 bool corex_pcg_diag_enabled()
 {
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    return std::getenv("UIPC_COREX_PCG_DIAG") != nullptr;
+    static const bool enabled = std::getenv("UIPC_COREX_PCG_DIAG") != nullptr;
+    return enabled;
 #else
     return false;
 #endif
@@ -99,7 +100,8 @@ bool corex_pcg_fused_rz_norm_enabled()
 bool corex_pcg_cost_diag_enabled()
 {
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    return std::getenv("UIPC_COREX_PCG_COST_DIAG") != nullptr;
+    static const bool enabled = std::getenv("UIPC_COREX_PCG_COST_DIAG") != nullptr;
+    return enabled;
 #else
     return false;
 #endif
@@ -108,8 +110,22 @@ bool corex_pcg_cost_diag_enabled()
 bool corex_pcg_scalar_audit_enabled()
 {
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    const char* env = std::getenv("UIPC_COREX_PCG_SCALAR_AUDIT");
-    return env != nullptr && env[0] != '\0' && env[0] != '0';
+    static const bool enabled = [] {
+        const char* env = std::getenv("UIPC_COREX_PCG_SCALAR_AUDIT");
+        return env != nullptr && env[0] != '\0' && env[0] != '0';
+    }();
+    return enabled;
+#else
+    return false;
+#endif
+}
+
+bool corex_pcg_linear_trace_enabled()
+{
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    static const bool enabled =
+        std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+    return enabled;
 #else
     return false;
 #endif
@@ -182,7 +198,7 @@ void LinearPCG::do_solve(GlobalLinearSystem::SolvingInfo& info)
     checkCudaErrors(cudaMemsetAsync(d_converged_false.data(), 0, sizeof(IndexT), stream));
 
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    const bool corex_trace_pcg = (std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr);
+    const bool corex_trace_pcg = corex_pcg_linear_trace_enabled();
 #else
     constexpr bool corex_trace_pcg = false;
 #endif
@@ -491,7 +507,7 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
 
     SizeT k = 0;
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    const bool corex_trace_pcg = (std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr);
+    const bool corex_trace_pcg = corex_pcg_linear_trace_enabled();
 #else
     constexpr bool corex_trace_pcg = false;
 #endif
