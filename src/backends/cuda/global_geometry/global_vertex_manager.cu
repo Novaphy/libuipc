@@ -28,6 +28,69 @@ __global__ void kernel_gvm_step_forward(int N, Vector3* pos, const Vector3* safe
     pos[i] = safe_pos[i] + alpha * disp[i];
 }
 
+__global__ void kernel_gvm_axis_max_stage1(int N, const Vector3* disp, Float* block_max)
+{
+    __shared__ Float s_max[256];
+    const int tid = threadIdx.x;
+    Float local = 0;
+
+    for(int i = blockIdx.x * blockDim.x + tid; i < N; i += blockDim.x * gridDim.x)
+    {
+        const Vector3 d = disp[i];
+        Float m = d.x() >= Float{0} ? d.x() : -d.x();
+        const Float ay = d.y() >= Float{0} ? d.y() : -d.y();
+        const Float az = d.z() >= Float{0} ? d.z() : -d.z();
+        m = ay > m ? ay : m;
+        m = az > m ? az : m;
+        local = m > local ? m : local;
+    }
+
+    s_max[tid] = local;
+    __syncthreads();
+
+    for(int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+    {
+        if(tid < stride)
+        {
+            const Float other = s_max[tid + stride];
+            s_max[tid] = other > s_max[tid] ? other : s_max[tid];
+        }
+        __syncthreads();
+    }
+
+    if(tid == 0)
+        block_max[blockIdx.x] = s_max[0];
+}
+
+__global__ void kernel_gvm_axis_max_stage2(int N, const Float* block_max, Float* out)
+{
+    __shared__ Float s_max[256];
+    const int tid = threadIdx.x;
+    Float local = 0;
+
+    for(int i = tid; i < N; i += blockDim.x)
+    {
+        const Float v = block_max[i];
+        local = v > local ? v : local;
+    }
+
+    s_max[tid] = local;
+    __syncthreads();
+
+    for(int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+    {
+        if(tid < stride)
+        {
+            const Float other = s_max[tid + stride];
+            s_max[tid] = other > s_max[tid] ? other : s_max[tid];
+        }
+        __syncthreads();
+    }
+
+    if(tid == 0)
+        *out = s_max[0];
+}
+
 __global__ void kernel_gvm_setup_ccd(int N, Vector3* pos, Vector3* tmp, Vector3* disp,
                                      const Vector3* base_pos)
 {
@@ -249,16 +312,18 @@ void GlobalVertexManager::Impl::record_start_point()
 
 Float GlobalVertexManager::Impl::compute_axis_max_displacement()
 {
-    muda::DeviceReduce().Reduce((Float*)displacements.data(),
-                                axis_max_disp.data(),
-                                displacements.size() * 3,
-                                [] CUB_RUNTIME_FUNCTION(const Float& L, const Float& R)
-                                {
-                                    auto absL = std::abs(L);
-                                    auto absR = std::abs(R);
-                                    return absL > absR ? absL : absR;
-                                },
-                                0.0);
+    const int n = static_cast<int>(displacements.size());
+    if(n == 0)
+        return 0.0;
+
+    constexpr int block = 256;
+    const int grid = std::min((n + block - 1) / block, 1024);
+    kernel_gvm_axis_max_stage1<<<grid, block>>>(
+        n, displacements.data(), displacement_norms.data());
+    checkCudaErrors(cudaGetLastError());
+    kernel_gvm_axis_max_stage2<<<1, block>>>(
+        grid, displacement_norms.data(), axis_max_disp.data());
+    checkCudaErrors(cudaGetLastError());
     return axis_max_disp;
 }
 
