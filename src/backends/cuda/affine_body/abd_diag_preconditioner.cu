@@ -299,26 +299,23 @@ __global__ void kernel_abd_block_inverse_apply(int           n,
                                                const IndexT* converged)
 {
     if(*converged != 0) return;
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    constexpr int N = 12;
+    constexpr int BodiesPerBlock = 16;
+
+    int local_body = threadIdx.x / N;
+    int row        = threadIdx.x - local_body * N;
+    int i          = blockIdx.x * BodiesPerBlock + local_body;
     if(i >= n) return;
 
-    constexpr int N = 12;
-    Float ri[N];
-    for(int k = 0; k < N; ++k)
-        ri[k] = r[i * N + k];
-
-    for(int row = 0; row < N; ++row)
+    Float s = static_cast<Float>(0);
+    for(int col = 0; col < N; ++col)
+        s += diag_inv[i * 144 + col * N + row] * r[i * N + col];
+    if(block_mix < static_cast<Float>(1))
     {
-        Float s = static_cast<Float>(0);
-        for(int col = 0; col < N; ++col)
-            s += diag_inv[i * 144 + col * N + row] * ri[col];
-        if(block_mix < static_cast<Float>(1))
-        {
-            const Float j = diag_recip[i * N + row] * ri[row];
-            s = block_mix * s + (static_cast<Float>(1) - block_mix) * j;
-        }
-        z[i * N + row] = s;
+        const Float j = diag_recip[i * N + row] * r[i * N + row];
+        s = block_mix * s + (static_cast<Float>(1) - block_mix) * j;
     }
+    z[i * N + row] = s;
 }
 
 __global__ void kernel_abd_precond_extract(int          n,
@@ -513,10 +510,12 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
             auto n = static_cast<int>(jacobi_recip.size() / 12);
             if(n > 0)
             {
-                int blocks = (n + 255) / 256;
                 if(block_inverse_enabled && diag_inv.size() > 0)
                 {
-                    kernel_abd_block_inverse_apply<<<blocks, 256>>>(
+                    constexpr int kBodiesPerBlock = 16;
+                    constexpr int kThreads = kBodiesPerBlock * 12;
+                    int blocks = (n + kBodiesPerBlock - 1) / kBodiesPerBlock;
+                    kernel_abd_block_inverse_apply<<<blocks, kThreads>>>(
                         n,
                         (const Float*)diag_inv.data(),
                         (const Float*)jacobi_recip.data(),
@@ -527,6 +526,7 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
                 }
                 else
                 {
+                    int blocks = (n + 255) / 256;
                     kernel_abd_jacobi_apply<<<blocks, 256>>>(
                         n,
                         (const Float*)jacobi_recip.data(),
