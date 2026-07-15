@@ -31,7 +31,7 @@ constexpr uint   aabbMask  = 0xFFFFFFFFu >> (32 - aabbBits);
 constexpr uint   MaxIndex  = 0xFFFFFFFFFFFFFFFFu >> offset3;
 
 constexpr uint MAX_CD_NUM_PER_VERT = 64;
-constexpr int  MAX_RES_PER_BLOCK   = 1024;
+constexpr int  MAX_RES_PER_BLOCK   = 2048;
 
 struct PlainAABB
 {
