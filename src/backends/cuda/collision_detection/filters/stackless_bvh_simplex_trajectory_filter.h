@@ -30,6 +30,10 @@ class StacklessBVHSimplexTrajectoryFilter final : public SimplexTrajectoryFilter
         muda::DeviceBuffer<AABB> point_aabbs;
         muda::DeviceBuffer<AABB> edge_aabbs;
         muda::DeviceBuffer<AABB> triangle_aabbs;
+        muda::DeviceBuffer<Float> edge_thicknesses;
+        muda::DeviceBuffer<Float> edge_d_hats;
+        muda::DeviceBuffer<Float> triangle_thicknesses;
+        muda::DeviceBuffer<Float> triangle_d_hats;
 
         using ThisBVH = StacklessBVH;
 

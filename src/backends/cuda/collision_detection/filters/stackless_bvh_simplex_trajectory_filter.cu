@@ -41,13 +41,16 @@ static __global__ void kernel_build_point_aabbs(
 
 static __global__ void kernel_build_edge_aabbs(
     int N, const Vector2i* Es, const Vector3* Ps, const Vector3* dxs,
-    const Float* thicknesses, const Float* d_hats, Float alpha, AABB* aabbs)
+    const Float* thicknesses, const Float* d_hats, Float alpha, AABB* aabbs,
+    Float* edge_thicknesses, Float* edge_d_hats)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if(i >= N) return;
     auto eI = Es[i];
     Float thickness = edge_thickness(thicknesses[eI[0]], thicknesses[eI[1]]);
     Float d_hat_expansion = edge_dcd_expansion(d_hats[eI[0]], d_hats[eI[1]]);
+    edge_thicknesses[i] = thicknesses[eI[0]];
+    edge_d_hats[i] = d_hats[eI[0]];
     const auto& pos0 = Ps[eI[0]];
     const auto& pos1 = Ps[eI[1]];
     Vector3 pos0_t = pos0 + dxs[eI[0]] * alpha;
@@ -63,13 +66,16 @@ static __global__ void kernel_build_edge_aabbs(
 
 static __global__ void kernel_build_triangle_aabbs(
     int N, const Vector3i* Fs, const Vector3* Ps, const Vector3* dxs,
-    const Float* thicknesses, const Float* d_hats, Float alpha, AABB* aabbs)
+    const Float* thicknesses, const Float* d_hats, Float alpha, AABB* aabbs,
+    Float* triangle_thicknesses, Float* triangle_d_hats)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if(i >= N) return;
     auto fI = Fs[i];
     Float thickness = triangle_thickness(thicknesses[fI[0]], thicknesses[fI[1]], thicknesses[fI[2]]);
     Float d_hat_expansion = triangle_dcd_expansion(d_hats[fI[0]], d_hats[fI[1]], d_hats[fI[2]]);
+    triangle_thicknesses[i] = thicknesses[fI[0]];
+    triangle_d_hats[i] = d_hats[fI[0]];
     const auto& pos0 = Ps[fI[0]];
     const auto& pos1 = Ps[fI[1]];
     const auto& pos2 = Ps[fI[2]];
@@ -572,7 +578,9 @@ static __global__ void kernel_filter_active_CodimPE_append(
 static __global__ void kernel_filter_active_PT_append(
     int N, const Vector2i* PT_pairs, const IndexT* surf_vertices,
     const Vector3i* surf_triangles, const Vector3* positions,
-    const Float* thicknesses, const Float* d_hats, Float pt_pe_hyst_scale,
+    const Float* thicknesses, const Float* d_hats,
+    const Float* triangle_thicknesses, const Float* triangle_d_hats,
+    Float pt_pe_hyst_scale,
     Vector2i* out_PPs, Vector3i* out_PEs, Vector4i* out_PTs,
     IndexT* pp_count, IndexT* pe_count, IndexT* pt_count)
 {
@@ -583,8 +591,8 @@ static __global__ void kernel_filter_active_PT_append(
     Vector3i F       = surf_triangles[indices(1)];
     Vector4i vIs  = {V, F(0), F(1), F(2)};
     Vector3  Ps_arr[] = {positions[vIs(0)], positions[vIs(1)], positions[vIs(2)], positions[vIs(3)]};
-    Float thickness = PT_thickness(thicknesses[V], thicknesses[F(0)], thicknesses[F(1)], thicknesses[F(2)]);
-    Float d_hat = PT_d_hat(d_hats[V], d_hats[F(0)], d_hats[F(1)], d_hats[F(2)]);
+    Float thickness = thicknesses[V] + triangle_thicknesses[indices(1)];
+    Float d_hat = (d_hats[V] + triangle_d_hats[indices(1)]) * Float{0.5};
     Vector2 range = D_range(thickness, d_hat);
     Vector3 tri_min = min3(Ps_arr[1], Ps_arr[2], Ps_arr[3]);
     Vector3 tri_max = max3(Ps_arr[1], Ps_arr[2], Ps_arr[3]);
@@ -625,7 +633,7 @@ static __global__ void kernel_filter_active_PT_append(
 static __global__ void kernel_filter_active_EE_append(
     int N, const Vector2i* EE_pairs, const Vector2i* surf_edges,
     const Vector3* positions, const Vector3* rest_positions,
-    const Float* thicknesses, const Float* d_hats,
+    const Float* edge_thicknesses, const Float* edge_d_hats,
     Vector2i* out_PPs, Vector3i* out_PEs, Vector4i* out_EEs,
     IndexT* pp_count, IndexT* pe_count, IndexT* ee_count)
 {
@@ -636,10 +644,8 @@ static __global__ void kernel_filter_active_EE_append(
     Vector2i E1_edge = surf_edges[indices(1)];
     Vector4i vIs  = {E0_edge(0), E0_edge(1), E1_edge(0), E1_edge(1)};
     Vector3  Ps_arr[] = {positions[vIs(0)], positions[vIs(1)], positions[vIs(2)], positions[vIs(3)]};
-    Float thickness = EE_thickness(thicknesses[E0_edge(0)], thicknesses[E0_edge(1)],
-                                   thicknesses[E1_edge(0)], thicknesses[E1_edge(1)]);
-    Float d_hat = EE_d_hat(d_hats[E0_edge(0)], d_hats[E0_edge(1)],
-                           d_hats[E1_edge(0)], d_hats[E1_edge(1)]);
+    Float thickness = edge_thicknesses[indices(0)] + edge_thicknesses[indices(1)];
+    Float d_hat = (edge_d_hats[indices(0)] + edge_d_hats[indices(1)]) * Float{0.5};
     Vector2 range = D_range(thickness, d_hat);
     Vector3 e0_min = Ps_arr[0].cwiseMin(Ps_arr[1]);
     Vector3 e0_max = Ps_arr[0].cwiseMax(Ps_arr[1]);
@@ -1285,6 +1291,10 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info,
     point_aabbs.resize(Vs.size());
     triangle_aabbs.resize(Fs.size());
     edge_aabbs.resize(Es.size());
+    triangle_thicknesses.resize(Fs.size());
+    triangle_d_hats.resize(Fs.size());
+    edge_thicknesses.resize(Es.size());
+    edge_d_hats.resize(Es.size());
 
     {
         corex_profile::ScopedPhase phase("contact_detect_detail", "build_aabbs");
@@ -1319,7 +1329,8 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info,
             corex_filter::kernel_build_edge_aabbs<<<grid, block>>>(
                 Es.size(), (const Vector2i*)Es.data(), (const Vector3*)Ps.data(),
                 (const Vector3*)dxs.data(), (const Float*)info.thicknesses().data(),
-                (const Float*)info.d_hats().data(), alpha, edge_aabbs.data());
+                (const Float*)info.d_hats().data(), alpha, edge_aabbs.data(),
+                edge_thicknesses.data(), edge_d_hats.data());
             corex_filter_detect_sync_if_needed(0x4);
         }
 
@@ -1330,7 +1341,8 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info,
             corex_filter::kernel_build_triangle_aabbs<<<grid, block>>>(
                 Fs.size(), (const Vector3i*)Fs.data(), (const Vector3*)Ps.data(),
                 (const Vector3*)dxs.data(), (const Float*)info.thicknesses().data(),
-                (const Float*)info.d_hats().data(), alpha, triangle_aabbs.data());
+                (const Float*)info.d_hats().data(), alpha, triangle_aabbs.data(),
+                triangle_thicknesses.data(), triangle_d_hats.data());
             corex_filter_detect_sync_if_needed(0x8);
         }
     }
@@ -1886,6 +1898,8 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
                 (const Vector3*)positions.data(),
                 (const Float*)info.thicknesses().data(),
                 (const Float*)info.d_hats().data(),
+                triangle_thicknesses.data(),
+                triangle_d_hats.data(),
                 pt_pe_hyst_scale,
                 PPs.data(),
                 PEs.data(),
@@ -1905,8 +1919,8 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
                 (const Vector2i*)info.surf_edges().data(),
                 (const Vector3*)positions.data(),
                 (const Vector3*)info.rest_positions().data(),
-                (const Float*)info.thicknesses().data(),
-                (const Float*)info.d_hats().data(),
+                edge_thicknesses.data(),
+                edge_d_hats.data(),
                 PPs.data(),
                 PEs.data(),
                 EEs.data(),
