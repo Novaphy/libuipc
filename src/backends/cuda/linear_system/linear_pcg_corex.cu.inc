@@ -59,12 +59,6 @@ inline bool corex_pcg_pinned_scalar_enabled()
     return true;
 }
 
-inline bool corex_pcg_env_enabled(const char* name)
-{
-    const char* env = std::getenv(name);
-    return env && env[0] != '\0' && env[0] != '0';
-}
-
 // Two-slot pinned host buffer. Lazily allocated on first use; kept alive
 // for the lifetime of the process. The PCG solver is single-threaded on
 // host so a process-wide singleton is safe for the existing call sites.
@@ -656,11 +650,12 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
         }
 
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-        auto profile_sync_t0 = corex_profile::now_ms();
-        if(!corex_pcg_env_enabled("UIPC_COREX_PCG_SKIP_SPMV_SYNC")
-           && !corex_pcg_env_enabled("UIPC_COREX_LINEAR_SKIP_SYNC"))
+        if(corex_trace_pcg)
+        {
+            auto profile_sync_t0 = corex_profile::now_ms();
             checkCudaErrors(cudaDeviceSynchronize());
-        profile_spmv_sync_ms += corex_profile::now_ms() - profile_sync_t0;
+            profile_spmv_sync_ms += corex_profile::now_ms() - profile_sync_t0;
+        }
 #endif
         if(corex_trace_pcg && (k <= 3 || k == max_iter - 1))
             logger::info("[corex_trace][PCG] iter {} spmv done", k);
@@ -769,7 +764,7 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
         logger::info("[corex_pcg_cost] frame={} newton={} iter={} "
                      "spmv_ms={:.6g} spmv_sync_ms={:.6g} precond_ms={:.6g} dotnorm_ms={:.6g} "
                      "spmv_pct={:.3f} spmv_sync_pct={:.3f} precond_pct={:.3f} dotnorm_pct={:.3f} "
-                     "per_iter_ms={:.6g} skip_spmv_sync={} fused_rz_norm={}",
+                     "per_iter_ms={:.6g} fused_rz_norm={}",
                      profile_frame,
                      profile_newton,
                      k,
@@ -782,7 +777,6 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
                      profile_precond_ms * inv_measured,
                      profile_dotnorm_ms * inv_measured,
                      measured / iter_count,
-                     std::getenv("UIPC_COREX_PCG_SKIP_SPMV_SYNC") != nullptr ? 1 : 0,
                      fused_rz_norm ? 1 : 0);
     }
     if(scalar_audit)
