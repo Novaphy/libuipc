@@ -2,6 +2,7 @@
 #include <cuda_device/builtin.h>
 #include <muda/launch.h>
 #include <muda/cub/device/device_radix_sort.h>
+#include <cub/block/block_reduce.cuh>
 #include <thrust/device_ptr.h>
 #define RAW_PTR(x) thrust::raw_pointer_cast((x).data())
 
@@ -39,6 +40,12 @@ static __global__ void kernel_fill_u32(uint32_t* data, int n, uint32_t value)
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if(i < n)
         data[i] = value;
+}
+
+static __global__ void kernel_init_scene_box(aabb* scene_box)
+{
+    if(blockIdx.x == 0 && threadIdx.x == 0)
+        *scene_box = aabb();
 }
 
 struct PlainAABB
@@ -89,6 +96,22 @@ MUDA_HOST MUDA_DEVICE MUDA_INLINE T __mm_max(T a, T b)
     return a > b ? a : b;
 }
 
+struct PlainAABBReduce
+{
+    MUDA_DEVICE MUDA_INLINE PlainAABB operator()(const PlainAABB& a,
+                                                  const PlainAABB& b) const
+    {
+        PlainAABB out;
+        out._min = make_float3(__mm_min(a._min.x, b._min.x),
+                               __mm_min(a._min.y, b._min.y),
+                               __mm_min(a._min.z, b._min.z));
+        out._max = make_float3(__mm_max(a._max.x, b._max.x),
+                               __mm_max(a._max.y, b._max.y),
+                               __mm_max(a._max.z, b._max.z));
+        return out;
+    }
+};
+
 MUDA_DEVICE MUDA_INLINE float atomicMinf(float* addr, float value)
 {
     float old;
@@ -105,6 +128,32 @@ MUDA_DEVICE MUDA_INLINE float atomicMaxf(float* addr, float value)
               __int_as_float(atomicMax((int*)addr, __float_as_int(value))) :
               __uint_as_float(atomicMin((unsigned int*)addr, __float_as_uint(value)));
     return old;
+}
+
+static __global__ void kernel_reduce_scene_box(int         n,
+                                                const aabb* boxes,
+                                                aabb*       scene_box)
+{
+    using BlockReduce = cub::BlockReduce<PlainAABB, K_THREADS>;
+    __shared__ typename BlockReduce::TempStorage storage;
+
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    PlainAABB local;
+    local._min = make_float3(CUDART_INF_F, CUDART_INF_F, CUDART_INF_F);
+    local._max = make_float3(-CUDART_INF_F, -CUDART_INF_F, -CUDART_INF_F);
+    if(i < n)
+        local = toPlainAABB(boxes[i]);
+
+    PlainAABB block_box = BlockReduce(storage).Reduce(local, PlainAABBReduce{});
+    if(threadIdx.x == 0)
+    {
+        atomicMinf(&scene_box->min().x(), block_box._min.x);
+        atomicMinf(&scene_box->min().y(), block_box._min.y);
+        atomicMinf(&scene_box->min().z(), block_box._min.z);
+        atomicMaxf(&scene_box->max().x(), block_box._max.x);
+        atomicMaxf(&scene_box->max().y(), block_box._max.y);
+        atomicMaxf(&scene_box->max().z(), block_box._max.z);
+    }
 }
 
 MUDA_HOST MUDA_DEVICE MUDA_INLINE uint expandBits(uint v)
@@ -444,6 +493,17 @@ MUDA_INLINE void StacklessBVH::Impl::calcMaxBVFromBox(muda::CBufferView<AABB> aa
 
     using namespace muda;
 
+    kernel_init_scene_box<<<1, 1>>>(
+        reinterpret_cast<AABB*>(scene_box.data()));
+    checkCudaErrors(cudaGetLastError());
+
+    kernel_reduce_scene_box<<<GridDim, K_THREADS>>>(
+        static_cast<int>(numQuery),
+        reinterpret_cast<const AABB*>(aabbs.data()),
+        reinterpret_cast<AABB*>(scene_box.data()));
+    checkCudaErrors(cudaGetLastError());
+    return;
+
     Launch(GridDim, BlockDim)
         .file_line(__FILE__, __LINE__)
         .apply(
@@ -457,11 +517,6 @@ MUDA_INLINE void StacklessBVH::Impl::calcMaxBVFromBox(muda::CBufferView<AABB> aa
                 int warpNum;
                 if(idx >= size)
                     return;
-                if(idx == 0)
-                {
-                    *_bv = AABB();
-                }
-
                 __shared__ PlainAABB aabbData[K_WARPS];
 
                 PlainAABB temp = toPlainAABB(box(idx));
