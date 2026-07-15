@@ -589,14 +589,16 @@ MUDA_INLINE void StacklessBVH::Impl::buildPrimitivesFromBox(muda::CBufferView<AA
 }
 
 
-MUDA_INLINE void StacklessBVH::Impl::calcExtNodeSplitMetrics()
+MUDA_INLINE void StacklessBVH::Impl::calcExtNodeSplitMetrics(
+    muda::CBufferView<uint32_t> sorted_codes)
 {
     using namespace muda;
-    int N = mtcode.size();
+    int N = sorted_codes.size();
     if(N == 0) return;
 
     int block = 256, grid = (N + block - 1) / block;
-    corex_bvh::kernel_calcSplitMetrics<<<grid, block>>>(N, RAW_PTR(mtcode), RAW_PTR(metric));
+    corex_bvh::kernel_calcSplitMetrics<<<grid, block>>>(
+        N, (const uint32_t*)sorted_codes.data(), RAW_PTR(metric));
     checkCudaErrors(cudaGetLastError());
 }
 
@@ -921,7 +923,6 @@ inline void StacklessBVH::Impl::build(muda::CBufferView<AABB> aabbs)
                                           mtcode.size(),
                                           0,
                                           30);
-        mtcode.view().copy_from(mtcode_sorted.view());
     }
 
     {
@@ -933,7 +934,7 @@ inline void StacklessBVH::Impl::build(muda::CBufferView<AABB> aabbs)
     }
 
     {
-        calcExtNodeSplitMetrics();
+        calcExtNodeSplitMetrics(mtcode_sorted.view());
     }
 
     {

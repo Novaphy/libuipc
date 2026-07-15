@@ -284,7 +284,7 @@ class StacklessBVH
                                    muda::BufferView<uint32_t> codes);
         void        calcInverseMapping();
         void        buildPrimitivesFromBox(muda::CBufferView<AABB> aabbs);
-        void        calcExtNodeSplitMetrics();
+        void        calcExtNodeSplitMetrics(muda::CBufferView<uint32_t> sorted_codes);
         void        buildIntNodes(int size);
         void        calcIntNodeOrders(int size);
         void        updateBvhExtNodeLinks(int size);
