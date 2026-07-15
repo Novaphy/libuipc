@@ -1404,6 +1404,14 @@ void corex_filter_loose_resize(muda::DeviceBuffer<T>& buffer, SizeT size)
     buffer.resize(size);
 }
 
+template <typename T>
+void corex_filter_loose_resize_no_construct(muda::DeviceBuffer<T>& buffer, SizeT size)
+{
+    if(size > buffer.capacity())
+        buffer.reserve(static_cast<size_t>(static_cast<double>(size) * 1.1) + 1);
+    buffer.unsafe_resize_no_construct(size);
+}
+
 static __global__ void kernel_pack_selected_counts(const IndexT* pp_count,
                                                    const IndexT* pe_count,
                                                    const IndexT* pt_count,
@@ -3213,10 +3221,10 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
 
         if(!view_slice_output)
         {
-            PPs.resize(PP_count);
-            PEs.resize(PE_count);
-            PTs.resize(PT_count);
-            EEs.resize(EE_count);
+            PPs.unsafe_resize_no_construct(PP_count);
+            PEs.unsafe_resize_no_construct(PE_count);
+            PTs.unsafe_resize_no_construct(PT_count);
+            EEs.unsafe_resize_no_construct(EE_count);
         }
 
         if(view_slice_output)
@@ -3605,17 +3613,17 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
         corex_profile::ScopedPhase phase("contact_filter_detail", "select_valid_all");
         if(view_slice_output)
         {
-            corex_filter_loose_resize(PPs, temp_PPs.size());
-            corex_filter_loose_resize(PEs, temp_PEs.size());
-            corex_filter_loose_resize(PTs, temp_PTs.size());
-            corex_filter_loose_resize(EEs, temp_EEs.size());
+            corex_filter_loose_resize_no_construct(PPs, temp_PPs.size());
+            corex_filter_loose_resize_no_construct(PEs, temp_PEs.size());
+            corex_filter_loose_resize_no_construct(PTs, temp_PTs.size());
+            corex_filter_loose_resize_no_construct(EEs, temp_EEs.size());
         }
         else
         {
-            PPs.resize(temp_PPs.size());
-            PEs.resize(temp_PEs.size());
-            PTs.resize(temp_PTs.size());
-            EEs.resize(temp_EEs.size());
+            PPs.unsafe_resize_no_construct(temp_PPs.size());
+            PEs.unsafe_resize_no_construct(temp_PEs.size());
+            PTs.unsafe_resize_no_construct(temp_PTs.size());
+            EEs.unsafe_resize_no_construct(temp_EEs.size());
         }
 
         static const bool ordered_scan_select_enabled = [] {
@@ -4076,10 +4084,10 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
 
         if(!view_slice_output)
         {
-            PPs.resize(PP_count);
-            PEs.resize(PE_count);
-            PTs.resize(PT_count);
-            EEs.resize(EE_count);
+            PPs.unsafe_resize_no_construct(PP_count);
+            PEs.unsafe_resize_no_construct(PE_count);
+            PTs.unsafe_resize_no_construct(PT_count);
+            EEs.unsafe_resize_no_construct(EE_count);
         }
     }
 
@@ -5373,10 +5381,10 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
         IndexT PT_count = selected_PT_count;
         IndexT EE_count = selected_EE_count;
 
-        PPs.resize(PP_count);
-        PEs.resize(PE_count);
-        PTs.resize(PT_count);
-        EEs.resize(EE_count);
+        PPs.unsafe_resize_no_construct(PP_count);
+        PEs.unsafe_resize_no_construct(PE_count);
+        PTs.unsafe_resize_no_construct(PT_count);
+        EEs.unsafe_resize_no_construct(EE_count);
     }
 
     info.PPs(PPs);
