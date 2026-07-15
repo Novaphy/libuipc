@@ -51,18 +51,7 @@ void AffineBodyBodyReporter::Impl::report_attributes(BodyAttributeInfo& info)
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
     {
         int n = static_cast<int>(info.coindices().size());
-        if(std::getenv("UIPC_COREX_ABD_BODY_IOTA_HOST_FALLBACK")
-           || std::getenv("UIPC_COREX_ABD_BODY_IOTA_GPU") == nullptr)
-        {
-            std::vector<IndexT> h_iota(n);
-            for(int i = 0; i < n; ++i)
-                h_iota[i] = i;
-            checkCudaErrors(cudaMemcpy((void*)info.coindices().data(),
-                                       h_iota.data(),
-                                       n * sizeof(IndexT),
-                                       cudaMemcpyHostToDevice));
-        }
-        else if(n > 0)
+        if(n > 0)
         {
             constexpr int block = 256;
             int           grid  = (n + block - 1) / block;
