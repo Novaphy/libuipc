@@ -394,6 +394,38 @@ void fused_update_p(muda::CVarView<Float>         d_rz_new,
                });
 }
 
+void fused_update_p_and_converged(muda::CVarView<Float>         d_rz_new,
+                                  muda::CVarView<Float>         d_rz,
+                                  muda::CVarView<Float>         d_norm2,
+                                  muda::VarView<IndexT>         d_converged,
+                                  Float                         r_tol,
+                                  muda::DenseVectorView<Float>  p,
+                                  muda::CDenseVectorView<Float> z)
+{
+    using namespace muda;
+
+    ParallelFor()
+        .file_line(__FILE__, __LINE__)
+        .apply(p.size(),
+               [d_rz_new    = d_rz_new.cviewer().name("d_rz_new"),
+                d_rz        = d_rz.cviewer().name("d_rz"),
+                d_norm2     = d_norm2.cviewer().name("d_norm2"),
+                d_converged = d_converged.viewer().name("d_converged"),
+                r_tol,
+                p = p.viewer().name("p"),
+                z = z.cviewer().name("z")] __device__(int i) mutable
+               {
+                   const bool converged = *d_norm2 <= r_tol * r_tol;
+                   if(i == 0)
+                       *d_converged = converged ? 1 : 0;
+                   if(converged)
+                       return;
+
+                   Float beta = *d_rz_new / *d_rz;
+                   p(i)       = z(i) + beta * p(i);
+               });
+}
+
 // d_rz = d_rz_new when not converged (single-thread write).
 void fused_swap_rz(muda::CVarView<Float>  d_rz_new,
                    muda::VarView<Float>   d_rz,
@@ -525,8 +557,6 @@ SizeT LinearFusedPCG::fused_pcg(muda::DenseVectorView<Float>  x,
         // convergence criterion as LinearPCG; |r^T z| is not equivalent when
         // the preconditioner strongly scales contact rows.
         fused_dot(r.cview(), z.cview(), d_rz_new.view());
-        fused_update_converged_by_norm(d_norm2.view(), d_converged.view(), r_tol);
-
         // Check error ratio periodically to avoid per-iteration D2H synchronization.
         bool do_check = (k % effective_check_interval == 0) || (k + 1 == max_iter);
         if(do_check)
@@ -541,9 +571,15 @@ SizeT LinearFusedPCG::fused_pcg(muda::DenseVectorView<Float>  x,
                 break;
         }
 
-        // p = z + beta * p (skip when abs(rz_new) <= rz_tol), then rz = rz_new.
-        fused_update_p(d_rz_new.view(), d_rz.view(), d_converged.view(), p.view(), z.cview());
-        fused_swap_rz(d_rz_new.view(), d_rz.view(), d_converged.view());
+        // Evaluate convergence and update p in one pass, then make rz_new current.
+        fused_update_p_and_converged(d_rz_new.view(),
+                                     d_rz.view(),
+                                     d_norm2.view(),
+                                     d_converged.view(),
+                                     r_tol,
+                                     p.view(),
+                                     z.cview());
+        std::swap(d_rz, d_rz_new);
     }
 
     if(diag)
