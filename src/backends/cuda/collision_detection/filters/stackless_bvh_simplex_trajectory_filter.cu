@@ -3613,17 +3613,17 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
         corex_profile::ScopedPhase phase("contact_filter_detail", "select_valid_all");
         if(view_slice_output)
         {
-            corex_filter_loose_resize_no_construct(PPs, temp_PPs.size());
-            corex_filter_loose_resize_no_construct(PEs, temp_PEs.size());
-            corex_filter_loose_resize_no_construct(PTs, temp_PTs.size());
-            corex_filter_loose_resize_no_construct(EEs, temp_EEs.size());
+            corex_filter_loose_resize(PPs, temp_PPs.size());
+            corex_filter_loose_resize(PEs, temp_PEs.size());
+            corex_filter_loose_resize(PTs, temp_PTs.size());
+            corex_filter_loose_resize(EEs, temp_EEs.size());
         }
         else
         {
-            PPs.unsafe_resize_no_construct(temp_PPs.size());
-            PEs.unsafe_resize_no_construct(temp_PEs.size());
-            PTs.unsafe_resize_no_construct(temp_PTs.size());
-            EEs.unsafe_resize_no_construct(temp_EEs.size());
+            PPs.resize(temp_PPs.size());
+            PEs.resize(temp_PEs.size());
+            PTs.resize(temp_PTs.size());
+            EEs.resize(temp_EEs.size());
         }
 
         static const bool ordered_scan_select_enabled = [] {
