@@ -29,8 +29,11 @@ constexpr Float fused_pcg_tol_floor()
 
 inline bool fused_pcg_diag_enabled()
 {
-    const char* env = std::getenv("UIPC_COREX_FUSED_PCG_DIAG");
-    return env && env[0] != '\0' && env[0] != '0';
+    static const bool enabled = [] {
+        const char* env = std::getenv("UIPC_COREX_FUSED_PCG_DIAG");
+        return env && env[0] != '\0' && env[0] != '0';
+    }();
+    return enabled;
 }
 }  // namespace
 
