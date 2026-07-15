@@ -397,7 +397,7 @@ SizeT LinearFusedPCG::fused_pcg(muda::DenseVectorView<Float>  x,
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
     // Device-side convergence still guards all state updates every iteration.
     // Batch only the host readback that terminates the launch loop.
-    effective_check_interval = std::max<SizeT>(effective_check_interval, SizeT{20});
+    effective_check_interval = std::max<SizeT>(effective_check_interval, SizeT{10});
 #endif
     const bool diag = fused_pcg_diag_enabled();
     Float final_rz = rz_host;
