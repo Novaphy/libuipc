@@ -31,6 +31,161 @@ struct CorexVector2iLess
     }
 };
 
+static IndexT* pinned_selected_count_buffer()
+{
+    static IndexT* buffer = [] {
+        IndexT* ptr = nullptr;
+        checkCudaErrors(cudaHostAlloc(&ptr, sizeof(IndexT) * 4, cudaHostAllocDefault));
+        return ptr;
+    }();
+    return buffer;
+}
+
+struct SelectedCountReadback
+{
+    cudaStream_t stream = nullptr;
+    cudaEvent_t  pp = nullptr;
+    cudaEvent_t  pe = nullptr;
+    cudaEvent_t  pt = nullptr;
+    cudaEvent_t  ee = nullptr;
+
+    SelectedCountReadback()
+    {
+        checkCudaErrors(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        checkCudaErrors(cudaEventCreateWithFlags(&pp, cudaEventDisableTiming));
+        checkCudaErrors(cudaEventCreateWithFlags(&pe, cudaEventDisableTiming));
+        checkCudaErrors(cudaEventCreateWithFlags(&pt, cudaEventDisableTiming));
+        checkCudaErrors(cudaEventCreateWithFlags(&ee, cudaEventDisableTiming));
+    }
+};
+
+static SelectedCountReadback& selected_count_readback()
+{
+    static SelectedCountReadback readback;
+    return readback;
+}
+
+struct ActiveSelectStreams
+{
+    cudaStream_t pp = nullptr;
+    cudaStream_t pe = nullptr;
+    cudaStream_t pt = nullptr;
+    cudaStream_t ee = nullptr;
+    cudaEvent_t  ready = nullptr;
+
+    ActiveSelectStreams()
+    {
+        checkCudaErrors(cudaStreamCreateWithFlags(&pp, cudaStreamNonBlocking));
+        checkCudaErrors(cudaStreamCreateWithFlags(&pe, cudaStreamNonBlocking));
+        checkCudaErrors(cudaStreamCreateWithFlags(&pt, cudaStreamNonBlocking));
+        checkCudaErrors(cudaStreamCreateWithFlags(&ee, cudaStreamNonBlocking));
+        checkCudaErrors(cudaEventCreateWithFlags(&ready, cudaEventDisableTiming));
+    }
+};
+
+static ActiveSelectStreams& active_select_streams()
+{
+    static ActiveSelectStreams streams;
+    return streams;
+}
+
+static void read_selected_counts_streams_sync(const IndexT* selected_count_data,
+                                              IndexT*       host_counts,
+                                              bool          read_pp,
+                                              bool          read_pe,
+                                              bool          read_pt,
+                                              bool          read_ee,
+                                              cudaStream_t  pp_stream,
+                                              cudaStream_t  pe_stream,
+                                              cudaStream_t  pt_stream,
+                                              cudaStream_t  ee_stream)
+{
+    if(!read_pp && !read_pe && !read_pt && !read_ee)
+    {
+        std::fill(host_counts, host_counts + 4, IndexT{0});
+        return;
+    }
+
+    IndexT* pinned_counts = pinned_selected_count_buffer();
+    auto&   readback = selected_count_readback();
+
+    auto wait_for = [&](bool enabled, cudaEvent_t event, cudaStream_t stream)
+    {
+        if(enabled)
+        {
+            checkCudaErrors(cudaEventRecord(event, stream));
+            checkCudaErrors(cudaStreamWaitEvent(readback.stream, event, 0));
+        }
+    };
+    wait_for(read_pp, readback.pp, pp_stream);
+    wait_for(read_pe, readback.pe, pe_stream);
+    wait_for(read_pt, readback.pt, pt_stream);
+    wait_for(read_ee, readback.ee, ee_stream);
+
+    checkCudaErrors(cudaMemcpyAsync(pinned_counts,
+                                    selected_count_data,
+                                    sizeof(IndexT) * 4,
+                                    cudaMemcpyDeviceToHost,
+                                    readback.stream));
+    checkCudaErrors(cudaStreamSynchronize(readback.stream));
+    host_counts[0] = read_pp ? pinned_counts[0] : 0;
+    host_counts[1] = read_pe ? pinned_counts[1] : 0;
+    host_counts[2] = read_pt ? pinned_counts[2] : 0;
+    host_counts[3] = read_ee ? pinned_counts[3] : 0;
+}
+
+template <typename InputIteratorT, typename OutputIteratorT, typename SelectOp>
+static void cached_select_if_query(int&            cached_items,
+                                   size_t&         cached_bytes,
+                                   InputIteratorT  d_in,
+                                   OutputIteratorT d_out,
+                                   IndexT*         d_num_selected_out,
+                                   int             num_items,
+                                   SelectOp        select_op)
+{
+    if(num_items <= 0 || num_items <= cached_items)
+        return;
+
+    size_t temp_storage_bytes = 0;
+    cub::DeviceSelect::If(nullptr,
+                          temp_storage_bytes,
+                          d_in,
+                          d_out,
+                          d_num_selected_out,
+                          num_items,
+                          select_op,
+                          nullptr);
+    cached_items = num_items;
+    cached_bytes = temp_storage_bytes;
+}
+
+template <typename InputIteratorT, typename OutputIteratorT, typename SelectOp>
+static void cached_select_if_apply(void*           temp_storage,
+                                   size_t          temp_storage_bytes,
+                                   InputIteratorT  d_in,
+                                   OutputIteratorT d_out,
+                                   IndexT*         d_num_selected_out,
+                                   int             num_items,
+                                   SelectOp        select_op,
+                                   cudaStream_t    stream)
+{
+    if(num_items <= 0)
+    {
+        checkCudaErrors(cudaMemsetAsync(d_num_selected_out, 0, sizeof(IndexT), stream));
+        return;
+    }
+
+    size_t bytes = temp_storage_bytes;
+    checkCudaErrors(cub::DeviceSelect::If(temp_storage,
+                                          bytes,
+                                          d_in,
+                                          d_out,
+                                          d_num_selected_out,
+                                          num_items,
+                                          select_op,
+                                          stream));
+}
+
 bool sort_nomask_pairs_enabled()
 {
     static const bool enabled = [] {
@@ -3627,149 +3782,135 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
         }
         else
         {
-            PPs.resize(temp_PPs.size());
-            PEs.resize(temp_PEs.size());
-            PTs.resize(temp_PTs.size());
-            EEs.resize(temp_EEs.size());
+            PPs.unsafe_resize_no_construct(temp_PPs.size());
+            PEs.unsafe_resize_no_construct(temp_PEs.size());
+            PTs.unsafe_resize_no_construct(temp_PTs.size());
+            EEs.unsafe_resize_no_construct(temp_EEs.size());
         }
 
-        static const bool ordered_scan_select_enabled = [] {
-            const char* env = std::getenv("UIPC_COREX_FILTER_ORDERED_SCAN_SELECT");
-            if(env && env[0] != '\0')
-                return env[0] != '0';
-            return true;
-        }();
-        static const bool block_stable_select_enabled = [] {
-            const char* env = std::getenv("UIPC_COREX_FILTER_BLOCK_STABLE_SELECT");
-            if(env && env[0] != '\0')
-                return env[0] != '0';
-            return true;
-        }();
-        selected_counts.resize(4);
+        corex_filter_loose_resize_no_construct(selected_counts, 4);
         IndexT* selected_count_data = selected_counts.data();
-        if(block_stable_select_enabled)
-        {
-            corex_profile::ScopedPhase phase("contact_filter_detail", "select_all_fused");
-            corex_block_stable_select_valid4(static_cast<int>(temp_PPs.size()),
-                                             static_cast<int>(temp_PEs.size()),
-                                             static_cast<int>(temp_PTs.size()),
-                                             static_cast<int>(temp_EEs.size()),
-                                             block_select_counts,
-                                             block_select_offsets,
-                                             temp_PPs.data(),
-                                             temp_PEs.data(),
-                                             temp_PTs.data(),
-                                             temp_EEs.data(),
-                                             PPs.data(),
-                                             PEs.data(),
-                                             PTs.data(),
-                                             EEs.data(),
-                                             selected_count_data + 0,
-                                             selected_count_data + 1,
-                                             selected_count_data + 2,
-                                             selected_count_data + 3);
-        }
-        else if(ordered_scan_select_enabled)
-        {
-            corex_ordered_select_valid(static_cast<int>(temp_PPs.size()),
-                                       compact_flags,
-                                       compact_offsets,
-                                       temp_PPs.data(),
-                                       PPs.data(),
-                                       selected_PP_count.data());
-            corex_ordered_select_valid(static_cast<int>(temp_PEs.size()),
-                                       compact_flags,
-                                       compact_offsets,
-                                       temp_PEs.data(),
-                                       PEs.data(),
-                                       selected_PE_count.data());
-            corex_ordered_select_valid(static_cast<int>(temp_PTs.size()),
-                                       compact_flags,
-                                       compact_offsets,
-                                       temp_PTs.data(),
-                                       PTs.data(),
-                                       selected_PT_count.data());
-            corex_ordered_select_valid(static_cast<int>(temp_EEs.size()),
-                                       compact_flags,
-                                       compact_offsets,
-                                       temp_EEs.data(),
-                                       EEs.data(),
-                                       selected_EE_count.data());
-        }
-        else if(temp_PPs.size())
-        {
-            DeviceSelect().If(temp_PPs.data(),
-                              PPs.data(),
-                              selected_PP_count.data(),
-                              temp_PPs.size(),
-                              [] CUB_RUNTIME_FUNCTION(const Vector2i& PP)
-                              { return PP(0) != -1; });
-        }
-        else
-        {
-            checkCudaErrors(cudaMemsetAsync(selected_PP_count.data(), 0, sizeof(IndexT)));
-        }
+        auto pp_valid = [] CUB_RUNTIME_FUNCTION(const Vector2i& PP)
+        { return PP(0) != -1; };
+        auto pe_valid = [] CUB_RUNTIME_FUNCTION(const Vector3i& PE)
+        { return PE(0) != -1; };
+        auto pt_valid = [] CUB_RUNTIME_FUNCTION(const Vector4i& PT)
+        { return PT(0) != -1; };
+        auto ee_valid = [] CUB_RUNTIME_FUNCTION(const Vector4i& EE)
+        { return EE(0) != -1; };
 
-        if(!block_stable_select_enabled && !ordered_scan_select_enabled && temp_PEs.size())
-        {
-            DeviceSelect().If(temp_PEs.data(),
-                              PEs.data(),
-                              selected_PE_count.data(),
-                              temp_PEs.size(),
-                              [] CUB_RUNTIME_FUNCTION(const Vector3i& PE)
-                              { return PE(0) != -1; });
-        }
-        else if(!block_stable_select_enabled && !ordered_scan_select_enabled)
-        {
-            checkCudaErrors(cudaMemsetAsync(selected_PE_count.data(), 0, sizeof(IndexT)));
-        }
+        const bool select_pp = temp_PPs.size() > 0;
+        const bool select_pe = temp_PEs.size() > 0;
+        const bool select_pt = temp_PTs.size() > 0;
+        const bool select_ee = temp_EEs.size() > 0;
 
-        if(!block_stable_select_enabled && !ordered_scan_select_enabled && temp_PTs.size())
-        {
-            DeviceSelect().If(temp_PTs.data(),
-                              PTs.data(),
-                              selected_PT_count.data(),
-                              temp_PTs.size(),
-                              [] CUB_RUNTIME_FUNCTION(const Vector4i& PT)
-                              { return PT(0) != -1; });
-        }
-        else if(!block_stable_select_enabled && !ordered_scan_select_enabled)
-        {
-            checkCudaErrors(cudaMemsetAsync(selected_PT_count.data(), 0, sizeof(IndexT)));
-        }
+        if(select_pp)
+            corex_filter::cached_select_if_query(select_temp_PP_capacity,
+                                                 select_temp_PP_bytes,
+                                                 temp_PPs.data(),
+                                                 PPs.data(),
+                                                 selected_count_data + 0,
+                                                 static_cast<int>(temp_PPs.size()),
+                                                 pp_valid);
+        if(select_pe)
+            corex_filter::cached_select_if_query(select_temp_PE_capacity,
+                                                 select_temp_PE_bytes,
+                                                 temp_PEs.data(),
+                                                 PEs.data(),
+                                                 selected_count_data + 1,
+                                                 static_cast<int>(temp_PEs.size()),
+                                                 pe_valid);
+        if(select_pt)
+            corex_filter::cached_select_if_query(select_temp_PT_capacity,
+                                                 select_temp_PT_bytes,
+                                                 temp_PTs.data(),
+                                                 PTs.data(),
+                                                 selected_count_data + 2,
+                                                 static_cast<int>(temp_PTs.size()),
+                                                 pt_valid);
+        if(select_ee)
+            corex_filter::cached_select_if_query(select_temp_EE_capacity,
+                                                 select_temp_EE_bytes,
+                                                 temp_EEs.data(),
+                                                 EEs.data(),
+                                                 selected_count_data + 3,
+                                                 static_cast<int>(temp_EEs.size()),
+                                                 ee_valid);
 
-        if(!block_stable_select_enabled && !ordered_scan_select_enabled && temp_EEs.size())
-        {
-            DeviceSelect().If(temp_EEs.data(),
-                              EEs.data(),
-                              selected_EE_count.data(),
-                              temp_EEs.size(),
-                              [] CUB_RUNTIME_FUNCTION(const Vector4i& EE)
-                              { return EE(0) != -1; });
-        }
-        else if(!block_stable_select_enabled && !ordered_scan_select_enabled)
-        {
-            checkCudaErrors(cudaMemsetAsync(selected_EE_count.data(), 0, sizeof(IndexT)));
-        }
+        if(select_temp_PP.size() < select_temp_PP_bytes)
+            select_temp_PP.unsafe_resize_no_construct(select_temp_PP_bytes);
+        if(select_temp_PE.size() < select_temp_PE_bytes)
+            select_temp_PE.unsafe_resize_no_construct(select_temp_PE_bytes);
+        if(select_temp_PT.size() < select_temp_PT_bytes)
+            select_temp_PT.unsafe_resize_no_construct(select_temp_PT_bytes);
+        if(select_temp_EE.size() < select_temp_EE_bytes)
+            select_temp_EE.unsafe_resize_no_construct(select_temp_EE_bytes);
 
-        if(!block_stable_select_enabled)
+        auto& select_streams = corex_filter::active_select_streams();
+        checkCudaErrors(cudaEventRecord(select_streams.ready, nullptr));
+        if(select_pp)
         {
-            kernel_pack_selected_counts<<<1, 1>>>(
-                selected_PP_count.data(),
-                selected_PE_count.data(),
-                selected_PT_count.data(),
-                selected_EE_count.data(),
-                selected_count_data);
+            checkCudaErrors(cudaStreamWaitEvent(select_streams.pp, select_streams.ready, 0));
+            corex_filter::cached_select_if_apply(select_temp_PP.data(),
+                                                 select_temp_PP_bytes,
+                                                 temp_PPs.data(),
+                                                 PPs.data(),
+                                                 selected_count_data + 0,
+                                                 static_cast<int>(temp_PPs.size()),
+                                                 pp_valid,
+                                                 select_streams.pp);
+        }
+        if(select_pe)
+        {
+            checkCudaErrors(cudaStreamWaitEvent(select_streams.pe, select_streams.ready, 0));
+            corex_filter::cached_select_if_apply(select_temp_PE.data(),
+                                                 select_temp_PE_bytes,
+                                                 temp_PEs.data(),
+                                                 PEs.data(),
+                                                 selected_count_data + 1,
+                                                 static_cast<int>(temp_PEs.size()),
+                                                 pe_valid,
+                                                 select_streams.pe);
+        }
+        if(select_pt)
+        {
+            checkCudaErrors(cudaStreamWaitEvent(select_streams.pt, select_streams.ready, 0));
+            corex_filter::cached_select_if_apply(select_temp_PT.data(),
+                                                 select_temp_PT_bytes,
+                                                 temp_PTs.data(),
+                                                 PTs.data(),
+                                                 selected_count_data + 2,
+                                                 static_cast<int>(temp_PTs.size()),
+                                                 pt_valid,
+                                                 select_streams.pt);
+        }
+        if(select_ee)
+        {
+            checkCudaErrors(cudaStreamWaitEvent(select_streams.ee, select_streams.ready, 0));
+            corex_filter::cached_select_if_apply(select_temp_EE.data(),
+                                                 select_temp_EE_bytes,
+                                                 temp_EEs.data(),
+                                                 EEs.data(),
+                                                 selected_count_data + 3,
+                                                 static_cast<int>(temp_EEs.size()),
+                                                 ee_valid,
+                                                 select_streams.ee);
         }
 
         IndexT h_selected_counts[4] = {0, 0, 0, 0};
         {
             corex_profile::ScopedPhase count_phase("contact_filter_detail",
                                                    "select_count_readback");
-            checkCudaErrors(cudaMemcpy(h_selected_counts,
-                                       selected_count_data,
-                                       sizeof(h_selected_counts),
-                                       cudaMemcpyDeviceToHost));
+            corex_filter::read_selected_counts_streams_sync(selected_count_data,
+                                                            h_selected_counts,
+                                                            select_pp,
+                                                            select_pe,
+                                                            select_pt,
+                                                            select_ee,
+                                                            select_streams.pp,
+                                                            select_streams.pe,
+                                                            select_streams.pt,
+                                                            select_streams.ee);
         }
         PP_count = h_selected_counts[0];
         PE_count = h_selected_counts[1];
