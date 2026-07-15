@@ -35,6 +35,35 @@ inline bool fused_pcg_diag_enabled()
     }();
     return enabled;
 }
+
+inline Float* fused_pcg_pinned_scalar_slot()
+{
+    static Float* g_buf = nullptr;
+    if(!g_buf)
+    {
+        Float* tmp = nullptr;
+        if(cudaMallocHost(reinterpret_cast<void**>(&tmp), sizeof(Float) * 2)
+           == cudaSuccess)
+            g_buf = tmp;
+    }
+    return g_buf;
+}
+
+inline std::pair<Float, Float> fused_pcg_read_scalars(muda::DeviceVar<Float>& a,
+                                                      muda::DeviceVar<Float>& b)
+{
+    Float* pinned = fused_pcg_pinned_scalar_slot();
+    if(pinned)
+    {
+        checkCudaErrors(cudaMemcpyAsync(
+            pinned, a.data(), sizeof(Float), cudaMemcpyDeviceToHost));
+        checkCudaErrors(cudaMemcpyAsync(
+            pinned + 1, b.data(), sizeof(Float), cudaMemcpyDeviceToHost));
+        checkCudaErrors(cudaStreamSynchronize(nullptr));
+        return {pinned[0], pinned[1]};
+    }
+    return {static_cast<Float>(a), static_cast<Float>(b)};
+}
 }  // namespace
 
 void LinearFusedPCG::do_build(BuildInfo& info)
@@ -375,9 +404,8 @@ SizeT LinearFusedPCG::fused_pcg(muda::DenseVectorView<Float>  x,
 
     // rz = r^T * z
     fused_dot_norm(r.cview(), z.cview(), d_rz.view(), d_norm2.view());
-    Float rz_host = d_rz;
-    Float norm_r_host =
-        std::sqrt(std::max(static_cast<Float>(d_norm2), Float{0}));
+    auto [rz_host, norm2_host] = fused_pcg_read_scalars(d_rz, d_norm2);
+    Float norm_r_host = std::sqrt(std::max(norm2_host, Float{0}));
     // x is explicitly initialized to zero before entering PCG, so r = b for
     // the initial residual. Reuse the norm already produced by fused_dot_norm
     // instead of launching a second global reduction for ||b||.
@@ -431,9 +459,9 @@ SizeT LinearFusedPCG::fused_pcg(muda::DenseVectorView<Float>  x,
         bool do_check = (k % effective_check_interval == 0) || (k + 1 == max_iter);
         if(do_check)
         {
-            Float rz_new_host = d_rz_new;
-            norm_r_host =
-                std::sqrt(std::max(static_cast<Float>(d_norm2), Float{0}));
+            auto [rz_new_host, norm2_new_host] =
+                fused_pcg_read_scalars(d_rz_new, d_norm2);
+            norm_r_host = std::sqrt(std::max(norm2_new_host, Float{0}));
             check_iter_rz_nan_inf(rz_new_host, k);
             final_rz = rz_new_host;
             final_norm_r = norm_r_host;
