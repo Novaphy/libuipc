@@ -128,17 +128,18 @@ __global__ void kernel_pack_node_triplets(int                               n,
     }
 }
 
-__global__ void kernel_map_node_to_body_triplets(int               n,
-                                                 const int*        node_rows,
-                                                 const int*        node_cols,
-                                                 const Matrix3x3*  node_vals,
-                                                 const IndexT*     vertex_to_body,
-                                                 const ABDJacobi*  vertex_to_jacobi,
-                                                 const IndexT*     body_is_fixed,
-                                                 int*              body_rows,
-                                                 int*              body_cols,
-                                                 Matrix12x12*      body_vals,
-                                                 Matrix12x12*      diag_hessian)
+__global__ void kernel_map_node_to_body_triplets_compact(int               n,
+                                                         const int*        node_rows,
+                                                         const int*        node_cols,
+                                                         const Matrix3x3*  node_vals,
+                                                         const IndexT*     vertex_to_body,
+                                                         const ABDJacobi*  vertex_to_jacobi,
+                                                         const IndexT*     body_is_fixed,
+                                                         int*              valid_count,
+                                                         int*              body_rows,
+                                                         int*              body_cols,
+                                                         Matrix12x12*      body_vals,
+                                                         Matrix12x12*      diag_hessian)
 {
     int I = blockIdx.x * blockDim.x + threadIdx.x;
     if(I >= n) return;
@@ -149,20 +150,16 @@ __global__ void kernel_map_node_to_body_triplets(int               n,
     IndexT body_i = vertex_to_body[i];
     IndexT body_j = vertex_to_body[j];
 
-    Matrix12x12 H12;
-    H12.setZero();
-
     if(body_is_fixed[body_i] || body_is_fixed[body_j])
-    {
-        body_rows[I] = 0;
-        body_cols[I] = 0;
-        body_vals[I] = H12;
         return;
-    }
 
     const auto& Ji = vertex_to_jacobi[i];
     const auto& Jj = vertex_to_jacobi[j];
     const auto& H3 = node_vals[I];
+
+    Matrix12x12 H12;
+    int         row;
+    int         col;
 
     if(body_i == body_j)
     {
@@ -177,24 +174,26 @@ __global__ void kernel_map_node_to_body_triplets(int               n,
         }
 
         muda::eigen::atomic_add(diag_hessian[body_i], H12);
-        body_rows[I] = body_i;
-        body_cols[I] = body_i;
-        body_vals[I] = H12;
+        row = body_i;
+        col = body_i;
     }
     else if(body_i < body_j)
     {
         H12 = make_abd_contact_block(Ji, H3, Jj);
-        body_rows[I] = body_i;
-        body_cols[I] = body_j;
-        body_vals[I] = H12;
+        row = body_i;
+        col = body_j;
     }
     else
     {
         H12 = make_abd_contact_block(Jj, H3.transpose(), Ji);
-        body_rows[I] = body_j;
-        body_cols[I] = body_i;
-        body_vals[I] = H12;
+        row = body_j;
+        col = body_i;
     }
+
+    int out = atomicAdd(valid_count, 1);
+    body_rows[out] = row;
+    body_cols[out] = col;
+    body_vals[out] = H12;
 }
 
 __global__ void kernel_map_raw_to_body_triplets_compact(int               n,
@@ -571,8 +570,9 @@ void ABDDyTopoHessianReducer::build(muda::CTripletMatrixView<Float, 3> raw_hessi
 
     {
         corex_profile::ScopedPhase phase("abd_dytopo_reducer", "map_node_to_body_pairs");
+        checkCudaErrors(cudaMemsetAsync(m_body_triplet_count_var.data(), 0, sizeof(int)));
         constexpr int kBlk = 256;
-        kernel_map_node_to_body_triplets<<<(node_pair_count + kBlk - 1) / kBlk, kBlk>>>(
+        kernel_map_node_to_body_triplets_compact<<<(node_pair_count + kBlk - 1) / kBlk, kBlk>>>(
             node_pair_count,
             m_node_blocks.row_indices().data(),
             m_node_blocks.col_indices().data(),
@@ -580,12 +580,21 @@ void ABDDyTopoHessianReducer::build(muda::CTripletMatrixView<Float, 3> raw_hessi
             vertex_to_body.data(),
             vertex_to_jacobi.data(),
             body_is_fixed.data(),
+            m_body_triplet_count_var.data(),
             m_body_triplets.row_indices().data(),
             m_body_triplets.col_indices().data(),
             m_body_triplets.values().data(),
             diag_hessian.data());
         checkCudaErrors(cudaGetLastError());
     }
+
+    const int body_triplet_count = corex_abd_readback_int(m_body_triplet_count_var);
+    if(body_triplet_count == 0)
+    {
+        m_body_triplets.resize(body_count, body_count, 0);
+        return;
+    }
+    m_body_triplets.resize(body_count, body_count, body_triplet_count);
 
     {
         corex_profile::ScopedPhase phase("abd_dytopo_reducer", "reduce_body_pairs");
