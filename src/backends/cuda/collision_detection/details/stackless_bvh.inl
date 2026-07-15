@@ -1178,14 +1178,9 @@ inline void StacklessBVH::Impl::StacklessCDSharedOtherPointsTrianglesNoMask(
                                     if(accept)
                                     {
                                         Vector3 P  = Ps(V);
-                                        Vector3 dP = alpha * dxs(V);
-
-                                        Vector3 F0  = Ps(F[0]);
-                                        Vector3 F1  = Ps(F[1]);
-                                        Vector3 F2  = Ps(F[2]);
-                                        Vector3 dF0 = alpha * dxs(F[0]);
-                                        Vector3 dF1 = alpha * dxs(F[1]);
-                                        Vector3 dF2 = alpha * dxs(F[2]);
+                                        Vector3 F0 = Ps(F[0]);
+                                        Vector3 F1 = Ps(F[1]);
+                                        Vector3 F2 = Ps(F[2]);
 
                                         Float thickness = PT_thickness(
                                             thicknesses(V),
@@ -1196,8 +1191,27 @@ inline void StacklessBVH::Impl::StacklessCDSharedOtherPointsTrianglesNoMask(
                                                                d_hats(F[0]),
                                                                d_hats(F[1]),
                                                                d_hats(F[2]));
-                                        accept = distance::point_triangle_ccd_broadphase(
-                                            P, F0, F1, F2, dP, dF0, dF1, dF2, d_hat + thickness);
+                                        Float expand = d_hat + thickness;
+                                        if(alpha == static_cast<Float>(0))
+                                        {
+                                            const auto max_p = P.array();
+                                            const auto min_p = P.array();
+                                            const auto max_tri =
+                                                F0.array().max(F1.array()).max(F2.array());
+                                            const auto min_tri =
+                                                F0.array().min(F1.array()).min(F2.array());
+                                            accept = !((min_p - max_tri > expand).any()
+                                                       || (min_tri - max_p > expand).any());
+                                        }
+                                        else
+                                        {
+                                            Vector3 dP  = alpha * dxs(V);
+                                            Vector3 dF0 = alpha * dxs(F[0]);
+                                            Vector3 dF1 = alpha * dxs(F[1]);
+                                            Vector3 dF2 = alpha * dxs(F[2]);
+                                            accept = distance::point_triangle_ccd_broadphase(
+                                                P, F0, F1, F2, dP, dF0, dF1, dF2, expand);
+                                        }
                                     }
                                     if(accept)
                                     {
