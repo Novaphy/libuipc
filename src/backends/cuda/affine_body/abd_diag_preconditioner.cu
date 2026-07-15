@@ -115,11 +115,7 @@ Float block_inverse_precond_mix()
     static const Float mix = [] {
         const char* env = std::getenv("UIPC_COREX_ABD_PRECOND_BLOCK_MIX");
         if(!env || env[0] == '\0')
-#if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
-            return Float{0.4};
-#else
-            return Float{1};
-#endif
+            return Float{0.99};
 
         char*  end = nullptr;
         double v   = std::strtod(env, &end);
