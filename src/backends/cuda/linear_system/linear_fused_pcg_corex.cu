@@ -2,6 +2,7 @@
 #include <sim_engine.h>
 #include <linear_system/global_linear_system.h>
 #include <uipc/common/timer.h>
+#include <cub/block/block_reduce.cuh>
 #include <cub/warp/warp_reduce.cuh>
 #include <algorithm>
 #include <cmath>
@@ -207,10 +208,11 @@ void fused_dot_norm(muda::CDenseVectorView<Float> x,
              y       = y.cviewer().name("y"),
              d_dot   = d_dot.viewer().name("d_dot"),
              d_norm2 = d_norm2.viewer().name("d_norm2"),
-             n] __device__() mutable
+            n] __device__() mutable
             {
-                __shared__ Float dot_cache[256];
-                __shared__ Float norm_cache[256];
+                using BlockReduce = cub::BlockReduce<Float, block_dim>;
+                __shared__ typename BlockReduce::TempStorage dot_storage;
+                __shared__ typename BlockReduce::TempStorage norm_storage;
 
                 int tid = threadIdx.x;
                 int i   = blockIdx.x * blockDim.x + threadIdx.x;
@@ -224,24 +226,13 @@ void fused_dot_norm(muda::CDenseVectorView<Float> x,
                     norm_sum = xv * xv;
                 }
 
-                dot_cache[tid]  = dot_sum;
-                norm_cache[tid] = norm_sum;
-                __syncthreads();
-
-                for(int stride = blockDim.x / 2; stride > 0; stride >>= 1)
-                {
-                    if(tid < stride)
-                    {
-                        dot_cache[tid] += dot_cache[tid + stride];
-                        norm_cache[tid] += norm_cache[tid + stride];
-                    }
-                    __syncthreads();
-                }
+                Float block_dot  = BlockReduce(dot_storage).Sum(dot_sum);
+                Float block_norm = BlockReduce(norm_storage).Sum(norm_sum);
 
                 if(tid == 0)
                 {
-                    muda::atomic_add(d_dot.data(), dot_cache[0]);
-                    muda::atomic_add(d_norm2.data(), norm_cache[0]);
+                    muda::atomic_add(d_dot.data(), block_dot);
+                    muda::atomic_add(d_norm2.data(), block_norm);
                 }
             });
 }
