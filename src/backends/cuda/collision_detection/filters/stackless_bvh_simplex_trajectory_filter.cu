@@ -3628,7 +3628,9 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
 
         static const bool ordered_scan_select_enabled = [] {
             const char* env = std::getenv("UIPC_COREX_FILTER_ORDERED_SCAN_SELECT");
-            return env && env[0] != '\0' && env[0] == '1';
+            if(env && env[0] != '\0')
+                return env[0] != '0';
+            return true;
         }();
         static const bool block_stable_select_enabled = [] {
             const char* env = std::getenv("UIPC_COREX_FILTER_BLOCK_STABLE_SELECT");
