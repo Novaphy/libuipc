@@ -60,8 +60,19 @@ bool block_inverse_precond_enabled()
     if(std::getenv("UIPC_COREX_ABD_PRECOND_DIAG_JACOBI"))
         return false;
     const char* env = std::getenv("UIPC_COREX_ABD_PRECOND_BLOCK_INVERSE");
-    if(!env) return true;
-    return env[0] != '\0' && env[0] != '0';
+    if(env)
+        return env[0] != '\0' && env[0] != '0';
+
+#if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
+    // The matrix-free contact path removes the same contact Hessian blocks from
+    // explicit BCOO assembly but still contributes their diagonal estimate.
+    // On CoreX this makes the 12x12 LDLT preconditioner too sensitive on dense
+    // contact frames; plain Jacobi is slower per PCG step but keeps Newton
+    // convergence stable across long ABD runs such as wrecking_ball 400.
+    return false;
+#else
+    return true;
+#endif
 }
 
 bool block_inverse_precond_stats_enabled()
