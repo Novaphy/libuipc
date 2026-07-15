@@ -203,10 +203,10 @@ void GlobalVertexManager::Impl::init()
 
     // 5) Initialize previous positions and safe positions
     prev_positions.resize(total_count);
-    checkCudaErrors(cudaMemcpy(prev_positions.data(), positions.data(),
-                               sizeof(Vector3) * total_count, cudaMemcpyDeviceToDevice));
-    checkCudaErrors(cudaMemcpy(safe_positions.data(), positions.data(),
-                               sizeof(Vector3) * total_count, cudaMemcpyDeviceToDevice));
+    checkCudaErrors(cudaMemcpyAsync(prev_positions.data(), positions.data(),
+                                    sizeof(Vector3) * total_count, cudaMemcpyDeviceToDevice));
+    checkCudaErrors(cudaMemcpyAsync(safe_positions.data(), positions.data(),
+                                    sizeof(Vector3) * total_count, cudaMemcpyDeviceToDevice));
 
     // 6) Other initializations
     axis_max_disp = 0.0;
@@ -270,15 +270,15 @@ void GlobalVertexManager::Impl::setup_ccd(muda::CBufferView<Vector3> base_positi
 
 void GlobalVertexManager::Impl::restore_ccd()
 {
-    checkCudaErrors(cudaMemcpy(positions.data(), safe_positions.data(),
-                               sizeof(Vector3) * positions.size(), cudaMemcpyDeviceToDevice));
+    checkCudaErrors(cudaMemcpyAsync(positions.data(), safe_positions.data(),
+                                    sizeof(Vector3) * positions.size(), cudaMemcpyDeviceToDevice));
 }
 
 void GlobalVertexManager::Impl::overwrite_positions(muda::CBufferView<Vector3> src)
 {
     UIPC_ASSERT(src.size() == positions.size(), "Source size not equal to vertex count");
-    checkCudaErrors(cudaMemcpy(positions.data(), src.data(),
-                               sizeof(Vector3) * positions.size(), cudaMemcpyDeviceToDevice));
+    checkCudaErrors(cudaMemcpyAsync(positions.data(), src.data(),
+                                    sizeof(Vector3) * positions.size(), cudaMemcpyDeviceToDevice));
 }
 
 void GlobalVertexManager::VertexAttributeInfo::require_discard_friction() const noexcept
@@ -297,17 +297,17 @@ void GlobalVertexManager::VertexAttributeInfo::require_discard_friction() const 
 void GlobalVertexManager::Impl::record_prev_positions()
 {
     using namespace muda;
-    checkCudaErrors(cudaMemcpy(prev_positions.data(), positions.data(),
-                               sizeof(Vector3) * positions.size(), cudaMemcpyDeviceToDevice));
+    checkCudaErrors(cudaMemcpyAsync(prev_positions.data(), positions.data(),
+                                    sizeof(Vector3) * positions.size(), cudaMemcpyDeviceToDevice));
 }
 
 void GlobalVertexManager::Impl::record_start_point()
 {
     using namespace muda;
-    checkCudaErrors(cudaMemcpy(safe_positions.data(),
-                               positions.data(),
-                               sizeof(Vector3) * positions.size(),
-                               cudaMemcpyDeviceToDevice));
+    checkCudaErrors(cudaMemcpyAsync(safe_positions.data(),
+                                    positions.data(),
+                                    sizeof(Vector3) * positions.size(),
+                                    cudaMemcpyDeviceToDevice));
 }
 
 Float GlobalVertexManager::Impl::compute_axis_max_displacement()
