@@ -41,9 +41,25 @@ constexpr int ABD_BODY_H3X3_BLOCK_COUNT = 10;
 
 static bool corex_abd_assemble_sync_enabled()
 {
-    return std::getenv("UIPC_COREX_ABD_ASSEMBLE_SYNC") != nullptr
-           || std::getenv("UIPC_COREX_TRACE_ABD_ASSEMBLE") != nullptr
-           || std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+    static const bool enabled =
+        std::getenv("UIPC_COREX_ABD_ASSEMBLE_SYNC") != nullptr
+        || std::getenv("UIPC_COREX_TRACE_ABD_ASSEMBLE") != nullptr
+        || std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+    return enabled;
+}
+
+static bool corex_trace_abd_assemble_enabled()
+{
+    static const bool enabled =
+        std::getenv("UIPC_COREX_TRACE_ABD_ASSEMBLE") != nullptr;
+    return enabled;
+}
+
+static bool corex_trace_linear_system_enabled()
+{
+    static const bool enabled =
+        std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+    return enabled;
 }
 
 static void corex_abd_assemble_sync_if_requested(const char* where)
@@ -51,20 +67,33 @@ static void corex_abd_assemble_sync_if_requested(const char* where)
     if(!corex_abd_assemble_sync_enabled())
         return;
     checkCudaErrors(cudaDeviceSynchronize());
-    if(std::getenv("UIPC_COREX_TRACE_ABD_ASSEMBLE")
-       || std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM"))
+    if(corex_trace_abd_assemble_enabled() || corex_trace_linear_system_enabled())
         logger::info("[corex_trace][abd] sync ok at {}", where);
 }
 
 static bool corex_abd_dytopo_parallel_enabled()
 {
-    const char* serial = std::getenv("UIPC_COREX_ABD_DYTOPO_SERIAL");
-    if(serial && serial[0] != '\0' && serial[0] != '0')
-        return false;
-    const char* env = std::getenv("UIPC_COREX_ABD_DYTOPO_PARALLEL");
-    if(env && env[0] != '\0')
-        return env[0] != '0';
-    return true;
+    static const bool enabled = [] {
+        const char* serial = std::getenv("UIPC_COREX_ABD_DYTOPO_SERIAL");
+        if(serial && serial[0] != '\0' && serial[0] != '0')
+            return false;
+        const char* env = std::getenv("UIPC_COREX_ABD_DYTOPO_PARALLEL");
+        if(env && env[0] != '\0')
+            return env[0] != '0';
+        return true;
+    }();
+    return enabled;
+}
+
+static bool corex_abd_bdf1_direct_assembly_enabled()
+{
+    static const bool enabled = [] {
+        const char* disable = std::getenv("UIPC_COREX_ABD_BDF1_DIRECT_ASSEMBLY_DISABLE");
+        if(disable && disable[0] != '\0' && disable[0] != '0')
+            return false;
+        return true;
+    }();
+    return enabled;
 }
 
 static __global__ void kernel_abd_assemble_gradients(int n,
@@ -858,7 +887,7 @@ void ABDLinearSubsystem::Impl::report_extent(GlobalLinearSystem::DiagExtentInfo&
 void ABDLinearSubsystem::Impl::assemble(GlobalLinearSystem::DiagInfo& info)
 {
     using namespace muda;
-    const bool corex_trace = (std::getenv("UIPC_COREX_TRACE_ABD_ASSEMBLE") != nullptr);
+    const bool corex_trace = corex_trace_abd_assemble_enabled();
     auto trace = [&](const char* msg)
     {
         if(corex_trace)
@@ -935,7 +964,7 @@ void ABDLinearSubsystem::Impl::_assemble_kinetic_shape(IndexT& hess_offset,
                                                        GlobalLinearSystem::DiagInfo& info)
 {
     using namespace muda;
-    const bool corex_trace = (std::getenv("UIPC_COREX_TRACE_ABD_ASSEMBLE") != nullptr);
+    const bool corex_trace = corex_trace_abd_assemble_enabled();
     auto trace = [&](const char* msg)
     {
         if(corex_trace)
@@ -953,8 +982,7 @@ void ABDLinearSubsystem::Impl::_assemble_kinetic_shape(IndexT& hess_offset,
         logger::info("[corex_trace][abd] kinetic_shape: sync ok at {}", where);
     };
     const bool direct_bdf1_assembly =
-        std::getenv("UIPC_COREX_ABD_BDF1_DIRECT_ASSEMBLY_DISABLE") == nullptr
-        && !info.gradient_only();
+        corex_abd_bdf1_direct_assembly_enabled() && !info.gradient_only();
     auto cst_view = abd().constitutions.view();
     const bool has_shape_constitutions = !cst_view.empty();
 
@@ -1125,7 +1153,7 @@ void ABDLinearSubsystem::Impl::_assemble_kinetic_shape(IndexT& hess_offset,
             auto dst_cols = body_H3x3.col_indices();
             auto dst_vals = body_H3x3.values();
 
-            if(std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM"))
+            if(corex_trace_linear_system_enabled())
             {
                 logger::info("[corex_trace][abd] hess host: n={}, triplets={}, "
                              "dst_rows.data()={}, dst_cols.data()={}, dst_vals.data()={}",
@@ -1135,7 +1163,7 @@ void ABDLinearSubsystem::Impl::_assemble_kinetic_shape(IndexT& hess_offset,
 
             int block = 128;
             int grid  = (n + block - 1) / block;
-            if(std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM"))
+            if(corex_trace_linear_system_enabled())
                 logger::info("[corex_trace][abd] hess kernel launch: grid={}, block={}", grid, block);
             kernel_abd_assemble_hessians<<<grid, block>>>(
                 n,
@@ -1148,10 +1176,10 @@ void ABDLinearSubsystem::Impl::_assemble_kinetic_shape(IndexT& hess_offset,
                 dst_cols.data(),
                 dst_vals.data());
             checkCudaErrors(cudaGetLastError());
-            if(std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM"))
+            if(corex_trace_linear_system_enabled())
                 logger::info("[corex_trace][abd] hess kernel launch ok, syncing...");
             corex_abd_assemble_sync_if_requested("after assemble hessians");
-            if(std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM"))
+            if(corex_trace_linear_system_enabled())
                 logger::info("[corex_trace][abd] hess kernel sync done");
         }
     }
