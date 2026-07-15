@@ -118,7 +118,7 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(
 
     loose_resize_no_construct(ij_hash, src_row_indices.size());
     loose_resize_no_construct(sort_index, src_row_indices.size());
-    ij_pairs.resize(src_row_indices.size());
+    loose_resize_no_construct(ij_pairs, src_row_indices.size());
 
     auto dst_row_indices = to.row_indices();
     auto dst_col_indices = to.col_indices();
@@ -175,7 +175,7 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(muda::DeviceBCOOMatri
 
     loose_resize_no_construct(ij_hash, src_row_indices.size());
     loose_resize_no_construct(sort_index, src_row_indices.size());
-    ij_pairs.resize(src_row_indices.size());
+    loose_resize_no_construct(ij_pairs, src_row_indices.size());
 
 
     int n = static_cast<int>(src_row_indices.size());
