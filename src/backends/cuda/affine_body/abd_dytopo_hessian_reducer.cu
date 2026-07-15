@@ -405,9 +405,9 @@ void ABDDyTopoHessianReducer::reduce_body_triplets(IndexT body_count)
     if(unique_count == 0)
         return;
 
-    m_body_unique_pairs.resize(unique_count);
-    m_body_unique_counts.resize(unique_count);
-    m_body_offsets.resize(unique_count);
+    m_body_unique_pairs.unsafe_resize_no_construct(unique_count);
+    m_body_unique_counts.unsafe_resize_no_construct(unique_count);
+    m_body_offsets.unsafe_resize_no_construct(unique_count);
 
     {
         corex_profile::ScopedPhase phase("abd_dytopo_reducer", "body_unique_counts_scan");
@@ -416,7 +416,8 @@ void ABDDyTopoHessianReducer::reduce_body_triplets(IndexT body_count)
                                   unique_count);
     }
 
-    m_body_blocks.resize(body_count, body_count, unique_count);
+    m_body_blocks.reshape(body_count, body_count);
+    m_body_blocks.unsafe_resize_triplets_no_construct(unique_count);
 
     {
         corex_profile::ScopedPhase phase("abd_dytopo_reducer", "body_reduce_12x12");
@@ -447,7 +448,8 @@ void ABDDyTopoHessianReducer::build(muda::CTripletMatrixView<Float, 3> raw_hessi
     m_node_pair_count   = 0;
     m_body_pair_count   = 0;
 
-    m_node_triplets.resize(raw_hessians.total_rows(), raw_hessians.total_cols(), raw_count);
+    m_node_triplets.reshape(raw_hessians.total_rows(), raw_hessians.total_cols());
+    m_node_triplets.unsafe_resize_triplets_no_construct(raw_count);
     m_node_blocks.resize(raw_hessians.total_rows(), raw_hessians.total_cols(), 0);
     m_body_triplets.resize(body_count, body_count, 0);
     m_body_blocks.resize(body_count, body_count, 0);
@@ -457,7 +459,8 @@ void ABDDyTopoHessianReducer::build(muda::CTripletMatrixView<Float, 3> raw_hessi
 
     if(corex_abd_dytopo_direct_body_enabled())
     {
-        m_body_triplets.resize(body_count, body_count, raw_count);
+        m_body_triplets.reshape(body_count, body_count);
+        m_body_triplets.unsafe_resize_triplets_no_construct(raw_count);
 
         {
             corex_profile::ScopedPhase phase("abd_dytopo_reducer", "map_raw_to_body_pairs");
@@ -487,7 +490,8 @@ void ABDDyTopoHessianReducer::build(muda::CTripletMatrixView<Float, 3> raw_hessi
             return;
         }
 
-        m_body_triplets.resize(body_count, body_count, body_triplet_count);
+        m_body_triplets.reshape(body_count, body_count);
+        m_body_triplets.unsafe_resize_triplets_no_construct(body_triplet_count);
 
         {
             corex_profile::ScopedPhase phase("abd_dytopo_reducer", "reduce_body_pairs");
@@ -521,7 +525,8 @@ void ABDDyTopoHessianReducer::build(muda::CTripletMatrixView<Float, 3> raw_hessi
     if(node_pair_count == 0)
         return;
 
-    m_body_triplets.resize(body_count, body_count, node_pair_count);
+    m_body_triplets.reshape(body_count, body_count);
+    m_body_triplets.unsafe_resize_triplets_no_construct(node_pair_count);
 
     {
         corex_profile::ScopedPhase phase("abd_dytopo_reducer", "map_node_to_body_pairs");

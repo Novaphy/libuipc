@@ -66,8 +66,6 @@ class ABDDyTopoHessianReducer
     template <typename T>
     void loose_resize(muda::DeviceBuffer<T>& buffer, size_t size)
     {
-        if(buffer.capacity() < size)
-            buffer.reserve(size * 3 / 2 + 1);
         buffer.resize(size);
     }
 };
