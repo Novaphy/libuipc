@@ -3,6 +3,7 @@
 #include <muda/atomic.h>
 #include <muda/launch/launch.h>
 #include <muda/cub/device/device_reduce.h>
+#include <cub/block/block_reduce.cuh>
 #include <cub/warp/warp_reduce.cuh>
 #include <cub/warp/warp_scan.cuh>
 #include <cub/util_math.cuh>
@@ -121,6 +122,66 @@ __global__ void kernel_sym_spmv_triplet_atomic(int          n_triplets,
         atomicAdd(y + bj * 3 + 1, a * yj1);
         atomicAdd(y + bj * 3 + 2, a * yj2);
     }
+}
+
+__global__ void kernel_sym_spmv_triplet_atomic_dot(int          n_triplets,
+                                                   const int*   rows,
+                                                   const int*   cols,
+                                                   const Float* blocks,
+                                                   const Float* x,
+                                                   Float        a,
+                                                   Float*       y,
+                                                   Float*       d_dot)
+{
+    constexpr int kBlockDim = 256;
+    using BlockReduce = cub::BlockReduce<Float, kBlockDim>;
+    __shared__ typename BlockReduce::TempStorage temp_storage;
+
+    int   t     = blockIdx.x * blockDim.x + threadIdx.x;
+    Float local = 0;
+    if(t < n_triplets)
+    {
+        int          bi = rows[t];
+        int          bj = cols[t];
+        const Float* B  = blocks + t * 9;
+
+        Float xj0 = x[bj * 3 + 0];
+        Float xj1 = x[bj * 3 + 1];
+        Float xj2 = x[bj * 3 + 2];
+
+        Float yi0 = B[0] * xj0 + B[3] * xj1 + B[6] * xj2;
+        Float yi1 = B[1] * xj0 + B[4] * xj1 + B[7] * xj2;
+        Float yi2 = B[2] * xj0 + B[5] * xj1 + B[8] * xj2;
+
+        atomicAdd(y + bi * 3 + 0, a * yi0);
+        atomicAdd(y + bi * 3 + 1, a * yi1);
+        atomicAdd(y + bi * 3 + 2, a * yi2);
+
+        if(bi == bj)
+        {
+            local = a * (xj0 * yi0 + xj1 * yi1 + xj2 * yi2);
+        }
+        else
+        {
+            Float xi0 = x[bi * 3 + 0];
+            Float xi1 = x[bi * 3 + 1];
+            Float xi2 = x[bi * 3 + 2];
+
+            Float yj0 = B[0] * xi0 + B[1] * xi1 + B[2] * xi2;
+            Float yj1 = B[3] * xi0 + B[4] * xi1 + B[5] * xi2;
+            Float yj2 = B[6] * xi0 + B[7] * xi1 + B[8] * xi2;
+
+            atomicAdd(y + bj * 3 + 0, a * yj0);
+            atomicAdd(y + bj * 3 + 1, a * yj1);
+            atomicAdd(y + bj * 3 + 2, a * yj2);
+
+            local = (Float{2} * a) * (xi0 * yi0 + xi1 * yi1 + xi2 * yi2);
+        }
+    }
+
+    Float block_sum = BlockReduce(temp_storage).Sum(local);
+    if(threadIdx.x == 0)
+        atomicAdd(d_dot, block_sum);
 }
 
 }  // namespace
@@ -526,19 +587,39 @@ void Spmv::rbk_sym_spmv_dot(Float                           a,
                             muda::VarView<Float>            d_dot)
 {
 #if UIPC_SPMV_ILUVATAR_RBK_WORKAROUND
-    sym_spmv(a, A, x, b, y);
-    auto n = static_cast<int>(x.size());
-    if(n > 0)
+    auto nt = static_cast<int>(A.triplet_count());
+    if(nt > 0 && b == 0)
     {
-        dot_buffer.resize(n);
         constexpr int kBlk = 256;
-        int grid = (n + kBlk - 1) / kBlk;
-        kernel_pointwise_mul<<<grid, kBlk>>>(n, x.data(), y.data(), dot_buffer.data());
-        muda::DeviceReduce().Sum(dot_buffer.data(), d_dot.data(), n);
+        checkCudaErrors(cudaMemsetAsync(y.buffer_view().data(), 0, sizeof(Float) * y.size()));
+        checkCudaErrors(cudaMemsetAsync(d_dot.data(), 0, sizeof(Float)));
+        int grid = (nt + kBlk - 1) / kBlk;
+        kernel_sym_spmv_triplet_atomic_dot<<<grid, kBlk>>>(
+            nt,
+            A.row_indices().data(),
+            A.col_indices().data(),
+            reinterpret_cast<const Float*>(A.values().data()),
+            x.data(),
+            a,
+            y.buffer_view().data(),
+            d_dot.data());
     }
     else
     {
-        checkCudaErrors(cudaMemsetAsync(d_dot.data(), 0, sizeof(Float)));
+        sym_spmv(a, A, x, b, y);
+        auto n = static_cast<int>(x.size());
+        if(n > 0)
+        {
+            dot_buffer.resize(n);
+            constexpr int kBlk = 256;
+            int grid = (n + kBlk - 1) / kBlk;
+            kernel_pointwise_mul<<<grid, kBlk>>>(n, x.data(), y.data(), dot_buffer.data());
+            muda::DeviceReduce().Sum(dot_buffer.data(), d_dot.data(), n);
+        }
+        else
+        {
+            checkCudaErrors(cudaMemsetAsync(d_dot.data(), 0, sizeof(Float)));
+        }
     }
 #else
     using namespace muda;
