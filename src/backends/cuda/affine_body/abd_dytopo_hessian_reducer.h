@@ -67,7 +67,7 @@ class ABDDyTopoHessianReducer
     template <typename T>
     void loose_resize(muda::DeviceBuffer<T>& buffer, size_t size)
     {
-        buffer.resize(size);
+        buffer.unsafe_resize_no_construct(size);
     }
 };
 }  // namespace uipc::backend::cuda
