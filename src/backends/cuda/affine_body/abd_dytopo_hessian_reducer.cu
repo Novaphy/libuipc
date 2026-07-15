@@ -392,7 +392,8 @@ void ABDDyTopoHessianReducer::reduce_body_triplets(IndexT body_count)
 
     const int body_triplet_count = static_cast<int>(m_body_triplets.triplet_count());
     m_body_pair_count = 0;
-    m_body_blocks.resize(body_count, body_count, 0);
+    m_body_blocks.reshape(body_count, body_count);
+    m_body_blocks.unsafe_resize_triplets_no_construct(0);
 
     if(body_triplet_count == 0)
         return;
