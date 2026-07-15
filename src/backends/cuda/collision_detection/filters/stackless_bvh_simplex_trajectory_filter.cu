@@ -2840,8 +2840,6 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info,
                                                              dxs,
                                                              info.thicknesses(),
                                                              info.d_hats(),
-                                                             triangle_thicknesses,
-                                                             triangle_d_hats,
                                                              alpha,
                                                              info.v2b(),
                                                              info.body_self_collision(),
@@ -2864,8 +2862,6 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info,
                  v2b = info.v2b().viewer().name("v2b"),
                  body_self_collision = info.body_self_collision().viewer().name("body_self_collision"),
                  d_hats = info.d_hats().viewer().name("d_hats"),
-                 triangle_thicknesses = triangle_thicknesses.viewer().name("triangle_thicknesses"),
-                 triangle_d_hats = triangle_d_hats.viewer().name("triangle_d_hats"),
                  contact_mask_mode,
                  subscene_mask_mode,
                  contact_mask_fast,
@@ -2910,8 +2906,13 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info,
                     Vector3 dF1 = alpha * dxs(F[1]);
                     Vector3 dF2 = alpha * dxs(F[2]);
 
-                    Float thickness = thicknesses(V) + triangle_thicknesses(j);
-                    Float d_hat = (d_hats(V) + triangle_d_hats(j)) * Float{0.5};
+                    Float thickness = PT_thickness(thicknesses(V),
+                                                   thicknesses(F[0]),
+                                                   thicknesses(F[1]),
+                                                   thicknesses(F[2]));
+
+                    Float d_hat =
+                        PT_d_hat(d_hats(V), d_hats(F[0]), d_hats(F[1]), d_hats(F[2]));
 
                     Float expand = d_hat + thickness;
 
@@ -2971,8 +2972,6 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info,
                                                       dxs,
                                                       info.thicknesses(),
                                                       info.d_hats(),
-                                                      triangle_thicknesses,
-                                                      triangle_d_hats,
                                                       alpha,
                                                       info.v2b(),
                                                       info.body_self_collision(),
