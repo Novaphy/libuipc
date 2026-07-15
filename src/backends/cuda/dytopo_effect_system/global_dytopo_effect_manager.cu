@@ -698,6 +698,45 @@ static __global__ void kernel_copy_sorted_blocks_with_ij_3x3(
     dst_col[i] = ij_pairs[i].y;
 }
 
+static __global__ void kernel_ge2sym_mark_copy_3x3(
+    int N, const int* row_indices, const int* col_indices,
+    const BlockT3* blocks, int* counts, int2* ij_pairs, BlockT3* block_temp)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    int row = row_indices[i];
+    int col = col_indices[i];
+    counts[i] = row <= col ? 1 : 0;
+    ij_pairs[i].x = row;
+    ij_pairs[i].y = col;
+    block_temp[i] = blocks[i];
+}
+
+static __global__ void kernel_ge2sym_compact_3x3(
+    int N, const int* counts, const int* offsets, const int2* ij_pairs,
+    const BlockT3* block_temp, int* row_indices, int* col_indices, BlockT3* blocks)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N || counts[i] == 0) return;
+    int offset = offsets[i];
+    blocks[offset] = block_temp[i];
+    row_indices[offset] = ij_pairs[i].x;
+    col_indices[offset] = ij_pairs[i].y;
+}
+
+static __global__ void kernel_ge2sym_total_count(
+    int N, const int* counts, const int* offsets, int* total_count)
+{
+    if(threadIdx.x != 0 || blockIdx.x != 0) return;
+    if(N <= 0)
+    {
+        *total_count = 0;
+        return;
+    }
+    int last = N - 1;
+    *total_count = offsets[last] + counts[last];
+}
+
 static constexpr int kBlock = 512;
 static inline int grid_for(int n) { return (n + kBlock - 1) / kBlock; }
 
@@ -833,6 +872,54 @@ void launch_copy_sorted_blocks_with_ij_3x3(int N, const BlockT3* src_blocks,
         reinterpret_cast<const int2*>(ij_pairs_xy),
         dst_blocks, dst_row, dst_col);
     corex_matconv_sync_if_needed("copy_sorted_blocks_with_ij_3x3");
+}
+
+void launch_ge2sym_mark_copy_3x3(int N, const int* row_indices,
+                                 const int* col_indices,
+                                 const BlockT3* blocks,
+                                 int* counts,
+                                 int* ij_pairs_xy,
+                                 BlockT3* block_temp)
+{
+    MatconvPhase phase("ge2sym_mark_copy_3x3");
+    kernel_ge2sym_mark_copy_3x3<<<grid_for(N), kBlock>>>(
+        N,
+        row_indices,
+        col_indices,
+        blocks,
+        counts,
+        reinterpret_cast<int2*>(ij_pairs_xy),
+        block_temp);
+    corex_matconv_sync_if_needed("ge2sym_mark_copy_3x3");
+}
+
+void launch_ge2sym_compact_3x3(int N, const int* counts,
+                               const int* offsets,
+                               const int* ij_pairs_xy,
+                               const BlockT3* block_temp,
+                               int* row_indices,
+                               int* col_indices,
+                               BlockT3* blocks)
+{
+    MatconvPhase phase("ge2sym_compact_3x3");
+    kernel_ge2sym_compact_3x3<<<grid_for(N), kBlock>>>(
+        N,
+        counts,
+        offsets,
+        reinterpret_cast<const int2*>(ij_pairs_xy),
+        block_temp,
+        row_indices,
+        col_indices,
+        blocks);
+    corex_matconv_sync_if_needed("ge2sym_compact_3x3");
+}
+
+void launch_ge2sym_total_count(int N, const int* counts,
+                               const int* offsets, int* total_count)
+{
+    MatconvPhase phase("ge2sym_total_count");
+    kernel_ge2sym_total_count<<<1, 1>>>(N, counts, offsets, total_count);
+    corex_matconv_sync_if_needed("ge2sym_total_count");
 }
 
 __device__ __forceinline__ void corex_atomic_add_double(double* address, double val)

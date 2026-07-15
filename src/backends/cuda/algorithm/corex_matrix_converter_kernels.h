@@ -47,6 +47,24 @@ void launch_copy_sorted_blocks_with_ij_3x3(int N, const BlockT3* src_blocks,
                                             BlockT3* dst_blocks,
                                             int* dst_row, int* dst_col);
 
+void launch_ge2sym_mark_copy_3x3(int N, const int* row_indices,
+                                 const int* col_indices,
+                                 const BlockT3* blocks,
+                                 int* counts,
+                                 int* ij_pairs_xy,
+                                 BlockT3* block_temp);
+
+void launch_ge2sym_compact_3x3(int N, const int* counts,
+                               const int* offsets,
+                               const int* ij_pairs_xy,
+                               const BlockT3* block_temp,
+                               int* row_indices,
+                               int* col_indices,
+                               BlockT3* blocks);
+
+void launch_ge2sym_total_count(int N, const int* counts,
+                               const int* offsets, int* total_count);
+
 void launch_segmental_reduce_3x3(int N, const int* segment_ids,
                                   const BlockT3* in_blocks, BlockT3* out_blocks,
                                   int out_count);

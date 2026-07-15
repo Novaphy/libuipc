@@ -560,69 +560,43 @@ void MatrixConverter<T, N>::ge2sym(muda::DeviceBCOOMatrix<T, N>& to)
     loose_resize_no_construct(ij_pairs, to.non_zeros());
     loose_resize_no_construct(block_temp, to.values().size());
 
-    // 0. find the upper triangular part (where i <= j)
-    ParallelFor()
-        .file_line(__FILE__, __LINE__)
-        .apply(to.non_zeros(),
-               [row_indices = to.row_indices().cviewer().name("row_indices"),
-                col_indices = to.col_indices().cviewer().name("col_indices"),
-                ij_pairs    = ij_pairs.viewer().name("ij_pairs"),
-                blocks      = to.values().cviewer().name("block_temp"),
-                block_temp  = block_temp.viewer().name("block_temp"),
-                counts = counts.viewer().name("counts")] __device__(int i) mutable
-               {
-                   counts(i)     = row_indices(i) <= col_indices(i) ? 1 : 0;
-                   ij_pairs(i).x = row_indices(i);
-                   ij_pairs(i).y = col_indices(i);
-                   block_temp(i) = blocks(i);
-               });
+    static_assert(N == 3, "CoreX ge2sym explicit kernels only support 3x3 blocks");
+    static_assert(std::is_same_v<T, Float>,
+                  "CoreX ge2sym explicit kernels require uipc::Float blocks");
+
+    corex_matconv::launch_ge2sym_mark_copy_3x3(
+        static_cast<int>(to.non_zeros()),
+        thrust::raw_pointer_cast(to.row_indices().data()),
+        thrust::raw_pointer_cast(to.col_indices().data()),
+        reinterpret_cast<const corex_matconv::BlockT3*>(
+            thrust::raw_pointer_cast(to.values().data())),
+        thrust::raw_pointer_cast(counts.data()),
+        reinterpret_cast<int*>(thrust::raw_pointer_cast(ij_pairs.data())),
+        reinterpret_cast<corex_matconv::BlockT3*>(
+            thrust::raw_pointer_cast(block_temp.data())));
 
     // exclusive sum
     DeviceScan().ExclusiveSum(counts.data(), offsets.data(), counts.size());
 
-    // set the values
-    auto dst_block = to.values();
+    corex_matconv::launch_ge2sym_compact_3x3(
+        static_cast<int>(to.non_zeros()),
+        thrust::raw_pointer_cast(counts.data()),
+        thrust::raw_pointer_cast(offsets.data()),
+        reinterpret_cast<const int*>(thrust::raw_pointer_cast(ij_pairs.data())),
+        reinterpret_cast<const corex_matconv::BlockT3*>(
+            thrust::raw_pointer_cast(block_temp.data())),
+        thrust::raw_pointer_cast(to.row_indices().data()),
+        thrust::raw_pointer_cast(to.col_indices().data()),
+        reinterpret_cast<corex_matconv::BlockT3*>(
+            thrust::raw_pointer_cast(to.values().data())));
 
-    ParallelFor()
-        .file_line(__FILE__, __LINE__)
-        .apply(dst_block.size(),
-               [dst_blocks  = dst_block.viewer().name("blocks"),
-                src_blocks  = block_temp.cviewer().name("src_blocks"),
-                ij_pairs    = ij_pairs.cviewer().name("ij_pairs"),
-                row_indices = to.row_indices().viewer().name("row_indices"),
-                col_indices = to.col_indices().viewer().name("col_indices"),
-                counts      = counts.cviewer().name("counts"),
-                offsets     = offsets.cviewer().name("offsets")] __device__(int i) mutable
-               {
-                   auto count  = counts(i);
-                   auto offset = offsets(i);
+    corex_matconv::launch_ge2sym_total_count(
+        static_cast<int>(to.non_zeros()),
+        thrust::raw_pointer_cast(counts.data()),
+        thrust::raw_pointer_cast(offsets.data()),
+        count.data());
 
-                   if(count != 0)
-                   {
-                       dst_blocks(offset)  = src_blocks(i);
-                       auto ij             = ij_pairs(i);
-                       row_indices(offset) = ij.x;
-                       col_indices(offset) = ij.y;
-                   }
-               });
-
-    // Compute total_count robustly (avoid relying on "last thread writes" / viewer total_size).
-    count = 0;
-    if(counts.size() > 0)
-    {
-        ParallelFor()
-            .file_line(__FILE__, __LINE__)
-            .apply(1,
-                   [counts = counts.cviewer().name("counts"),
-                    offsets = offsets.cviewer().name("offsets"),
-                    total_count = count.viewer().name("total_count")] __device__(int) mutable
-                   {
-                       int last = (int)counts.total_size() - 1;
-                       total_count = offsets(last) + counts(last);
-                   });
-    }
-
-    int h_total_count = (int)count;
+    int h_total_count = corex_readback_int(count);
 
     to.resize_triplets(h_total_count);
 }
@@ -641,69 +615,43 @@ void MatrixConverter<T, N>::ge2sym(muda::DeviceTripletMatrix<T, N>& to)
     loose_resize_no_construct(ij_pairs, to.triplet_count());
     loose_resize_no_construct(block_temp, to.values().size());
 
-    // 0. find the upper triangular part (where i <= j)
-    ParallelFor()
-        .file_line(__FILE__, __LINE__)
-        .apply(to.triplet_count(),
-               [row_indices = to.row_indices().cviewer().name("row_indices"),
-                col_indices = to.col_indices().cviewer().name("col_indices"),
-                ij_pairs    = ij_pairs.viewer().name("ij_pairs"),
-                blocks      = to.values().cviewer().name("block_temp"),
-                block_temp  = block_temp.viewer().name("block_temp"),
-                counts = counts.viewer().name("counts")] __device__(int i) mutable
-               {
-                   counts(i)     = row_indices(i) <= col_indices(i) ? 1 : 0;
-                   ij_pairs(i).x = row_indices(i);
-                   ij_pairs(i).y = col_indices(i);
-                   block_temp(i) = blocks(i);
-               });
+    static_assert(N == 3, "CoreX ge2sym explicit kernels only support 3x3 blocks");
+    static_assert(std::is_same_v<T, Float>,
+                  "CoreX ge2sym explicit kernels require uipc::Float blocks");
+
+    corex_matconv::launch_ge2sym_mark_copy_3x3(
+        static_cast<int>(to.triplet_count()),
+        thrust::raw_pointer_cast(to.row_indices().data()),
+        thrust::raw_pointer_cast(to.col_indices().data()),
+        reinterpret_cast<const corex_matconv::BlockT3*>(
+            thrust::raw_pointer_cast(to.values().data())),
+        thrust::raw_pointer_cast(counts.data()),
+        reinterpret_cast<int*>(thrust::raw_pointer_cast(ij_pairs.data())),
+        reinterpret_cast<corex_matconv::BlockT3*>(
+            thrust::raw_pointer_cast(block_temp.data())));
 
     // exclusive sum
     DeviceScan().ExclusiveSum(counts.data(), offsets.data(), counts.size());
 
-    // set the values
-    auto dst_block = to.values();
+    corex_matconv::launch_ge2sym_compact_3x3(
+        static_cast<int>(to.triplet_count()),
+        thrust::raw_pointer_cast(counts.data()),
+        thrust::raw_pointer_cast(offsets.data()),
+        reinterpret_cast<const int*>(thrust::raw_pointer_cast(ij_pairs.data())),
+        reinterpret_cast<const corex_matconv::BlockT3*>(
+            thrust::raw_pointer_cast(block_temp.data())),
+        thrust::raw_pointer_cast(to.row_indices().data()),
+        thrust::raw_pointer_cast(to.col_indices().data()),
+        reinterpret_cast<corex_matconv::BlockT3*>(
+            thrust::raw_pointer_cast(to.values().data())));
 
-    ParallelFor()
-        .file_line(__FILE__, __LINE__)
-        .apply(dst_block.size(),
-               [dst_blocks  = dst_block.viewer().name("blocks"),
-                src_blocks  = block_temp.cviewer().name("src_blocks"),
-                ij_pairs    = ij_pairs.cviewer().name("ij_pairs"),
-                row_indices = to.row_indices().viewer().name("row_indices"),
-                col_indices = to.col_indices().viewer().name("col_indices"),
-                counts      = counts.cviewer().name("counts"),
-                offsets     = offsets.cviewer().name("offsets")] __device__(int i) mutable
-               {
-                   auto count  = counts(i);
-                   auto offset = offsets(i);
+    corex_matconv::launch_ge2sym_total_count(
+        static_cast<int>(to.triplet_count()),
+        thrust::raw_pointer_cast(counts.data()),
+        thrust::raw_pointer_cast(offsets.data()),
+        count.data());
 
-                   if(count != 0)
-                   {
-                       dst_blocks(offset)  = src_blocks(i);
-                       auto ij             = ij_pairs(i);
-                       row_indices(offset) = ij.x;
-                       col_indices(offset) = ij.y;
-                   }
-               });
-
-    // Compute total_count robustly (avoid relying on "last thread writes" / viewer total_size).
-    count = 0;
-    if(counts.size() > 0)
-    {
-        ParallelFor()
-            .file_line(__FILE__, __LINE__)
-            .apply(1,
-                   [counts = counts.cviewer().name("counts"),
-                    offsets = offsets.cviewer().name("offsets"),
-                    total_count = count.viewer().name("total_count")] __device__(int) mutable
-                   {
-                       int last = (int)counts.total_size() - 1;
-                       total_count = offsets(last) + counts(last);
-                   });
-    }
-
-    int h_total_count = (int)count;
+    int h_total_count = corex_readback_int(count);
 
     to.resize_triplets(h_total_count);
 }
