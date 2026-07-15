@@ -278,7 +278,8 @@ __global__ void kernel_reduce_sorted_blocks_12x12(
     int                           col_count,
     const int*                    unique_counts,
     const int*                    offsets,
-    const Matrix12x12*            sorted_vals,
+    const Matrix12x12*            src_vals,
+    const int*                    sort_index,
     int*                          dst_rows,
     int*                          dst_cols,
     Matrix12x12*                  dst_vals)
@@ -303,7 +304,7 @@ __global__ void kernel_reduce_sorted_blocks_12x12(
     Float sum = 0;
     for(int I = begin; I < end; ++I)
     {
-        const Float* src = reinterpret_cast<const Float*>(sorted_vals + I);
+        const Float* src = reinterpret_cast<const Float*>(src_vals + sort_index[I]);
         sum += src[k];
     }
 
@@ -401,7 +402,6 @@ void ABDDyTopoHessianReducer::reduce_body_triplets(IndexT body_count)
     loose_resize(m_body_hash, body_triplet_count);
     loose_resize(m_body_sort_index_input, body_triplet_count);
     loose_resize(m_body_sort_index, body_triplet_count);
-    loose_resize(m_body_blocks_sorted, body_triplet_count);
 
     {
         corex_profile::ScopedPhase phase("abd_dytopo_reducer", "body_hash_pairs");
@@ -422,17 +422,6 @@ void ABDDyTopoHessianReducer::reduce_body_triplets(IndexT body_count)
                                     body_triplet_count,
                                     0,
                                     corex_abd_compact_hash_sort_end_bit(body_count, body_count));
-    }
-
-    {
-        corex_profile::ScopedPhase phase("abd_dytopo_reducer", "body_copy_sorted_blocks");
-        constexpr int kBlk = 256;
-        kernel_copy_sorted_blocks_12x12<<<(body_triplet_count + kBlk - 1) / kBlk, kBlk>>>(
-            body_triplet_count,
-            m_body_triplets.values().data(),
-            m_body_sort_index.data(),
-            m_body_blocks_sorted.data());
-        checkCudaErrors(cudaGetLastError());
     }
 
     loose_resize(m_body_unique_hashes, body_triplet_count);
@@ -475,7 +464,8 @@ void ABDDyTopoHessianReducer::reduce_body_triplets(IndexT body_count)
             static_cast<int>(body_count),
             m_body_unique_counts.data(),
             m_body_offsets.data(),
-            m_body_blocks_sorted.data(),
+            m_body_triplets.values().data(),
+            m_body_sort_index.data(),
             m_body_blocks.row_indices().data(),
             m_body_blocks.col_indices().data(),
             m_body_blocks.values().data());
