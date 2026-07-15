@@ -282,6 +282,14 @@ namespace uipc::backend::cuda
 {
 REGISTER_SIM_SYSTEM(ABDLineSearchReporter);
 
+static __global__ void kernel_sum_abd_line_search_energy(const Float* kinetic,
+                                                         const Float* shape,
+                                                         const Float* other,
+                                                         Float*       total)
+{
+    total[0] = kinetic[0] + shape[0] + other[0];
+}
+
 void ABDLineSearchReporter::do_build(LineSearchReporter::BuildInfo& info)
 {
     m_impl.affine_body_dynamics = require<AffineBodyDynamics>();
@@ -414,13 +422,13 @@ void ABDLineSearchReporter::Impl::compute_energy(LineSearcher::ComputeEnergyInfo
                            reporter_energies.size());
     }
 
-    // Copy from device to host
-    Float K       = abd_kinetic_energy;
-    Float shape_E = abd_shape_energy;
-    Float other_E = total_reporter_energy;
+    kernel_sum_abd_line_search_energy<<<1, 1>>>(abd_kinetic_energy.data(),
+                                                abd_shape_energy.data(),
+                                                total_reporter_energy.data(),
+                                                total_reporter_energy.data());
+    checkCudaErrors(cudaGetLastError());
 
-    Float E = K + shape_E + other_E;
-
+    Float E = total_reporter_energy;
     info.energy(E);
 }
 
