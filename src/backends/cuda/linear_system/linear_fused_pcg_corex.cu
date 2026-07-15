@@ -25,6 +25,12 @@ constexpr Float fused_pcg_tol_floor()
     return Float(1e-6);
 #endif
 }
+
+inline bool fused_pcg_diag_enabled()
+{
+    const char* env = std::getenv("UIPC_COREX_FUSED_PCG_DIAG");
+    return env && env[0] != '\0' && env[0] != '0';
+}
 }  // namespace
 
 void LinearFusedPCG::do_build(BuildInfo& info)
@@ -180,6 +186,66 @@ void fused_dot(muda::CDenseVectorView<Float> x,
             });
 }
 
+void fused_dot_norm(muda::CDenseVectorView<Float> x,
+                    muda::CDenseVectorView<Float> y,
+                    muda::VarView<Float>          d_dot,
+                    muda::VarView<Float>          d_norm2)
+{
+    using namespace muda;
+
+    cudaMemsetAsync(d_dot.data(), 0, sizeof(Float));
+    cudaMemsetAsync(d_norm2.data(), 0, sizeof(Float));
+
+    constexpr int block_dim = 256;
+    int           n         = x.size();
+    int           grid      = (n + block_dim - 1) / block_dim;
+
+    Launch(grid, block_dim)
+        .file_line(__FILE__, __LINE__)
+        .apply(
+            [x       = x.cviewer().name("x"),
+             y       = y.cviewer().name("y"),
+             d_dot   = d_dot.viewer().name("d_dot"),
+             d_norm2 = d_norm2.viewer().name("d_norm2"),
+             n] __device__() mutable
+            {
+                __shared__ Float dot_cache[256];
+                __shared__ Float norm_cache[256];
+
+                int tid = threadIdx.x;
+                int i   = blockIdx.x * blockDim.x + threadIdx.x;
+
+                Float dot_sum  = 0;
+                Float norm_sum = 0;
+                if(i < n)
+                {
+                    Float xv = x(i);
+                    dot_sum  = xv * y(i);
+                    norm_sum = xv * xv;
+                }
+
+                dot_cache[tid]  = dot_sum;
+                norm_cache[tid] = norm_sum;
+                __syncthreads();
+
+                for(int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+                {
+                    if(tid < stride)
+                    {
+                        dot_cache[tid] += dot_cache[tid + stride];
+                        norm_cache[tid] += norm_cache[tid + stride];
+                    }
+                    __syncthreads();
+                }
+
+                if(tid == 0)
+                {
+                    muda::atomic_add(d_dot.data(), dot_cache[0]);
+                    muda::atomic_add(d_norm2.data(), norm_cache[0]);
+                }
+            });
+}
+
 // Same as linear_pcg update_xr: alpha = rz/pAp, x += alpha*p, r -= alpha*Ap. Alpha computed on device from d_rz, d_pAp.
 void fused_update_xr(muda::CVarView<Float>         d_rz,
                      muda::CVarView<Float>         d_pAp,
@@ -274,6 +340,24 @@ void fused_update_converged(muda::CVarView<Float> d_rz_new,
                });
 }
 
+void fused_update_converged_by_norm(muda::CVarView<Float> d_norm2,
+                                    muda::VarView<IndexT> d_converged,
+                                    Float                 r_tol)
+{
+    using namespace muda;
+
+    ParallelFor()
+        .file_line(__FILE__, __LINE__)
+        .apply(1,
+               [d_norm2     = d_norm2.cviewer().name("d_norm2"),
+                d_converged = d_converged.viewer().name("d_converged"),
+                r_tol] __device__(int) mutable
+               {
+                   Float norm2 = *d_norm2;
+                   *d_converged = norm2 <= r_tol * r_tol ? 1 : 0;
+               });
+}
+
 SizeT LinearFusedPCG::fused_pcg(muda::DenseVectorView<Float>  x,
                                 muda::CDenseVectorView<Float> b,
                                 SizeT                         max_iter)
@@ -296,16 +380,26 @@ SizeT LinearFusedPCG::fused_pcg(muda::DenseVectorView<Float>  x,
     p = z;
 
     // rz = r^T * z
-    fused_dot(r.cview(), z.cview(), d_rz.view());
+    fused_dot_norm(r.cview(), z.cview(), d_rz.view(), d_norm2.view());
     Float rz_host = d_rz;
+    Float norm_r_host =
+        std::sqrt(std::max(static_cast<Float>(d_norm2), Float{0}));
+    Float norm_b = ctx().norm(b);
     check_init_rz_nan_inf(rz_host);
     Float abs_rz0 = std::abs(rz_host);
+    Float init_norm_r = norm_r_host;
 
-    if(abs_rz0 <= fused_pcg_zero_tol())
+    if(norm_b <= fused_pcg_zero_tol())
         return 0;
 
-    Float rz_tol = std::max(global_tol_rate * abs_rz0, fused_pcg_zero_tol());
+    Float r_tol = std::max(global_tol_rate * norm_b, fused_pcg_zero_tol());
+    if(norm_r_host <= r_tol)
+        return 0;
+
     SizeT effective_check_interval = check_interval > 0 ? check_interval : SizeT{1};
+    const bool diag = fused_pcg_diag_enabled();
+    Float final_rz = rz_host;
+    Float final_norm_r = norm_r_host;
 
     for(k = 1; k < max_iter; ++k)
     {
@@ -325,23 +419,45 @@ SizeT LinearFusedPCG::fused_pcg(muda::DenseVectorView<Float>  x,
             apply_preconditioner(z, r, d_converged.view());
         }
 
-        // rz_new = r^T * z, keep convergence flag on device for preconditioner skip.
-        fused_dot(r.cview(), z.cview(), d_rz_new.view());
-        fused_update_converged(d_rz_new.view(), d_converged.view(), rz_tol);
+        // rz_new = r^T * z and norm(r).  Use the same residual-norm
+        // convergence criterion as LinearPCG; |r^T z| is not equivalent when
+        // the preconditioner strongly scales contact rows.
+        fused_dot_norm(r.cview(), z.cview(), d_rz_new.view(), d_norm2.view());
+        fused_update_converged_by_norm(d_norm2.view(), d_converged.view(), r_tol);
 
         // Check error ratio periodically to avoid per-iteration D2H synchronization.
         bool do_check = (k % effective_check_interval == 0) || (k + 1 == max_iter);
         if(do_check)
         {
             Float rz_new_host = d_rz_new;
+            norm_r_host =
+                std::sqrt(std::max(static_cast<Float>(d_norm2), Float{0}));
             check_iter_rz_nan_inf(rz_new_host, k);
-            if(std::abs(rz_new_host) <= rz_tol)
+            final_rz = rz_new_host;
+            final_norm_r = norm_r_host;
+            if(norm_r_host <= r_tol)
                 break;
         }
 
         // p = z + beta * p (skip when abs(rz_new) <= rz_tol), then rz = rz_new.
         fused_update_p(d_rz_new.view(), d_rz.view(), d_converged.view(), p.view(), z.cview());
         fused_swap_rz(d_rz_new.view(), d_rz.view(), d_converged.view());
+    }
+
+    if(diag)
+    {
+        logger::info("[corex_fused_pcg_diag] frame={} newton={} dof={} iter={} "
+                     "norm_b={} init_norm_r={} final_norm_r={} rz0={} final_rz={} r_tol={}",
+                     engine().frame(),
+                     engine().newton_iter(),
+                     b.size(),
+                     k,
+                     norm_b,
+                     init_norm_r,
+                     final_norm_r,
+                     abs_rz0,
+                     final_rz,
+                     r_tol);
     }
 
     return k;
