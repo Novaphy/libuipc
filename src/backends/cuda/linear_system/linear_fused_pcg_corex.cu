@@ -286,6 +286,37 @@ void fused_dot_norm(muda::CDenseVectorView<Float> x,
             });
 }
 
+void fused_dot_block(muda::CDenseVectorView<Float> x,
+                     muda::CDenseVectorView<Float> y,
+                     muda::VarView<Float>          d_dot)
+{
+    using namespace muda;
+
+    cudaMemsetAsync(d_dot.data(), 0, sizeof(Float));
+
+    constexpr int block_dim = 256;
+    int           n         = x.size();
+    int           grid      = (n + block_dim - 1) / block_dim;
+
+    Launch(grid, block_dim)
+        .file_line(__FILE__, __LINE__)
+        .apply(
+            [x = x.cviewer().name("x"),
+             y = y.cviewer().name("y"),
+             d_dot = d_dot.viewer().name("d_dot"),
+             n] __device__() mutable
+            {
+                using BlockReduce = cub::BlockReduce<Float, block_dim>;
+                __shared__ typename BlockReduce::TempStorage dot_storage;
+
+                int i = blockIdx.x * blockDim.x + threadIdx.x;
+                Float value = i < n ? x(i) * y(i) : Float{0};
+                Float block_dot = BlockReduce(dot_storage).Sum(value);
+                if(threadIdx.x == 0)
+                    muda::atomic_add(d_dot.data(), block_dot);
+            });
+}
+
 // Same as linear_pcg update_xr: alpha = rz/pAp, x += alpha*p, r -= alpha*Ap. Alpha computed on device from d_rz, d_pAp.
 void fused_update_xr(muda::CVarView<Float>         d_rz,
                      muda::CVarView<Float>         d_pAp,
@@ -559,7 +590,7 @@ SizeT LinearFusedPCG::fused_pcg(muda::DenseVectorView<Float>  x,
         // convergence criterion as LinearPCG; |r^T z| is not equivalent when
         // the preconditioner strongly scales contact rows.
         if(!rz_fused)
-            fused_dot(r.cview(), z.cview(), d_rz_new.view());
+            fused_dot_block(r.cview(), z.cview(), d_rz_new.view());
         // Check error ratio periodically to avoid per-iteration D2H synchronization.
         bool do_check = (k % effective_check_interval == 0) || (k + 1 == max_iter);
         if(do_check)
