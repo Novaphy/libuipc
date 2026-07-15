@@ -577,16 +577,6 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
         logger::info("[corex_trace][PCG] dot(r,z) done, rz={}", rz);
     check_init_rz_nan_inf(rz);
 
-    profile_dot_t0 = corex_profile::now_ms();
-    norm_b = ctx().norm(b);
-    ++scalar_norm_calls;
-    profile_dotnorm_ms += corex_profile::now_ms() - profile_dot_t0;
-    if(norm_b <= pcg_zero_tol())
-    {
-        logger::info("[corex] PCG: b==0, trivial solution x=0");
-        return 0;
-    }
-
     abs_rz0 = std::abs(rz);
     // Textbook PCG relative-residual convergence: ||r|| <= max(tol_rate*||b||, pcg_zero_tol).
     // The legacy `|r.z| <= pcg_zero_tol` early-exit is unsafe on Corex because the
@@ -602,6 +592,14 @@ SizeT LinearPCG::pcg(muda::DenseVectorView<Float> x, muda::CDenseVectorView<Floa
             init_norm_r = ctx().norm(r.cview());
             ++scalar_norm_calls;
             profile_dotnorm_ms += corex_profile::now_ms() - profile_dot_t0;
+        }
+        // x is initialized to zero before PCG, so the initial residual r is b.
+        // Reuse its norm instead of launching a duplicate reduction for ||b||.
+        norm_b = init_norm_r;
+        if(norm_b <= pcg_zero_tol())
+        {
+            logger::info("[corex] PCG: b==0, trivial solution x=0");
+            return 0;
         }
         if(pcg_diag)
         {
