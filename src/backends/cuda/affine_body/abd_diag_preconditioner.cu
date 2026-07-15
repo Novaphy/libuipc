@@ -347,22 +347,31 @@ __global__ void kernel_abd_block_inverse_apply(int           n,
 {
     if(*converged != 0) return;
     constexpr int N = 12;
-    constexpr int BodiesPerBlock = 16;
+    constexpr int LanesPerBody = 16;
+    constexpr int BodiesPerBlock = 4;
 
-    int local_body = threadIdx.x / N;
-    int row        = threadIdx.x - local_body * N;
+    int local_body = threadIdx.x / LanesPerBody;
+    int row        = threadIdx.x - local_body * LanesPerBody;
     int i          = blockIdx.x * BodiesPerBlock + local_body;
     if(i >= n) return;
 
-    Float s = static_cast<Float>(0);
-    for(int col = 0; col < N; ++col)
-        s += diag_inv[i * 144 + col * N + row] * r[i * N + col];
-    if(block_mix < static_cast<Float>(1))
+    Float r_lane = row < N ? r[i * N + row] : static_cast<Float>(0);
+
+    if(row < N)
     {
-        const Float j = diag_recip[i * N + row] * r[i * N + row];
-        s = block_mix * s + (static_cast<Float>(1) - block_mix) * j;
+        Float s = static_cast<Float>(0);
+        for(int col = 0; col < N; ++col)
+        {
+            Float r_col = __shfl_sync(0xffffffffu, r_lane, col, LanesPerBody);
+            s += diag_inv[i * 144 + col * N + row] * r_col;
+        }
+        if(block_mix < static_cast<Float>(1))
+        {
+            const Float j = diag_recip[i * N + row] * r_lane;
+            s = block_mix * s + (static_cast<Float>(1) - block_mix) * j;
+        }
+        z[i * N + row] = s;
     }
-    z[i * N + row] = s;
 }
 
 __global__ void kernel_abd_precond_extract(int          n,
@@ -558,8 +567,8 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
             {
                 if(block_inverse_enabled && diag_inv.size() > 0)
                 {
-                    constexpr int kBodiesPerBlock = 16;
-                    constexpr int kThreads = kBodiesPerBlock * 12;
+                    constexpr int kBodiesPerBlock = 4;
+                    constexpr int kThreads = kBodiesPerBlock * 16;
                     int blocks = (n + kBodiesPerBlock - 1) / kBodiesPerBlock;
                     kernel_abd_block_inverse_apply<<<blocks, kThreads>>>(
                         n,
