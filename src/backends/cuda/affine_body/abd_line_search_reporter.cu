@@ -91,10 +91,10 @@ void ABDLineSearchReporter::Impl::record_start_point(LineSearcher::RecordInfo& i
 {
     using namespace muda;
 
-    checkCudaErrors(cudaMemcpy(abd().body_id_to_q_temp.data(),
-                               abd().body_id_to_q.data(),
-                               sizeof(Vector12) * abd().body_count(),
-                               cudaMemcpyDeviceToDevice));
+    checkCudaErrors(cudaMemcpyAsync(abd().body_id_to_q_temp.data(),
+                                    abd().body_id_to_q.data(),
+                                    sizeof(Vector12) * abd().body_count(),
+                                    cudaMemcpyDeviceToDevice));
 }
 
 void ABDLineSearchReporter::Impl::step_forward(LineSearcher::StepInfo& info)
@@ -198,7 +198,7 @@ void ABDLineSearchReporter::Impl::compute_energy(LineSearcher::ComputeEnergyInfo
     const int n_reporter = static_cast<int>(reporter_energies.size());
     const int n_sum      = std::max(n_body, n_reporter);
 
-    checkCudaErrors(cudaMemset(total_reporter_energy.data(), 0, sizeof(Float)));
+    checkCudaErrors(cudaMemsetAsync(total_reporter_energy.data(), 0, sizeof(Float)));
     if(n_sum > 0)
     {
         constexpr int block = 256;
