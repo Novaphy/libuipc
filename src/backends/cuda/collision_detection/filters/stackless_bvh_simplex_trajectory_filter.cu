@@ -1412,6 +1412,13 @@ void corex_filter_loose_resize_no_construct(muda::DeviceBuffer<T>& buffer, SizeT
     buffer.unsafe_resize_no_construct(size);
 }
 
+template <typename T>
+void corex_filter_loose_reserve_no_construct(muda::DeviceBuffer<T>& buffer, SizeT size)
+{
+    if(buffer.size() < size)
+        corex_filter_loose_resize_no_construct(buffer, size);
+}
+
 static __global__ void kernel_pack_selected_counts(const IndexT* pp_count,
                                                    const IndexT* pe_count,
                                                    const IndexT* pt_count,
@@ -3613,10 +3620,10 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
         corex_profile::ScopedPhase phase("contact_filter_detail", "select_valid_all");
         if(view_slice_output)
         {
-            corex_filter_loose_resize(PPs, temp_PPs.size());
-            corex_filter_loose_resize(PEs, temp_PEs.size());
-            corex_filter_loose_resize(PTs, temp_PTs.size());
-            corex_filter_loose_resize(EEs, temp_EEs.size());
+            corex_filter_loose_reserve_no_construct(PPs, temp_PPs.size());
+            corex_filter_loose_reserve_no_construct(PEs, temp_PEs.size());
+            corex_filter_loose_reserve_no_construct(PTs, temp_PTs.size());
+            corex_filter_loose_reserve_no_construct(EEs, temp_EEs.size());
         }
         else
         {
@@ -4160,7 +4167,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_toi(FilterTOIInfo& info)
     auto toi_size = candidate_AllP_CodimP_pairs.size() + candidate_CodimP_AllE_pairs.size()
                     + candidate_AllP_AllT_pairs.size() + candidate_AllE_AllE_pairs.size();
 
-    tois.resize(toi_size);
+    corex_filter_loose_resize_no_construct(tois, toi_size);
 
     auto offset  = 0;
     auto PP_tois = tois.view(offset, candidate_AllP_CodimP_pairs.size());
