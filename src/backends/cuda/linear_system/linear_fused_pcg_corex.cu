@@ -316,6 +316,58 @@ void fused_update_xr(muda::CVarView<Float>         d_rz,
                });
 }
 
+void fused_update_xr_norm(muda::CVarView<Float>         d_rz,
+                          muda::CVarView<Float>         d_pAp,
+                          muda::CVarView<IndexT>        d_converged,
+                          muda::DenseVectorView<Float>  x,
+                          muda::CDenseVectorView<Float> p,
+                          muda::DenseVectorView<Float>  r,
+                          muda::CDenseVectorView<Float> Ap,
+                          muda::VarView<Float>          d_norm2)
+{
+    using namespace muda;
+
+    cudaMemsetAsync(d_norm2.data(), 0, sizeof(Float));
+    constexpr int block_dim = 256;
+    const int     n         = r.size();
+    const int     grid      = (n + block_dim - 1) / block_dim;
+
+    Launch(grid, block_dim)
+        .file_line(__FILE__, __LINE__)
+        .apply(
+            [d_rz        = d_rz.cviewer().name("d_rz"),
+             d_pAp       = d_pAp.cviewer().name("d_pAp"),
+             d_converged = d_converged.cviewer().name("d_converged"),
+             x           = x.viewer().name("x"),
+             p           = p.cviewer().name("p"),
+             r           = r.viewer().name("r"),
+             Ap          = Ap.cviewer().name("Ap"),
+             d_norm2     = d_norm2.viewer().name("d_norm2"),
+             n] __device__() mutable
+            {
+                using BlockReduce = cub::BlockReduce<Float, block_dim>;
+                __shared__ typename BlockReduce::TempStorage norm_storage;
+
+                const int i = blockIdx.x * blockDim.x + threadIdx.x;
+                Float residual = Float{0};
+                if(i < n)
+                {
+                    residual = r(i);
+                    if(*d_converged == 0)
+                    {
+                        Float alpha = *d_rz / *d_pAp;
+                        x(i) += alpha * p(i);
+                        residual -= alpha * Ap(i);
+                        r(i) = residual;
+                    }
+                }
+
+                Float block_norm = BlockReduce(norm_storage).Sum(residual * residual);
+                if(threadIdx.x == 0)
+                    muda::atomic_add(d_norm2.data(), block_norm);
+            });
+}
+
 // Same as linear_pcg update_p: beta = rz_new/rz, p = z + beta*p.
 // Convergence is guarded by d_converged.
 void fused_update_p(muda::CVarView<Float>         d_rz_new,
@@ -454,8 +506,14 @@ SizeT LinearFusedPCG::fused_pcg(muda::DenseVectorView<Float>  x,
         }
 
         // alpha = rz / pAp,  x += alpha * p,  r -= alpha * Ap
-        fused_update_xr(
-            d_rz.view(), d_pAp.view(), d_converged.view(), x, p.cview(), r.view(), Ap.cview());
+        fused_update_xr_norm(d_rz.view(),
+                             d_pAp.view(),
+                             d_converged.view(),
+                             x,
+                             p.cview(),
+                             r.view(),
+                             Ap.cview(),
+                             d_norm2.view());
 
         // z = P^{-1} * r
         {
@@ -466,7 +524,7 @@ SizeT LinearFusedPCG::fused_pcg(muda::DenseVectorView<Float>  x,
         // rz_new = r^T * z and norm(r).  Use the same residual-norm
         // convergence criterion as LinearPCG; |r^T z| is not equivalent when
         // the preconditioner strongly scales contact rows.
-        fused_dot_norm(r.cview(), z.cview(), d_rz_new.view(), d_norm2.view());
+        fused_dot(r.cview(), z.cview(), d_rz_new.view());
         fused_update_converged_by_norm(d_norm2.view(), d_converged.view(), r_tol);
 
         // Check error ratio periodically to avoid per-iteration D2H synchronization.
