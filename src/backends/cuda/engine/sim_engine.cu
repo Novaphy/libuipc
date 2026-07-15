@@ -205,6 +205,9 @@ SimEngine::SimEngine(EngineCreateInfo* info)
             logger::info("[cuda] Corex ctor: before cudaSetDevice({})", device_id);
             checkCudaErrors(cudaSetDevice(static_cast<int>(device_id)));
             logger::info("[cuda] Corex ctor: cudaSetDevice({}) done", device_id);
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+            checkCudaErrors(cudaSetDeviceFlags(cudaDeviceScheduleSpin));
+#endif
         }
 
         corex_runtime_probe("after cudaSetDevice");
