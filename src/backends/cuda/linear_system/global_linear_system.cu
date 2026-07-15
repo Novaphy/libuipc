@@ -30,14 +30,34 @@ namespace
 {
 bool corex_matrix_quality_diag_enabled()
 {
-    const char* env = std::getenv("UIPC_COREX_MATRIX_QUALITY_DIAG");
-    return env && env[0] != '\0' && env[0] != '0';
+    static const bool enabled = [] {
+        const char* env = std::getenv("UIPC_COREX_MATRIX_QUALITY_DIAG");
+        return env && env[0] != '\0' && env[0] != '0';
+    }();
+    return enabled;
 }
 
 bool corex_matrix_row_hotspot_diag_enabled()
 {
-    const char* env = std::getenv("UIPC_COREX_MATRIX_ROW_HOTSPOT_DIAG");
-    return env && env[0] != '\0' && env[0] != '0';
+    static const bool enabled = [] {
+        const char* env = std::getenv("UIPC_COREX_MATRIX_ROW_HOTSPOT_DIAG");
+        return env && env[0] != '\0' && env[0] != '0';
+    }();
+    return enabled;
+}
+
+bool corex_linear_trace_enabled()
+{
+    static const bool enabled =
+        std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+    return enabled;
+}
+
+bool corex_force_host_ge2sym_enabled()
+{
+    static const bool enabled =
+        std::getenv("UIPC_COREX_FORCE_HOST_GE2SYM") != nullptr;
+    return enabled;
 }
 
 bool corex_env_enabled(const char* name)
@@ -150,7 +170,7 @@ void GlobalLinearSystem::solve()
     if(m_impl.need_debug_dump) [[unlikely]]
         _dump_A_b();
 
-    const bool corex_linear_trace = std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+    const bool corex_linear_trace = corex_linear_trace_enabled();
     if(corex_linear_trace)
         logger::info("[corex_trace] solve_linear_system enter");
     m_impl.solve_linear_system();
@@ -292,7 +312,7 @@ void GlobalLinearSystem::Impl::init()
 void GlobalLinearSystem::Impl::build_linear_system()
 {
     Timer timer{"Build Linear System"};
-    const bool corex_trace = (std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr);
+    const bool corex_trace = corex_linear_trace_enabled();
     auto trace = [&](const char* msg)
     {
         if(corex_trace)
@@ -329,7 +349,7 @@ void GlobalLinearSystem::Impl::build_linear_system()
 
     // Default CoreX path now prefers device conversion to avoid host fallback.
     // Set UIPC_COREX_FORCE_HOST_GE2SYM=1 to force the legacy host path.
-    const bool force_host_ge2sym = (std::getenv("UIPC_COREX_FORCE_HOST_GE2SYM") != nullptr);
+    const bool force_host_ge2sym = corex_force_host_ge2sym_enabled();
     if(!force_host_ge2sym)
     {
         trace("converter.ge2sym: begin");
@@ -721,7 +741,7 @@ bool GlobalLinearSystem::Impl::_update_subsystem_extent()
 
 void GlobalLinearSystem::Impl::_assemble_linear_system()
 {
-    const bool corex_trace = (std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr);
+    const bool corex_trace = corex_linear_trace_enabled();
     auto trace = [&](const char* msg)
     {
         if(corex_trace)
@@ -858,7 +878,7 @@ void GlobalLinearSystem::Impl::_assemble_linear_system()
 
 void GlobalLinearSystem::Impl::_assemble_preconditioner()
 {
-    const bool corex_trace = std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+    const bool corex_trace = corex_linear_trace_enabled();
     if(global_preconditioner)
     {
         if(corex_trace)
@@ -885,7 +905,7 @@ void GlobalLinearSystem::Impl::_assemble_preconditioner()
 void GlobalLinearSystem::Impl::solve_linear_system()
 {
     Timer timer{"Solve Linear System"};
-    const bool corex_trace = std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+    const bool corex_trace = corex_linear_trace_enabled();
     if(corex_trace)
         logger::info("[corex_trace] solve_linear_system: pre-sync");
     auto profile_t0 = corex_profile::now_ms();
@@ -915,7 +935,7 @@ void GlobalLinearSystem::Impl::distribute_solution()
     auto diag_dof_counts     = diag_dof_offsets_counts.counts();
     auto diag_dof_offsets    = diag_dof_offsets_counts.offsets();
 
-    if(std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM"))
+    if(corex_linear_trace_enabled())
     {
         int n = static_cast<int>(x.size());
         std::vector<Float> hx(n);
