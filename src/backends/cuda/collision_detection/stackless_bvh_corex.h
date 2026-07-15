@@ -111,6 +111,15 @@ class StacklessBVH
     void build(muda::CBufferView<AABB> aabbs);
 
     /**
+     * @brief Refit the Stackless BVH from given AABBs, reusing the topology
+     * created by the previous build().
+     *
+     * The primitive count must match the previous build. A missing or mismatched
+     * topology is treated as a caller error instead of a hidden rebuild.
+     */
+    void refit(muda::CBufferView<AABB> aabbs);
+
+    /**
      * @brief Detect overlapping AABB pairs in the BVH
      * 
      * @param callback f: (int i, int j) -> bool Callback predicate to filter overlapping pairs
@@ -136,6 +145,8 @@ class StacklessBVH
     {
       public:
         void build(muda::CBufferView<AABB> aabbs);
+        void refit(muda::CBufferView<AABB> aabbs);
+        bool can_refit(muda::CBufferView<AABB> aabbs) const;
         template <typename Pred>
         void StacklessCDSharedSelf(Pred                       pred,
                                    muda::VarView<int>         cpNum,

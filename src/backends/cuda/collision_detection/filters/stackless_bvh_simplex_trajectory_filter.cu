@@ -1027,8 +1027,16 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
 
     {
         corex_profile::ScopedPhase phase("contact_detect_detail", "bvh_build_edge_tri");
-        lbvh_E.build(edge_aabbs);
-        lbvh_T.build(triangle_aabbs);
+        if(alpha > 0)
+        {
+            lbvh_E.refit(edge_aabbs);
+            lbvh_T.refit(triangle_aabbs);
+        }
+        else
+        {
+            lbvh_E.build(edge_aabbs);
+            lbvh_T.build(triangle_aabbs);
+        }
     }
 
     if(codimVs.size() > 0)

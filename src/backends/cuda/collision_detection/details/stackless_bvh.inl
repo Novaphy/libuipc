@@ -295,6 +295,43 @@ static __global__ void kernel_reorderNode(int N, int intSize,
     }
 }
 
+static __global__ void kernel_refitIntNodes(int             size,
+                                            const uint32_t* ext_par,
+                                            const AABB*     ext_aabb,
+                                            const int*      int_lc,
+                                            const int*      int_rc,
+                                            const int*      int_par,
+                                            const uint32_t* int_mark,
+                                            AABB*           int_aabb,
+                                            uint32_t*       flags)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= size || size <= 1) return;
+
+    int cur = static_cast<int>(ext_par[idx]);
+
+    __threadfence();
+    while(atomicAdd(&flags[cur], 1) == 1)
+    {
+        int      chl  = int_lc[cur];
+        int      chr  = int_rc[cur];
+        uint32_t mark = int_mark[cur];
+
+        AABB box = (mark & 1) ? ext_aabb[chl] : int_aabb[chl];
+        if(mark & 2)
+            box.extend(ext_aabb[chr]);
+        else
+            box.extend(int_aabb[chr]);
+        int_aabb[cur] = box;
+
+        int par = int_par[cur];
+        if(par == -1)
+            break;
+        __threadfence();
+        cur = par;
+    }
+}
+
 }  // namespace uipc::backend::cuda::corex_bvh
 
 namespace uipc::backend::cuda
@@ -636,6 +673,57 @@ MUDA_INLINE void StacklessBVH::Impl::reorderNode(int intSize)
         RAW_PTR(tkMap), RAW_PTR(int_lc), RAW_PTR(int_mark), RAW_PTR(int_range_y),
         RAW_PTR(int_aabb), RAW_PTR(nodes));
     checkCudaErrors(cudaGetLastError());
+}
+
+MUDA_INLINE bool StacklessBVH::Impl::can_refit(muda::CBufferView<AABB> aabbs) const
+{
+    auto numObjs = aabbs.size();
+    if(numObjs == 0)
+        return false;
+    if(primMap.size() != numObjs)
+        return false;
+    if(nodes.size() != numObjs * 2 - 1)
+        return false;
+    return true;
+}
+
+inline void StacklessBVH::Impl::refit(muda::CBufferView<AABB> aabbs)
+{
+    using namespace muda;
+
+    if(aabbs.size() == 0)
+    {
+        objs = aabbs;
+        return;
+    }
+
+    UIPC_ASSERT(can_refit(aabbs),
+                "StacklessBVH::refit requires a previous build with the same primitive count");
+
+    objs         = aabbs;
+    auto numObjs = static_cast<int>(aabbs.size());
+    const int numInternalNodes = numObjs - 1;
+
+    buildPrimitivesFromBox(aabbs);
+
+    if(numInternalNodes > 0)
+    {
+        thrust::fill(thrust::device, flags.data(), flags.data() + flags.size(), 0);
+
+        int block = 256, grid = (numObjs + block - 1) / block;
+        corex_bvh::kernel_refitIntNodes<<<grid, block>>>(numObjs,
+                                                         RAW_PTR(ext_par),
+                                                         RAW_PTR(ext_aabb),
+                                                         RAW_PTR(int_lc),
+                                                         RAW_PTR(int_rc),
+                                                         RAW_PTR(int_par),
+                                                         RAW_PTR(int_mark),
+                                                         RAW_PTR(int_aabb),
+                                                         RAW_PTR(flags));
+        checkCudaErrors(cudaGetLastError());
+    }
+
+    reorderNode(numInternalNodes);
 }
 
 inline void StacklessBVH::Impl::build(muda::CBufferView<AABB> aabbs)
@@ -991,6 +1079,11 @@ void StacklessBVH::Impl::StacklessCDSharedOther(Pred pred,
 inline void StacklessBVH::build(muda::CBufferView<AABB> aabbs)
 {
     m_impl.build(aabbs);
+}
+
+inline void StacklessBVH::refit(muda::CBufferView<AABB> aabbs)
+{
+    m_impl.refit(aabbs);
 }
 
 template <typename Pred>
