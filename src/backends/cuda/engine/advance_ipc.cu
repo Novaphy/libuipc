@@ -308,8 +308,6 @@ void SimEngine::advance()
 
             // 0. Process External Changes
             m_global_vertex_manager->update_attributes();
-            [[maybe_unused]] AABB bbox =
-                m_global_vertex_manager->compute_vertex_bounding_box();
 
             // 1. Record Friction Candidates at the beginning of the frame
             m_global_vertex_manager->record_prev_positions();
