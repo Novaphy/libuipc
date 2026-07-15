@@ -113,11 +113,11 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(
     auto src_col_indices = from.col_indices();
     auto src_blocks      = from.values();
 
-    loose_resize(ij_hash_input, src_row_indices.size());
-    loose_resize(sort_index_input, src_row_indices.size());
+    loose_resize_no_construct(ij_hash_input, src_row_indices.size());
+    loose_resize_no_construct(sort_index_input, src_row_indices.size());
 
-    loose_resize(ij_hash, src_row_indices.size());
-    loose_resize(sort_index, src_row_indices.size());
+    loose_resize_no_construct(ij_hash, src_row_indices.size());
+    loose_resize_no_construct(sort_index, src_row_indices.size());
     ij_pairs.resize(src_row_indices.size());
 
     auto dst_row_indices = to.row_indices();
@@ -152,7 +152,7 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(
     // sort the block values
     {
         using BlockT = Eigen::Matrix<T, N, N>;
-        loose_resize(blocks_sorted, from.values().size());
+        loose_resize_no_construct(blocks_sorted, from.values().size());
         corex_matconv::launch_copy_sorted_blocks_3x3(
             n,
             reinterpret_cast<const corex_matconv::BlockT3*>(thrust::raw_pointer_cast(src_blocks.data())),
@@ -170,11 +170,11 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(muda::DeviceBCOOMatri
     auto src_col_indices = to.col_indices();
     auto src_blocks      = to.values();
 
-    loose_resize(ij_hash_input, src_row_indices.size());
-    loose_resize(sort_index_input, src_row_indices.size());
+    loose_resize_no_construct(ij_hash_input, src_row_indices.size());
+    loose_resize_no_construct(sort_index_input, src_row_indices.size());
 
-    loose_resize(ij_hash, src_row_indices.size());
-    loose_resize(sort_index, src_row_indices.size());
+    loose_resize_no_construct(ij_hash, src_row_indices.size());
+    loose_resize_no_construct(sort_index, src_row_indices.size());
     ij_pairs.resize(src_row_indices.size());
 
 
@@ -211,7 +211,7 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(muda::DeviceBCOOMatri
     // sort the block values
     {
         using BlockT = Eigen::Matrix<T, N, N>;
-        loose_resize(blocks_sorted, to.values().size());
+        loose_resize_no_construct(blocks_sorted, to.values().size());
         corex_matconv::launch_copy_sorted_blocks_with_ij_3x3(
             n,
             reinterpret_cast<const corex_matconv::BlockT3*>(thrust::raw_pointer_cast(src_blocks.data())),
@@ -234,8 +234,8 @@ void MatrixConverter<T, N>::_make_unique_indices(const muda::DeviceTripletMatrix
     auto row_indices = to.row_indices();
     auto col_indices = to.col_indices();
 
-    loose_resize(unique_ij_pairs, ij_pairs.size());
-    loose_resize(unique_counts, ij_pairs.size());
+    loose_resize_no_construct(unique_ij_pairs, ij_pairs.size());
+    loose_resize_no_construct(unique_counts, ij_pairs.size());
 
 
     {
@@ -276,7 +276,7 @@ void MatrixConverter<T, N>::_make_unique_block_warp_reduction(
 {
     using namespace muda;
 
-    loose_resize(sorted_partition_output, ij_pairs.size());
+    loose_resize_no_construct(sorted_partition_output, ij_pairs.size());
 
     {
         corex_profile::ScopedPhase phase("matconv", "triplet_fill_segment_ids");
@@ -405,8 +405,8 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_segments(
     auto src_indices  = from.indices();
     auto src_segments = from.values();
 
-    loose_resize(indices_sorted, src_indices.size());
-    loose_resize(segments_sorted, src_segments.size());
+    loose_resize_no_construct(indices_sorted, src_indices.size());
+    loose_resize_no_construct(segments_sorted, src_segments.size());
 
     {
         corex_profile::ScopedPhase phase("matconv", "doublet_sort_pairs");
@@ -426,8 +426,8 @@ void MatrixConverter<T, N>::_make_unique_indices(const muda::DeviceDoubletVector
 
     auto dst_indices  = to.indices();
     auto dst_segments = to.values();
-    loose_resize(unique_indices, indices_sorted.size());
-    loose_resize(unique_counts, indices_sorted.size());
+    loose_resize_no_construct(unique_indices, indices_sorted.size());
+    loose_resize_no_construct(unique_counts, indices_sorted.size());
 
     {
         corex_profile::ScopedPhase phase("matconv", "doublet_rle_indices");
@@ -465,7 +465,7 @@ void MatrixConverter<T, N>::_make_unique_segment_warp_reduction(
 {
     using namespace muda;
 
-    loose_resize(sorted_partition_output, indices_sorted.size());
+    loose_resize_no_construct(sorted_partition_output, indices_sorted.size());
 
     {
         corex_profile::ScopedPhase phase("matconv", "doublet_fill_segment_ids");
@@ -502,10 +502,10 @@ void MatrixConverter<T, N>::ge2sym(muda::DeviceBCOOMatrix<T, N>& to)
     auto& counts     = unique_counts;
     auto& block_temp = blocks_sorted;
 
-    loose_resize(counts, to.non_zeros());
-    loose_resize(offsets, to.non_zeros());
-    loose_resize(ij_pairs, to.non_zeros());
-    loose_resize(block_temp, to.values().size());
+    loose_resize_no_construct(counts, to.non_zeros());
+    loose_resize_no_construct(offsets, to.non_zeros());
+    loose_resize_no_construct(ij_pairs, to.non_zeros());
+    loose_resize_no_construct(block_temp, to.values().size());
 
     // 0. find the upper triangular part (where i <= j)
     ParallelFor()
@@ -583,10 +583,10 @@ void MatrixConverter<T, N>::ge2sym(muda::DeviceTripletMatrix<T, N>& to)
     auto& counts     = unique_counts;
     auto& block_temp = blocks_sorted;
 
-    loose_resize(counts, to.triplet_count());
-    loose_resize(offsets, to.triplet_count());
-    loose_resize(ij_pairs, to.triplet_count());
-    loose_resize(block_temp, to.values().size());
+    loose_resize_no_construct(counts, to.triplet_count());
+    loose_resize_no_construct(offsets, to.triplet_count());
+    loose_resize_no_construct(ij_pairs, to.triplet_count());
+    loose_resize_no_construct(block_temp, to.values().size());
 
     // 0. find the upper triangular part (where i <= j)
     ParallelFor()
@@ -673,9 +673,9 @@ void MatrixConverter<T, N>::sym2ge(const muda::DeviceBCOOMatrix<T, N>& from,
     auto  diag_count            = from.rows();
 
 
-    loose_resize(flags, sym_size);
-    loose_resize(partitioned, sym_size);
-    loose_resize(partition_index, sym_size);
+    loose_resize_no_construct(flags, sym_size);
+    loose_resize_no_construct(partitioned, sym_size);
+    loose_resize_no_construct(partition_index, sym_size);
 
     // setup select flag
     ParallelFor()

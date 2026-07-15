@@ -106,6 +106,14 @@ class MatrixConverter
         buf.resize(new_size);
     }
 
+    template <typename U>
+    void loose_resize_no_construct(muda::DeviceBuffer<U>& buf, size_t new_size)
+    {
+        if(buf.capacity() < new_size)
+            buf.reserve(new_size * m_reserve_ratio);
+        buf.unsafe_resize_no_construct(new_size);
+    }
+
     void ge2sym(muda::DeviceBCOOMatrix<T, N>& to);
 
     void ge2sym(muda::DeviceTripletMatrix<T, N>& to);
