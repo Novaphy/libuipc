@@ -20,27 +20,45 @@ namespace
 // double precision when off-diagonal values are close to diagonal values.
 bool parse_precond_diag_clamp(Float& min_abs_diag, Float& max_abs_diag)
 {
-    const char* env = std::getenv("UIPC_COREX_ABD_PRECOND_DIAG_CLAMP");
-    if(!env || env[0] == '\0')
-        return false;
-
-    char* end = nullptr;
-    double min_v = std::strtod(env, &end);
-    if(end == env || min_v < 0)
-        return false;
-
-    double max_v = 0.0;
-    if(*end == ',')
+    struct ClampConfig
     {
-        const char* max_start = end + 1;
-        max_v = std::strtod(max_start, &end);
-        if(end == max_start || max_v <= 0)
-            max_v = 0.0;
-    }
+        bool  enabled;
+        Float min_abs_diag;
+        Float max_abs_diag;
+    };
 
-    min_abs_diag = static_cast<Float>(min_v);
-    max_abs_diag = max_v > 0.0 ? static_cast<Float>(max_v) :
-                                 std::numeric_limits<Float>::max();
+    static const ClampConfig config = [] {
+        ClampConfig cfg{false, Float{0}, std::numeric_limits<Float>::max()};
+        const char* env = std::getenv("UIPC_COREX_ABD_PRECOND_DIAG_CLAMP");
+        if(!env || env[0] == '\0')
+            return cfg;
+
+        char*  end   = nullptr;
+        double min_v = std::strtod(env, &end);
+        if(end == env || min_v < 0)
+            return cfg;
+
+        double max_v = 0.0;
+        if(*end == ',')
+        {
+            const char* max_start = end + 1;
+            max_v = std::strtod(max_start, &end);
+            if(end == max_start || max_v <= 0)
+                max_v = 0.0;
+        }
+
+        cfg.enabled      = true;
+        cfg.min_abs_diag = static_cast<Float>(min_v);
+        cfg.max_abs_diag = max_v > 0.0 ? static_cast<Float>(max_v) :
+                                         std::numeric_limits<Float>::max();
+        return cfg;
+    }();
+
+    if(!config.enabled)
+        return false;
+
+    min_abs_diag = config.min_abs_diag;
+    max_abs_diag = config.max_abs_diag;
     return true;
 }
 
@@ -57,11 +75,18 @@ bool parse_precond_diag_clamp(Float& min_abs_diag, Float& max_abs_diag)
 //   the legacy Jacobi extract regardless of the block-inverse flag.
 bool block_inverse_precond_enabled()
 {
-    if(std::getenv("UIPC_COREX_ABD_PRECOND_DIAG_JACOBI"))
+    static const bool force_jacobi =
+        std::getenv("UIPC_COREX_ABD_PRECOND_DIAG_JACOBI") != nullptr;
+    if(force_jacobi)
         return false;
-    const char* env = std::getenv("UIPC_COREX_ABD_PRECOND_BLOCK_INVERSE");
-    if(env)
-        return env[0] != '\0' && env[0] != '0';
+    static const int env_enabled = [] {
+        const char* env = std::getenv("UIPC_COREX_ABD_PRECOND_BLOCK_INVERSE");
+        if(!env)
+            return -1;
+        return (env[0] != '\0' && env[0] != '0') ? 1 : 0;
+    }();
+    if(env_enabled >= 0)
+        return env_enabled != 0;
 
 #if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
     // The matrix-free contact path removes the same contact Hessian blocks from
@@ -77,36 +102,58 @@ bool block_inverse_precond_enabled()
 
 bool block_inverse_precond_stats_enabled()
 {
-    const char* env = std::getenv("UIPC_COREX_ABD_PRECOND_BLOCK_INVERSE_STATS");
-    if(!env) return false;
-    return env[0] != '\0' && env[0] != '0';
+    static const bool enabled = [] {
+        const char* env = std::getenv("UIPC_COREX_ABD_PRECOND_BLOCK_INVERSE_STATS");
+        return env && env[0] != '\0' && env[0] != '0';
+    }();
+    return enabled;
 }
 
 Float block_inverse_precond_mix()
 {
-    const char* env = std::getenv("UIPC_COREX_ABD_PRECOND_BLOCK_MIX");
-    if(!env || env[0] == '\0')
+    static const Float mix = [] {
+        const char* env = std::getenv("UIPC_COREX_ABD_PRECOND_BLOCK_MIX");
+        if(!env || env[0] == '\0')
 #if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
-        return Float{0.4};
+            return Float{0.4};
 #else
-        return Float{1};
+            return Float{1};
 #endif
 
-    char*  end = nullptr;
-    double v   = std::strtod(env, &end);
-    if(end == env)
-        return Float{1};
-    if(v < 0.0)
-        v = 0.0;
-    if(v > 1.0)
-        v = 1.0;
-    return static_cast<Float>(v);
+        char*  end = nullptr;
+        double v   = std::strtod(env, &end);
+        if(end == env)
+            return Float{1};
+        if(v < 0.0)
+            v = 0.0;
+        if(v > 1.0)
+            v = 1.0;
+        return static_cast<Float>(v);
+    }();
+    return mix;
 }
 
 bool corex_abd_precond_sync_enabled()
 {
-    return std::getenv("UIPC_COREX_ABD_PRECOND_SYNC") != nullptr
-           || std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+    static const bool enabled =
+        std::getenv("UIPC_COREX_ABD_PRECOND_SYNC") != nullptr
+        || std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+    return enabled;
+}
+
+bool corex_abd_trace_linear_system_enabled()
+{
+    static const bool enabled =
+        std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+    return enabled;
+}
+
+bool corex_abd_precond_diag_stats_enabled()
+{
+    static const bool enabled =
+        std::getenv("UIPC_COREX_ABD_PRECOND_DIAG_STATS") != nullptr
+        || std::getenv("UIPC_COREX_PCG_DIAG") != nullptr;
+    return enabled;
 }
 
 __device__ inline Float corex_abs(Float v)
@@ -377,18 +424,18 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
     {
         using namespace muda;
 
-        if(std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM"))
+        if(corex_abd_trace_linear_system_enabled())
             logger::info("[corex_trace][precond] do_assemble: entry");
 
         auto diag_hessian = abd_linear_subsystem->diag_hessian();
 
-        if(std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM"))
+        if(corex_abd_trace_linear_system_enabled())
             logger::info("[corex_trace][precond] do_assemble: diag_hessian.size()={}, data()={}",
                          diag_hessian.size(), (void*)diag_hessian.data());
 
         diag_inv.resize(diag_hessian.size());
 
-        if(std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM"))
+        if(corex_abd_trace_linear_system_enabled())
             logger::info("[corex_trace][precond] do_assemble: diag_inv resized to {}", diag_inv.size());
 
         {
@@ -436,7 +483,7 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
                     checkCudaErrors(cudaDeviceSynchronize());
                 if(block_inverse_enabled
                    && (block_inverse_precond_stats_enabled()
-                       || std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM")))
+                       || corex_abd_trace_linear_system_enabled()))
                 {
                     std::vector<int> h_status(n);
                     cudaMemcpy(h_status.data(),
@@ -452,14 +499,13 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
                                  accepted,
                                  rejected);
                 }
-                if(clamp_enabled || std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM"))
+                if(clamp_enabled || corex_abd_trace_linear_system_enabled())
                     logger::info("[corex_precond_diag] bodies={} clamp={} min_abs_diag={} max_abs_diag={}",
                                  n,
                                  clamp_enabled ? 1 : 0,
                                  min_abs_diag,
                                  max_abs_diag);
-                if(std::getenv("UIPC_COREX_ABD_PRECOND_DIAG_STATS")
-                   || std::getenv("UIPC_COREX_PCG_DIAG"))
+                if(corex_abd_precond_diag_stats_enabled())
                 {
                     std::vector<Matrix12x12> h_diag(n);
                     cudaMemcpy(h_diag.data(),
