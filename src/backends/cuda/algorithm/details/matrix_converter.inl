@@ -2,6 +2,7 @@
 #include <muda/cub/device/device_merge_sort.h>
 #include <muda/cub/device/device_scan.h>
 #include <muda/cub/device/device_radix_sort.h>
+#include <muda/cub/device/device_reduce.h>
 #include <muda/cub/device/device_select.h>
 #include <cub/warp/warp_reduce.cuh>
 #include <muda/ext/eigen/atomic.h>
@@ -115,12 +116,8 @@ void MatrixConverter<T, N>::convert(const muda::DeviceTripletMatrix<T, N>& from,
         _radix_sort_indices_and_blocks(from, to);
     }
     {
-        corex_profile::ScopedPhase phase("matconv", "triplet_make_unique_indices");
-        _make_unique_indices(from, to);
-    }
-    {
-        corex_profile::ScopedPhase phase("matconv", "triplet_segmental_reduce");
-        _make_unique_block_warp_reduction(from, to);
+        corex_profile::ScopedPhase phase("matconv", "triplet_reduce_by_key_blocks");
+        _make_unique_indices_and_blocks_reduce_by_key(from, to);
     }
 }
 
@@ -244,6 +241,40 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(muda::DeviceBCOOMatri
 
         to.values().copy_from(blocks_sorted);
     }
+}
+
+template <typename T, int N>
+void MatrixConverter<T, N>::_make_unique_indices_and_blocks_reduce_by_key(
+    const muda::DeviceTripletMatrix<T, N>& from, muda::DeviceBCOOMatrix<T, N>& to)
+{
+    using namespace muda;
+
+    static_assert(N == 3, "CoreX matrix ReduceByKey only supports 3x3 blocks");
+    static_assert(std::is_same_v<T, Float>,
+                  "CoreX matrix ReduceByKey block type must match uipc::Float");
+
+    loose_resize_no_construct(unique_ij_pairs, ij_pairs.size());
+
+    DeviceReduce().ReduceByKey(
+        ij_pairs.data(),
+        unique_ij_pairs.data(),
+        blocks_sorted.data(),
+        to.values().data(),
+        count.data(),
+        [] CUB_RUNTIME_FUNCTION(const BlockMatrix& l,
+                                const BlockMatrix& r) -> BlockMatrix
+        { return l + r; },
+        ij_pairs.size());
+
+    const int h_count = corex_readback_int(count);
+    unique_ij_pairs.unsafe_resize_no_construct(h_count);
+    to.unsafe_resize_triplets_no_construct(h_count);
+
+    corex_matconv::launch_write_unique_ij(
+        h_count,
+        reinterpret_cast<const int*>(thrust::raw_pointer_cast(unique_ij_pairs.data())),
+        thrust::raw_pointer_cast(to.row_indices().data()),
+        thrust::raw_pointer_cast(to.col_indices().data()));
 }
 
 template <typename T, int N>

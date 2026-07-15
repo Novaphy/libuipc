@@ -73,6 +73,10 @@ class MatrixConverter
     void _make_unique_indices(const muda::DeviceTripletMatrix<T, N>& from,
                               muda::DeviceBCOOMatrix<T, N>&          to);
 
+    void _make_unique_indices_and_blocks_reduce_by_key(
+        const muda::DeviceTripletMatrix<T, N>& from,
+        muda::DeviceBCOOMatrix<T, N>&          to);
+
     void _make_unique_block_warp_reduction(const muda::DeviceTripletMatrix<T, N>& from,
                                            muda::DeviceBCOOMatrix<T, N>& to);
 
