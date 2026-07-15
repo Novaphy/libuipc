@@ -11,7 +11,9 @@
 #include <muda/cub/device/device_partition.h>
 #include <muda/cub/device/device_run_length_encode.h>
 #include <fmt/core.h>
+#include <algorithm>
 #include <cstdio>
+#include <limits>
 #include <vector>
 #include <utils/corex_phase_profile.h>
 
@@ -20,6 +22,44 @@
 
 namespace uipc::backend::cuda
 {
+namespace
+{
+inline int corex_index_sort_end_bit(SizeT count)
+{
+    if(count <= 1)
+        return 1;
+    --count;
+    int bits = 0;
+    while(count != 0)
+    {
+        ++bits;
+        count >>= 1;
+    }
+    return std::min(32, std::max(1, bits));
+}
+
+inline int corex_hash_sort_end_bit(SizeT rows, SizeT cols)
+{
+    const int row_bits = corex_index_sort_end_bit(rows);
+    const int col_bits = corex_index_sort_end_bit(cols);
+    int       end_bit  = rows > 1 ? 32 + row_bits : col_bits;
+    end_bit            = std::max(end_bit, col_bits);
+    return std::min(64, std::max(1, end_bit));
+}
+
+inline int corex_compact_hash_sort_end_bit(SizeT rows, SizeT cols)
+{
+    if(rows == 0 || cols == 0)
+        return 1;
+    if(rows > std::numeric_limits<SizeT>::max() / cols)
+        return 64;
+    const SizeT key_count = rows * cols;
+    if(key_count > (SizeT{1} << 32))
+        return corex_hash_sort_end_bit(rows, cols);
+    return std::min(64, corex_index_sort_end_bit(key_count));
+}
+}  // namespace
+
 template <typename T, int N>
 void MatrixConverter<T, N>::convert(const muda::DeviceTripletMatrix<T, N>& from,
                                     muda::DeviceBCOOMatrix<T, N>&          to)
@@ -65,10 +105,11 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(
     auto dst_col_indices = to.col_indices();
     int n = static_cast<int>(src_row_indices.size());
 
-    corex_matconv::launch_hash_ij(
+    corex_matconv::launch_hash_ij_compact(
         n,
         thrust::raw_pointer_cast(src_row_indices.data()),
         thrust::raw_pointer_cast(src_col_indices.data()),
+        static_cast<int>(from.cols()),
         thrust::raw_pointer_cast(ij_hash_input.data()),
         thrust::raw_pointer_cast(sort_index_input.data()));
 
@@ -78,12 +119,15 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(
                                     ij_hash.data(),
                                     sort_index_input.data(),
                                     sort_index.data(),
-                                    ij_hash.size());
+                                    ij_hash.size(),
+                                    0,
+                                    corex_compact_hash_sort_end_bit(from.rows(), from.cols()));
     }
 
-    corex_matconv::launch_decode_hash(
+    corex_matconv::launch_decode_hash_compact(
         n,
         thrust::raw_pointer_cast(ij_hash.data()),
+        static_cast<int>(from.cols()),
         reinterpret_cast<int*>(thrust::raw_pointer_cast(ij_pairs.data())));
 
     // sort the block values
@@ -117,10 +161,11 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(muda::DeviceBCOOMatri
 
     int n = static_cast<int>(src_row_indices.size());
 
-    corex_matconv::launch_hash_ij(
+    corex_matconv::launch_hash_ij_compact(
         n,
         thrust::raw_pointer_cast(src_row_indices.data()),
         thrust::raw_pointer_cast(src_col_indices.data()),
+        static_cast<int>(to.cols()),
         thrust::raw_pointer_cast(ij_hash_input.data()),
         thrust::raw_pointer_cast(sort_index_input.data()));
 
@@ -130,15 +175,18 @@ void MatrixConverter<T, N>::_radix_sort_indices_and_blocks(muda::DeviceBCOOMatri
                                     ij_hash.data(),
                                     sort_index_input.data(),
                                     sort_index.data(),
-                                    ij_hash.size());
+                                    ij_hash.size(),
+                                    0,
+                                    corex_compact_hash_sort_end_bit(to.rows(), to.cols()));
     }
 
     auto dst_row_indices = to.row_indices();
     auto dst_col_indices = to.col_indices();
 
-    corex_matconv::launch_decode_hash(
+    corex_matconv::launch_decode_hash_compact(
         n,
         thrust::raw_pointer_cast(ij_hash.data()),
+        static_cast<int>(to.cols()),
         reinterpret_cast<int*>(thrust::raw_pointer_cast(ij_pairs.data())));
 
     // sort the block values

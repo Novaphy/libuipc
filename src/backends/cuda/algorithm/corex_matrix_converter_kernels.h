@@ -12,6 +12,12 @@ void launch_hash_ij(int N, const int* row_indices, const int* col_indices,
 
 void launch_decode_hash(int N, const uint64_t* ij_hash, int* ij_pairs_xy);
 
+void launch_hash_ij_compact(int N, const int* row_indices, const int* col_indices,
+                            int col_count, uint64_t* ij_hash, int* sort_index);
+
+void launch_decode_hash_compact(int N, const uint64_t* ij_hash, int col_count,
+                                int* ij_pairs_xy);
+
 void launch_write_unique_ij(int N, const int* unique_ij_pairs_xy,
                             int* row_indices, int* col_indices);
 

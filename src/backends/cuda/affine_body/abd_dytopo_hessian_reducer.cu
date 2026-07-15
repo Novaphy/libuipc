@@ -9,6 +9,8 @@
 #include <muda/buffer/buffer_launch.h>
 #include <utils/corex_phase_profile.h>
 #include <cstdlib>
+#include <algorithm>
+#include <limits>
 
 namespace uipc::backend::cuda
 {
@@ -22,6 +24,52 @@ bool corex_abd_dytopo_direct_body_enabled()
         return env && env[0] != '\0' && env[0] != '0';
     }();
     return enabled;
+}
+
+inline int corex_abd_hash_sort_end_bit(SizeT rows, SizeT cols)
+{
+    auto bits_needed = [](SizeT n) -> int
+    {
+        if(n <= 1)
+            return 1;
+        --n;
+        int bits = 0;
+        while(n != 0)
+        {
+            ++bits;
+            n >>= 1;
+        }
+        return bits;
+    };
+
+    const int row_bits = bits_needed(rows);
+    const int col_bits = bits_needed(cols);
+    int       end_bit  = rows > 1 ? 32 + row_bits : col_bits;
+    end_bit            = std::max(end_bit, col_bits);
+    return std::min(64, std::max(1, end_bit));
+}
+
+inline int corex_abd_compact_hash_sort_end_bit(SizeT rows, SizeT cols)
+{
+    if(rows == 0 || cols == 0)
+        return 1;
+    if(rows > std::numeric_limits<SizeT>::max() / cols)
+        return 64;
+    const SizeT key_count = rows * cols;
+    if(key_count <= (SizeT{1} << 32))
+    {
+        if(key_count <= 1)
+            return 1;
+        SizeT n = key_count - 1;
+        int   bits = 0;
+        while(n != 0)
+        {
+            ++bits;
+            n >>= 1;
+        }
+        return std::min(64, std::max(1, bits));
+    }
+    return corex_abd_hash_sort_end_bit(rows, cols);
 }
 
 UIPC_HOST UIPC_DEVICE Matrix12x12 make_abd_contact_block(const ABDJacobi& Ji,
@@ -301,11 +349,12 @@ void ABDDyTopoHessianReducer::reduce_body_triplets(IndexT body_count)
 
     {
         corex_profile::ScopedPhase phase("abd_dytopo_reducer", "body_hash_pairs");
-        corex_matconv::launch_hash_ij(body_triplet_count,
-                                      m_body_triplets.row_indices().data(),
-                                      m_body_triplets.col_indices().data(),
-                                      m_body_hash_input.data(),
-                                      m_body_sort_index_input.data());
+        corex_matconv::launch_hash_ij_compact(body_triplet_count,
+                                              m_body_triplets.row_indices().data(),
+                                              m_body_triplets.col_indices().data(),
+                                              static_cast<int>(body_count),
+                                              m_body_hash_input.data(),
+                                              m_body_sort_index_input.data());
     }
 
     {
@@ -314,14 +363,17 @@ void ABDDyTopoHessianReducer::reduce_body_triplets(IndexT body_count)
                                     m_body_hash.data(),
                                     m_body_sort_index_input.data(),
                                     m_body_sort_index.data(),
-                                    body_triplet_count);
+                                    body_triplet_count,
+                                    0,
+                                    corex_abd_compact_hash_sort_end_bit(body_count, body_count));
     }
 
     {
         corex_profile::ScopedPhase phase("abd_dytopo_reducer", "body_decode_hash");
-        corex_matconv::launch_decode_hash(body_triplet_count,
-                                          m_body_hash.data(),
-                                          reinterpret_cast<int*>(m_body_pairs.data()));
+        corex_matconv::launch_decode_hash_compact(body_triplet_count,
+                                                  m_body_hash.data(),
+                                                  static_cast<int>(body_count),
+                                                  reinterpret_cast<int*>(m_body_pairs.data()));
     }
 
     {

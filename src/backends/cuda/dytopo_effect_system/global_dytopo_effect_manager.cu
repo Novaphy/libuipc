@@ -607,12 +607,33 @@ static __global__ void kernel_hash_ij(int N, const int* row_indices, const int* 
     sort_index[i] = i;
 }
 
+static __global__ void kernel_hash_ij_compact(int N, const int* row_indices,
+                                              const int* col_indices, int col_count,
+                                              uint64_t* ij_hash, int* sort_index)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    ij_hash[i] = static_cast<uint64_t>(row_indices[i]) * static_cast<uint64_t>(col_count)
+                 + static_cast<uint64_t>(col_indices[i]);
+    sort_index[i] = i;
+}
+
 static __global__ void kernel_decode_hash(int N, const uint64_t* ij_hash, int2* ij_pairs)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if(i >= N) return;
     ij_pairs[i].x = static_cast<int>(ij_hash[i] >> 32);
     ij_pairs[i].y = static_cast<int>(ij_hash[i] & 0xFFFFFFFF);
+}
+
+static __global__ void kernel_decode_hash_compact(int N, const uint64_t* ij_hash,
+                                                  int col_count, int2* ij_pairs)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    const uint64_t hash = ij_hash[i];
+    ij_pairs[i].x = static_cast<int>(hash / static_cast<uint64_t>(col_count));
+    ij_pairs[i].y = static_cast<int>(hash % static_cast<uint64_t>(col_count));
 }
 
 static __global__ void kernel_write_unique_ij(int N, const int2* unique_ij_pairs,
@@ -708,6 +729,25 @@ void launch_decode_hash(int N, const uint64_t* ij_hash, int* ij_pairs_xy)
     MatconvPhase phase("decode_hash");
     kernel_decode_hash<<<grid_for(N), kBlock>>>(N, ij_hash, reinterpret_cast<int2*>(ij_pairs_xy));
     corex_matconv_sync_if_needed("decode_hash");
+}
+
+void launch_hash_ij_compact(int N, const int* row_indices, const int* col_indices,
+                            int col_count, uint64_t* ij_hash, int* sort_index)
+{
+    corex_matconv_sync_if_needed("hash_ij_compact_pre");
+    MatconvPhase phase("hash_ij_compact");
+    kernel_hash_ij_compact<<<grid_for(N), kBlock>>>(
+        N, row_indices, col_indices, col_count, ij_hash, sort_index);
+    corex_matconv_sync_if_needed("hash_ij_compact_post");
+}
+
+void launch_decode_hash_compact(int N, const uint64_t* ij_hash, int col_count,
+                                int* ij_pairs_xy)
+{
+    MatconvPhase phase("decode_hash_compact");
+    kernel_decode_hash_compact<<<grid_for(N), kBlock>>>(
+        N, ij_hash, col_count, reinterpret_cast<int2*>(ij_pairs_xy));
+    corex_matconv_sync_if_needed("decode_hash_compact");
 }
 
 void launch_write_unique_ij(int N, const int* unique_ij_pairs_xy,
