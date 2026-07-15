@@ -521,7 +521,7 @@ void ABDDyTopoHessianReducer::build(muda::CTripletMatrixView<Float, 3> raw_hessi
 
         {
             corex_profile::ScopedPhase phase("abd_dytopo_reducer", "map_raw_to_body_pairs");
-            checkCudaErrors(cudaMemset(m_body_triplet_count_var.data(), 0, sizeof(int)));
+            checkCudaErrors(cudaMemsetAsync(m_body_triplet_count_var.data(), 0, sizeof(int)));
             constexpr int kBlk = 256;
             kernel_map_raw_to_body_triplets_compact<<<(raw_count + kBlk - 1) / kBlk, kBlk>>>(
                 raw_count,
