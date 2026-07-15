@@ -306,14 +306,12 @@ __global__ void kernel_abd_srbk_spmv(int               n,
     const auto& H = vals[I];
 
     Vector12 x_col;
-    Vector12 x_row;
     const int col_base = col * 12;
     const int row_base = row * 12;
 
     for(int k = 0; k < 12; ++k)
     {
         x_col(k) = x[col_base + k];
-        x_row(k) = x[row_base + k];
     }
 
     const Vector12 y_row = a * (H * x_col);
@@ -322,6 +320,9 @@ __global__ void kernel_abd_srbk_spmv(int               n,
 
     if(row != col)
     {
+        Vector12 x_row;
+        for(int k = 0; k < 12; ++k)
+            x_row(k) = x[row_base + k];
         const Vector12 y_col = a * (H.transpose() * x_row);
         for(int k = 0; k < 12; ++k)
             atomicAdd(&y[col_base + k], y_col(k));
