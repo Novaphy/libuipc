@@ -35,18 +35,26 @@ void SimEngine::build_systems()
 {
     auto& funcs = SimSystemAutoRegister::creators().entries;
     std::size_t corex_creator_i = 0;
+    const bool trace_build_systems =
+        std::getenv("UIPC_COREX_TRACE_BUILD_SYSTEMS") != nullptr;
     for(auto& f : funcs)
     {
-        std::fprintf(stderr,
-                     "[corex_demo] SimEngine: SimSystem creator #%zu calling...\n",
-                     corex_creator_i);
-        std::fflush(stderr);
+        if(trace_build_systems)
+        {
+            std::fprintf(stderr,
+                         "[corex_demo] SimEngine: SimSystem creator #%zu calling...\n",
+                         corex_creator_i);
+            std::fflush(stderr);
+        }
         auto uptr = f(*this);
-        std::fprintf(stderr,
-                     "[corex_demo] SimEngine: SimSystem creator #%zu done (ptr=%p)\n",
-                     corex_creator_i,
-                     static_cast<void*>(uptr.get()));
-        std::fflush(stderr);
+        if(trace_build_systems)
+        {
+            std::fprintf(stderr,
+                         "[corex_demo] SimEngine: SimSystem creator #%zu done (ptr=%p)\n",
+                         corex_creator_i,
+                         static_cast<void*>(uptr.get()));
+            std::fflush(stderr);
+        }
         ++corex_creator_i;
         if(uptr)
             m_system_collection.create(std::move(uptr));

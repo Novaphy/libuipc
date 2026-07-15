@@ -23,6 +23,8 @@ class DyTopoEffectReceiver : public SimSystem
     virtual void do_init(InitInfo&);
     virtual void do_report(GlobalDyTopoEffectManager::ClassifyInfo& info) = 0;
     virtual void do_receive(GlobalDyTopoEffectManager::ClassifiedDyTopoEffectInfo& info) = 0;
+    virtual bool do_accept_raw_full_gradient() const;
+    virtual bool do_accept_raw_full_hessian() const;
     virtual void do_build(BuildInfo& info) = 0;
 
   private:
@@ -31,6 +33,8 @@ class DyTopoEffectReceiver : public SimSystem
     void         init();  // only be called by GlobalDyTopoEffectManager
     void         report(GlobalDyTopoEffectManager::ClassifyInfo& info);
     void  receive(GlobalDyTopoEffectManager::ClassifiedDyTopoEffectInfo& info);
+    bool  accept_raw_full_gradient() const;
+    bool  accept_raw_full_hessian() const;
     SizeT m_index = ~0ull;
 };
 }  // namespace uipc::backend::cuda

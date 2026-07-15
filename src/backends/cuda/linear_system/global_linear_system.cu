@@ -51,6 +51,35 @@ bool corex_linear_sync_enabled(const char* skip_env)
     return !corex_env_enabled("UIPC_COREX_LINEAR_SKIP_SYNC")
            && !corex_env_enabled(skip_env);
 }
+
+__global__ void kernel_corex_clear_linear_assembly(Matrix3x3* values,
+                                                   int*       rows,
+                                                   int*       cols,
+                                                   Float*     rhs,
+                                                   int        triplet_count,
+                                                   int        rhs_count)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int n_values = triplet_count * 9;
+    int n = max(max(n_values, triplet_count), rhs_count);
+
+    for(int i = tid; i < n; i += blockDim.x * gridDim.x)
+    {
+        if(i < n_values)
+        {
+            reinterpret_cast<Float*>(values)[i] = Float{0};
+        }
+        if(i < triplet_count)
+        {
+            rows[i] = -1;
+            cols[i] = -1;
+        }
+        if(i < rhs_count)
+        {
+            rhs[i] = Float{0};
+        }
+    }
+}
 }  // namespace
 
 SizeT GlobalLinearSystem::dof_count() const
@@ -708,17 +737,26 @@ void GlobalLinearSystem::Impl::_assemble_linear_system()
     // Clear and invalidate previous values
     // BufferView::fill() uses ParallelFor device lambda which silently fails on CoreX
     auto profile_t0 = corex_profile::now_ms();
-    checkCudaErrors(cudaMemset(triplet_A.values().data(),
-                               0,
-                               sizeof(Matrix3x3) * triplet_A.triplet_count()));
-    checkCudaErrors(cudaMemset(triplet_A.row_indices().data(),
-                               0xFF,
-                               sizeof(int) * triplet_A.triplet_count()));
-    checkCudaErrors(cudaMemset(triplet_A.col_indices().data(),
-                               0xFF,
-                               sizeof(int) * triplet_A.triplet_count()));
     auto B = b.view();
-    checkCudaErrors(cudaMemset(B.buffer_view().data(), 0, sizeof(Float) * b.size()));
+    {
+        const int triplet_count = static_cast<int>(triplet_A.triplet_count());
+        const int rhs_count = static_cast<int>(b.size());
+        const int n_values = triplet_count * 9;
+        const int n = std::max({n_values, triplet_count, rhs_count});
+        if(n > 0)
+        {
+            constexpr int block = 256;
+            const int grid = std::min(1024, (n + block - 1) / block);
+            kernel_corex_clear_linear_assembly<<<grid, block>>>(
+                triplet_A.values().data(),
+                triplet_A.row_indices().data(),
+                triplet_A.col_indices().data(),
+                B.buffer_view().data(),
+                triplet_count,
+                rhs_count);
+            checkCudaErrors(cudaGetLastError());
+        }
+    }
     profile_clear_ms += corex_profile::now_ms() - profile_t0;
 
     auto diag_subsystem_view     = diag_subsystems.view();

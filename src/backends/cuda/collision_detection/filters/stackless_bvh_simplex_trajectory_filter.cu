@@ -251,6 +251,52 @@ static inline void corex_filter_active_post_launch()
         cudaDeviceSynchronize();
 }
 
+MUDA_DEVICE MUDA_INLINE Float corex_sqr(Float x)
+{
+    return x * x;
+}
+
+MUDA_DEVICE MUDA_INLINE Float point_box_distance2_lower_bound(const Vector3& p,
+                                                              const Vector3& bmin,
+                                                              const Vector3& bmax)
+{
+    Float d = 0;
+    for(int k = 0; k < 3; ++k)
+    {
+        if(p[k] < bmin[k])
+            d += corex_sqr(bmin[k] - p[k]);
+        else if(p[k] > bmax[k])
+            d += corex_sqr(p[k] - bmax[k]);
+    }
+    return d;
+}
+
+MUDA_DEVICE MUDA_INLINE Float box_box_distance2_lower_bound(const Vector3& amin,
+                                                            const Vector3& amax,
+                                                            const Vector3& bmin,
+                                                            const Vector3& bmax)
+{
+    Float d = 0;
+    for(int k = 0; k < 3; ++k)
+    {
+        if(amax[k] < bmin[k])
+            d += corex_sqr(bmin[k] - amax[k]);
+        else if(bmax[k] < amin[k])
+            d += corex_sqr(amin[k] - bmax[k]);
+    }
+    return d;
+}
+
+MUDA_DEVICE MUDA_INLINE Vector3 min3(const Vector3& a, const Vector3& b, const Vector3& c)
+{
+    return a.cwiseMin(b).cwiseMin(c);
+}
+
+MUDA_DEVICE MUDA_INLINE Vector3 max3(const Vector3& a, const Vector3& b, const Vector3& c)
+{
+    return a.cwiseMax(b).cwiseMax(c);
+}
+
 // filter_active kernels
 
 static __global__ void kernel_filter_active_PP(
@@ -339,8 +385,12 @@ static __global__ void kernel_filter_active_PT(
     Vector3  Ps_arr[] = {positions[vIs(0)], positions[vIs(1)], positions[vIs(2)], positions[vIs(3)]};
     Float thickness = PT_thickness(thicknesses[V], thicknesses[F(0)], thicknesses[F(1)], thicknesses[F(2)]);
     Float d_hat = PT_d_hat(d_hats[V], d_hats[F(0)], d_hats[F(1)], d_hats[F(2)]);
-    Vector4i flag = distance::point_triangle_distance_flag(Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3]);
     Vector2 range = D_range(thickness, d_hat);
+    Vector3 tri_min = min3(Ps_arr[1], Ps_arr[2], Ps_arr[3]);
+    Vector3 tri_max = max3(Ps_arr[1], Ps_arr[2], Ps_arr[3]);
+    if(point_box_distance2_lower_bound(Ps_arr[0], tri_min, tri_max) >= range.y())
+        return;
+    Vector4i flag = distance::point_triangle_distance_flag(Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3]);
     Float D;
     distance::point_triangle_distance2(flag, Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3], D);
     Vector4i offsets;
@@ -404,6 +454,12 @@ static __global__ void kernel_filter_active_EE(
     Float d_hat = EE_d_hat(d_hats[E0_edge(0)], d_hats[E0_edge(1)],
                            d_hats[E1_edge(0)], d_hats[E1_edge(1)]);
     Vector2 range = D_range(thickness, d_hat);
+    Vector3 e0_min = Ps_arr[0].cwiseMin(Ps_arr[1]);
+    Vector3 e0_max = Ps_arr[0].cwiseMax(Ps_arr[1]);
+    Vector3 e1_min = Ps_arr[2].cwiseMin(Ps_arr[3]);
+    Vector3 e1_max = Ps_arr[2].cwiseMax(Ps_arr[3]);
+    if(box_box_distance2_lower_bound(e0_min, e0_max, e1_min, e1_max) >= range.y())
+        return;
     Vector4i flag = distance::edge_edge_distance_flag(Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3]);
     Float D;
     distance::edge_edge_distance2(flag, Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3], D);
@@ -416,42 +472,224 @@ static __global__ void kernel_filter_active_EE(
         return;
     Vector4i offsets;
     auto dim = distance::degenerate_edge_edge(flag, offsets);
-    Float eps_x;
-    distance::edge_edge_mollifier_threshold(rest_positions[vIs(0)], rest_positions[vIs(1)],
-                                            rest_positions[vIs(2)], rest_positions[vIs(3)],
-                                            static_cast<Float>(1e-3), eps_x);
-    if(distance::need_mollify(Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3], eps_x))
+    if(dim == 4)
     {
-        out_EEs[i] = vIs;
+        Float eps_x;
+        distance::edge_edge_mollifier_threshold(rest_positions[vIs(0)], rest_positions[vIs(1)],
+                                                rest_positions[vIs(2)], rest_positions[vIs(3)],
+                                                static_cast<Float>(1e-3), eps_x);
+        if(distance::need_mollify(Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3], eps_x))
+        {
+            out_EEs[i] = vIs;
+            return;
+        }
+    }
+
+    switch(dim)
+    {
+        case 2:
+        {
+            IndexT V0 = vIs(offsets(0));
+            IndexT V1 = vIs(offsets(1));
+            out_PPs[i] = {V0, V1};
+        }
+        break;
+        case 3:
+        {
+            IndexT V0 = vIs(offsets(0));
+            IndexT V1 = vIs(offsets(1));
+            IndexT V2 = vIs(offsets(2));
+            out_PEs[i] = {V0, V1, V2};
+        }
+        break;
+        case 4:
+        {
+            out_EEs[i] = vIs;
+        }
+        break;
+        default:
+            break;
+    }
+}
+
+static __global__ void kernel_filter_active_PP_append(
+    int N, const Vector2i* PCodimP_pairs, const IndexT* surf_vertices,
+    const IndexT* codim_vertices, const Vector3* positions,
+    const Float* thicknesses, const Float* d_hats, Vector2i* out_PPs,
+    IndexT* pp_count)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    Vector2i indices = PCodimP_pairs[i];
+    IndexT P0 = surf_vertices[indices(0)];
+    IndexT P1 = codim_vertices[indices(1)];
+    const auto& V0 = positions[P0];
+    const auto& V1 = positions[P1];
+    Float thickness = PP_thickness(thicknesses[P0], thicknesses[P1]);
+    Float d_hat = PP_d_hat(d_hats[P0], d_hats[P1]);
+    Vector2 range = D_range(thickness, d_hat);
+    Float D;
+    distance::point_point_distance2(V0, V1, D);
+    if(!is_active_D(range, D))
+        return;
+    IndexT dst = atomicAdd(pp_count, IndexT{1});
+    out_PPs[dst] = {P0, P1};
+}
+
+static __global__ void kernel_filter_active_CodimPE_append(
+    int N, const Vector2i* CodimP_AllE_pairs, const IndexT* codim_vertices,
+    const Vector2i* surf_edges, const Vector3* positions,
+    const Float* thicknesses, const Float* d_hats,
+    Vector2i* out_PPs, Vector3i* out_PEs, IndexT* pp_count, IndexT* pe_count)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    Vector2i indices = CodimP_AllE_pairs[i];
+    IndexT   V       = codim_vertices[indices(0)];
+    Vector2i E       = surf_edges[indices(1)];
+    Vector3i vIs = {V, E(0), E(1)};
+    Vector3 Ps_arr[] = {positions[vIs(0)], positions[vIs(1)], positions[vIs(2)]};
+    Float thickness = PE_thickness(thicknesses[V], thicknesses[E(0)], thicknesses[E(1)]);
+    Float d_hat = PE_d_hat(d_hats[V], d_hats[E(0)], d_hats[E(1)]);
+    Vector3i flag = distance::point_edge_distance_flag(Ps_arr[0], Ps_arr[1], Ps_arr[2]);
+    Vector2 range = D_range(thickness, d_hat);
+    Float D;
+    distance::point_edge_distance2(flag, Ps_arr[0], Ps_arr[1], Ps_arr[2], D);
+    if(!is_active_D(range, D))
+        return;
+    Vector3i offsets;
+    auto dim = distance::degenerate_point_edge(flag, offsets);
+    if(dim == 2)
+    {
+        IndexT dst = atomicAdd(pp_count, IndexT{1});
+        out_PPs[dst] = {vIs(offsets(0)), vIs(offsets(1))};
+    }
+    else if(dim == 3)
+    {
+        IndexT dst = atomicAdd(pe_count, IndexT{1});
+        out_PEs[dst] = vIs;
+    }
+}
+
+static __global__ void kernel_filter_active_PT_append(
+    int N, const Vector2i* PT_pairs, const IndexT* surf_vertices,
+    const Vector3i* surf_triangles, const Vector3* positions,
+    const Float* thicknesses, const Float* d_hats, Float pt_pe_hyst_scale,
+    Vector2i* out_PPs, Vector3i* out_PEs, Vector4i* out_PTs,
+    IndexT* pp_count, IndexT* pe_count, IndexT* pt_count)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    Vector2i indices = PT_pairs[i];
+    IndexT   V       = surf_vertices[indices(0)];
+    Vector3i F       = surf_triangles[indices(1)];
+    Vector4i vIs  = {V, F(0), F(1), F(2)};
+    Vector3  Ps_arr[] = {positions[vIs(0)], positions[vIs(1)], positions[vIs(2)], positions[vIs(3)]};
+    Float thickness = PT_thickness(thicknesses[V], thicknesses[F(0)], thicknesses[F(1)], thicknesses[F(2)]);
+    Float d_hat = PT_d_hat(d_hats[V], d_hats[F(0)], d_hats[F(1)], d_hats[F(2)]);
+    Vector2 range = D_range(thickness, d_hat);
+    Vector3 tri_min = min3(Ps_arr[1], Ps_arr[2], Ps_arr[3]);
+    Vector3 tri_max = max3(Ps_arr[1], Ps_arr[2], Ps_arr[3]);
+    if(point_box_distance2_lower_bound(Ps_arr[0], tri_min, tri_max) >= range.y())
+        return;
+    Vector4i flag = distance::point_triangle_distance_flag(Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3]);
+    Float D;
+    distance::point_triangle_distance2(flag, Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3], D);
+    Vector4i offsets;
+    offsets.setConstant(-1);
+    auto dim = distance::degenerate_point_triangle(flag, offsets);
+    bool active = is_active_D(range, D);
+    if(!active && dim == 3)
+    {
+        Float slack = max(static_cast<Float>(1e-6),
+                          (range.y() - range.x()) * pt_pe_hyst_scale);
+        active = (D > range.x()) && (D < range.y() + slack);
+    }
+    if(!active)
+        return;
+    if(dim == 2)
+    {
+        IndexT dst = atomicAdd(pp_count, IndexT{1});
+        out_PPs[dst] = {vIs(offsets(0)), vIs(offsets(1))};
+    }
+    else if(dim == 3)
+    {
+        IndexT dst = atomicAdd(pe_count, IndexT{1});
+        out_PEs[dst] = {vIs(offsets(0)), vIs(offsets(1)), vIs(offsets(2))};
+    }
+    else if(dim == 4)
+    {
+        IndexT dst = atomicAdd(pt_count, IndexT{1});
+        out_PTs[dst] = vIs;
+    }
+}
+
+static __global__ void kernel_filter_active_EE_append(
+    int N, const Vector2i* EE_pairs, const Vector2i* surf_edges,
+    const Vector3* positions, const Vector3* rest_positions,
+    const Float* thicknesses, const Float* d_hats,
+    Vector2i* out_PPs, Vector3i* out_PEs, Vector4i* out_EEs,
+    IndexT* pp_count, IndexT* pe_count, IndexT* ee_count)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    Vector2i indices = EE_pairs[i];
+    Vector2i E0_edge = surf_edges[indices(0)];
+    Vector2i E1_edge = surf_edges[indices(1)];
+    Vector4i vIs  = {E0_edge(0), E0_edge(1), E1_edge(0), E1_edge(1)};
+    Vector3  Ps_arr[] = {positions[vIs(0)], positions[vIs(1)], positions[vIs(2)], positions[vIs(3)]};
+    Float thickness = EE_thickness(thicknesses[E0_edge(0)], thicknesses[E0_edge(1)],
+                                   thicknesses[E1_edge(0)], thicknesses[E1_edge(1)]);
+    Float d_hat = EE_d_hat(d_hats[E0_edge(0)], d_hats[E0_edge(1)],
+                           d_hats[E1_edge(0)], d_hats[E1_edge(1)]);
+    Vector2 range = D_range(thickness, d_hat);
+    Vector3 e0_min = Ps_arr[0].cwiseMin(Ps_arr[1]);
+    Vector3 e0_max = Ps_arr[0].cwiseMax(Ps_arr[1]);
+    Vector3 e1_min = Ps_arr[2].cwiseMin(Ps_arr[3]);
+    Vector3 e1_max = Ps_arr[2].cwiseMax(Ps_arr[3]);
+    if(box_box_distance2_lower_bound(e0_min, e0_max, e1_min, e1_max) >= range.y())
+        return;
+    Vector4i flag = distance::edge_edge_distance_flag(Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3]);
+    Float D;
+    distance::edge_edge_distance2(flag, Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3], D);
+    if(D <= range.x())
+    {
+        IndexT dst = atomicAdd(ee_count, IndexT{1});
+        out_EEs[dst] = vIs;
         return;
     }
-    else
+    if(!is_active_D(range, D))
+        return;
+    Vector4i offsets;
+    auto dim = distance::degenerate_edge_edge(flag, offsets);
+    if(dim == 4)
     {
-        switch(dim)
+        Float eps_x;
+        distance::edge_edge_mollifier_threshold(rest_positions[vIs(0)], rest_positions[vIs(1)],
+                                                rest_positions[vIs(2)], rest_positions[vIs(3)],
+                                                static_cast<Float>(1e-3), eps_x);
+        if(distance::need_mollify(Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3], eps_x))
         {
-            case 2:
-            {
-                IndexT V0 = vIs(offsets(0));
-                IndexT V1 = vIs(offsets(1));
-                out_PPs[i] = {V0, V1};
-            }
-            break;
-            case 3:
-            {
-                IndexT V0 = vIs(offsets(0));
-                IndexT V1 = vIs(offsets(1));
-                IndexT V2 = vIs(offsets(2));
-                out_PEs[i] = {V0, V1, V2};
-            }
-            break;
-            case 4:
-            {
-                out_EEs[i] = vIs;
-            }
-            break;
-            default:
-                break;
+            IndexT dst = atomicAdd(ee_count, IndexT{1});
+            out_EEs[dst] = vIs;
+            return;
         }
+    }
+
+    if(dim == 2)
+    {
+        IndexT dst = atomicAdd(pp_count, IndexT{1});
+        out_PPs[dst] = {vIs(offsets(0)), vIs(offsets(1))};
+    }
+    else if(dim == 3)
+    {
+        IndexT dst = atomicAdd(pe_count, IndexT{1});
+        out_PEs[dst] = {vIs(offsets(0)), vIs(offsets(1)), vIs(offsets(2))};
+    }
+    else if(dim == 4)
+    {
+        IndexT dst = atomicAdd(ee_count, IndexT{1});
+        out_EEs[dst] = vIs;
     }
 }
 
@@ -514,6 +752,18 @@ void corex_filter_loose_resize(muda::DeviceBuffer<T>& buffer, SizeT size)
     if(size > buffer.capacity())
         buffer.reserve(static_cast<size_t>(static_cast<double>(size) * 1.1) + 1);
     buffer.resize(size);
+}
+
+static __global__ void kernel_pack_selected_counts(const IndexT* pp_count,
+                                                   const IndexT* pe_count,
+                                                   const IndexT* pt_count,
+                                                   const IndexT* ee_count,
+                                                   IndexT*       out_counts)
+{
+    out_counts[0] = *pp_count;
+    out_counts[1] = *pe_count;
+    out_counts[2] = *pt_count;
+    out_counts[3] = *ee_count;
 }
 
 struct CorexSelectedHashStats
@@ -678,7 +928,7 @@ void StacklessBVHSimplexTrajectoryFilter::do_build(BuildInfo& info)
 
 void StacklessBVHSimplexTrajectoryFilter::do_detect(DetectInfo& info)
 {
-    m_impl.detect(info);
+    m_impl.detect(info, engine().frame(), engine().newton_iter());
 }
 
 void StacklessBVHSimplexTrajectoryFilter::do_filter_active(FilterActiveInfo& info)
@@ -718,9 +968,13 @@ muda::CBufferView<Float> StacklessBVHSimplexTrajectoryFilter::toi_EEs() const no
     return m_impl.tois.view(pp_size + pe_size + pt_size, ee_size);
 }
 
-void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
+void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info,
+                                                       SizeT       frame,
+                                                       SizeT       newton_iter)
 {
     using namespace muda;
+    (void)frame;
+    (void)newton_iter;
 
     auto alpha   = info.alpha();
     auto Ps      = info.positions();
@@ -729,6 +983,64 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
     auto Vs      = info.surf_vertices();
     auto Es      = info.surf_edges();
     auto Fs      = info.surf_triangles();
+
+    auto contact_mask_extent  = info.contact_mask_tabular().extent();
+    auto subscene_mask_extent = info.subscene_mask_tabular().extent();
+    const int cm_h = static_cast<int>(contact_mask_extent.height());
+    const int cm_w = static_cast<int>(contact_mask_extent.width());
+    const int sm_h = static_cast<int>(subscene_mask_extent.height());
+    const int sm_w = static_cast<int>(subscene_mask_extent.width());
+    const IndexT* contact_mask_ptr =
+        (cm_h > 0 && cm_w > 0) ? info.contact_mask_tabular().data(0) : nullptr;
+    const IndexT* subscene_mask_ptr =
+        (sm_h > 0 && sm_w > 0) ? info.subscene_mask_tabular().data(0) : nullptr;
+
+    if(!mask_cache_valid || cached_contact_mask_ptr != contact_mask_ptr
+       || cached_subscene_mask_ptr != subscene_mask_ptr || cached_contact_mask_h != cm_h
+       || cached_contact_mask_w != cm_w || cached_subscene_mask_h != sm_h
+       || cached_subscene_mask_w != sm_w)
+    {
+        auto table_all_enabled = [](const IndexT* ptr, int h, int w) -> bool
+        {
+            if(ptr == nullptr || h <= 0 || w <= 0)
+                return true;
+            std::vector<IndexT> host(static_cast<size_t>(h) * static_cast<size_t>(w));
+            checkCudaErrors(cudaMemcpy(
+                host.data(), ptr, sizeof(IndexT) * host.size(), cudaMemcpyDeviceToHost));
+            for(int r = 0; r < h; ++r)
+            {
+                for(int c = 0; c < w; ++c)
+                {
+                    // ABD scenes commonly disable same-contact/self rows. The
+                    // traversal still checks body self-collision before accepting
+                    // a pair, so diagonal mask entries do not need per-pair reads.
+                    if(r == c)
+                        continue;
+                    if(host[static_cast<size_t>(r) * static_cast<size_t>(w) + c] == 0)
+                        return false;
+                }
+            }
+            return true;
+        };
+
+        contact_mask_all_enabled  = table_all_enabled(contact_mask_ptr, cm_h, cm_w);
+        subscene_mask_all_enabled = table_all_enabled(subscene_mask_ptr, sm_h, sm_w);
+
+        cached_contact_mask_ptr = contact_mask_ptr;
+        cached_subscene_mask_ptr = subscene_mask_ptr;
+        cached_contact_mask_h = cm_h;
+        cached_contact_mask_w = cm_w;
+        cached_subscene_mask_h = sm_h;
+        cached_subscene_mask_w = sm_w;
+        mask_cache_valid = true;
+    }
+
+    const bool mask_fast_enabled = [] {
+        const char* env = std::getenv("UIPC_COREX_FILTER_MASK_FAST");
+        return !(env && env[0] != '\0' && env[0] == '0');
+    }();
+    const bool contact_mask_fast  = mask_fast_enabled && contact_mask_all_enabled;
+    const bool subscene_mask_fast = mask_fast_enabled && subscene_mask_all_enabled;
     const bool trace_simplex_filter = (std::getenv("UIPC_COREX_TRACE_SIMPLEX_FILTER") != nullptr);
 
     if(trace_simplex_filter)
@@ -1026,17 +1338,27 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
     }
 
     {
-        corex_profile::ScopedPhase phase("contact_detect_detail", "bvh_build_edge_tri");
-        if(alpha > 0)
+        const bool can_refit_edge_tri =
+            alpha > 0 && edge_tri_bvh_valid && edge_bvh_size == edge_aabbs.size()
+            && tri_bvh_size == triangle_aabbs.size();
+        corex_profile::ScopedPhase phase("contact_detect_detail",
+                                         can_refit_edge_tri ? "bvh_refit_edge_tri"
+                                                           : "bvh_build_edge_tri");
+        if(can_refit_edge_tri)
         {
-            lbvh_E.refit(edge_aabbs);
-            lbvh_T.refit(triangle_aabbs);
+            if(edge_aabbs.size() > 0)
+                lbvh_E.refit(edge_aabbs);
+            if(triangle_aabbs.size() > 0)
+                lbvh_T.refit(triangle_aabbs);
         }
         else
         {
             lbvh_E.build(edge_aabbs);
             lbvh_T.build(triangle_aabbs);
         }
+        edge_tri_bvh_valid = edge_aabbs.size() > 0 || triangle_aabbs.size() > 0;
+        edge_bvh_size      = edge_aabbs.size();
+        tri_bvh_size       = triangle_aabbs.size();
     }
 
     if(codimVs.size() > 0)
@@ -1179,12 +1501,29 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
         }
     }
 
+    bool pending_fast_EE_count = false;
+    bool pending_fast_PT_count = false;
+
     // Use AllE to query AllE
     if(Es.size() > 0)
     {
-        corex_profile::ScopedPhase phase("contact_detect_detail", "query_alle_alle");
-        muda::KernelLabel label{__FUNCTION__, __FILE__, __LINE__};
-        lbvh_E.detect(
+        corex_profile::ScopedPhase phase(
+            "contact_detect_detail",
+            contact_mask_fast && subscene_mask_fast
+                ? (alpha > 0 ? "query_alle_alle_ccd_fast" : "query_alle_alle_dcd_fast")
+                : "query_alle_alle");
+        if(contact_mask_fast && subscene_mask_fast)
+        {
+            pending_fast_EE_count =
+                lbvh_E.detect_edges_no_mask_launch(Es,
+                                                   info.v2b(),
+                                                   info.body_self_collision(),
+                                                   candidate_AllE_AllE_pairs);
+        }
+        else
+        {
+            muda::KernelLabel label{__FUNCTION__, __FILE__, __LINE__};
+            lbvh_E.detect(
             [Es          = Es.viewer().name("Es"),
              Ps          = Ps.viewer().name("Ps"),
              dxs         = dxs.viewer().name("dxs"),
@@ -1254,86 +1593,171 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
                 return true;
             },
             candidate_AllE_AllE_pairs);
+        }
     }
 
     // Use AllP to query AllT
     if(Fs.size() > 0)
     {
-        corex_profile::ScopedPhase phase("contact_detect_detail", "query_allp_allt");
-        muda::KernelLabel label{__FUNCTION__, __FILE__, __LINE__};
-        lbvh_T.query(
-            point_aabbs,
-            [Vs          = Vs.viewer().name("Vs"),
-             Fs          = Fs.viewer().name("Fs"),
-             Ps          = Ps.viewer().name("Ps"),
-             dxs         = dxs.viewer().name("dxs"),
-             thicknesses = info.thicknesses().viewer().name("thicknesses"),
-             contact_element_ids = info.contact_element_ids().viewer().name("contact_element_ids"),
-             contact_mask_tabular = info.contact_mask_tabular().viewer().name("contact_mask_tabular"),
-             subscene_element_ids = info.subscene_element_ids().viewer().name("subscene_element_ids"),
-             subscene_mask_tabular = info.subscene_mask_tabular().viewer().name("subscene_mask_tabular"),
-             v2b = info.v2b().viewer().name("v2b"),
-             body_self_collision = info.body_self_collision().viewer().name("body_self_collision"),
-             d_hats = info.d_hats().viewer().name("d_hats"),
-             alpha  = alpha] __device__(IndexT i, IndexT j)
+        corex_profile::ScopedPhase phase(
+            "contact_detect_detail",
+            contact_mask_fast && subscene_mask_fast ? "query_allp_allt_fast"
+                                                    : "query_allp_allt");
+        if(contact_mask_fast && subscene_mask_fast)
+        {
+            pending_fast_PT_count =
+                lbvh_T.query_points_triangles_no_mask_launch(point_aabbs,
+                                                             Vs,
+                                                             Fs,
+                                                             Ps,
+                                                             dxs,
+                                                             info.thicknesses(),
+                                                             info.d_hats(),
+                                                             alpha,
+                                                             info.v2b(),
+                                                             info.body_self_collision(),
+                                                             candidate_AllP_AllT_pairs);
+        }
+        else
+        {
+            muda::KernelLabel label{__FUNCTION__, __FILE__, __LINE__};
+            lbvh_T.query(
+                point_aabbs,
+                [Vs          = Vs.viewer().name("Vs"),
+                 Fs          = Fs.viewer().name("Fs"),
+                 Ps          = Ps.viewer().name("Ps"),
+                 dxs         = dxs.viewer().name("dxs"),
+                 thicknesses = info.thicknesses().viewer().name("thicknesses"),
+                 contact_element_ids = info.contact_element_ids().viewer().name("contact_element_ids"),
+                 contact_mask_tabular = info.contact_mask_tabular().viewer().name("contact_mask_tabular"),
+                 subscene_element_ids = info.subscene_element_ids().viewer().name("subscene_element_ids"),
+                 subscene_mask_tabular = info.subscene_mask_tabular().viewer().name("subscene_mask_tabular"),
+                 v2b = info.v2b().viewer().name("v2b"),
+                 body_self_collision = info.body_self_collision().viewer().name("body_self_collision"),
+                 d_hats = info.d_hats().viewer().name("d_hats"),
+                 contact_mask_fast,
+                 subscene_mask_fast,
+                 alpha  = alpha] __device__(IndexT i, IndexT j)
+                {
+                    auto V = Vs(i);
+                    auto F = Fs(j);
+
+                    if(!subscene_mask_fast)
+                    {
+                        Vector4i scids = {subscene_element_ids(V),
+                                          subscene_element_ids(F[0]),
+                                          subscene_element_ids(F[1]),
+                                          subscene_element_ids(F[2])};
+                        if(!allow_PT_contact(subscene_mask_tabular, scids))
+                            return false;
+                    }
+
+                    if(!contact_mask_fast)
+                    {
+                        Vector4i cids = {contact_element_ids(V),
+                                         contact_element_ids(F[0]),
+                                         contact_element_ids(F[1]),
+                                         contact_element_ids(F[2])};
+                        if(!allow_PT_contact(contact_mask_tabular, cids))
+                            return false;
+                    }
+
+                    // discard if the point is on the triangle
+                    if(F[0] == V || F[1] == V || F[2] == V)
+                        return false;
+
+                    auto body_i = v2b(V);
+                    auto body_j = v2b(F[0]);
+                    // skip self-collision for the same body if self collision off
+                    if(body_i == body_j && !body_self_collision(body_i))
+                        return false;
+
+                    Vector3 P  = Ps(V);
+                    Vector3 dP = alpha * dxs(V);
+
+                    Vector3 F0 = Ps(F[0]);
+                    Vector3 F1 = Ps(F[1]);
+                    Vector3 F2 = Ps(F[2]);
+
+                    Vector3 dF0 = alpha * dxs(F[0]);
+                    Vector3 dF1 = alpha * dxs(F[1]);
+                    Vector3 dF2 = alpha * dxs(F[2]);
+
+                    Float thickness = PT_thickness(thicknesses(V),
+                                                   thicknesses(F[0]),
+                                                   thicknesses(F[1]),
+                                                   thicknesses(F[2]));
+
+                    Float d_hat =
+                        PT_d_hat(d_hats(V), d_hats(F[0]), d_hats(F[1]), d_hats(F[2]));
+
+                    Float expand = d_hat + thickness;
+
+                    if(!distance::point_triangle_ccd_broadphase(
+                           P, F0, F1, F2, dP, dF0, dF1, dF2, expand))
+                        return false;
+
+                    return true;
+                },
+                candidate_AllP_AllT_pairs);
+        }
+    }
+
+    if(pending_fast_EE_count || pending_fast_PT_count)
+    {
+        int h_EE_cp_num = 0;
+        int h_PT_cp_num = 0;
+        {
+            corex_profile::ScopedPhase phase("bvh_query_detail",
+                                             "fast_nomask_count_readback");
+            if(pending_fast_EE_count)
+                h_EE_cp_num = candidate_AllE_AllE_pairs.m_cpNum;
+            if(pending_fast_PT_count)
+                h_PT_cp_num = candidate_AllP_AllT_pairs.m_cpNum;
+        }
+
+        if(pending_fast_EE_count)
+        {
+            UIPC_ASSERT(h_EE_cp_num >= 0, "fatal error");
+            if(h_EE_cp_num > candidate_AllE_AllE_pairs.m_pairs.size())
             {
-                auto V = Vs(i);
-                auto F = Fs(j);
+                candidate_AllE_AllE_pairs.m_pairs.resize(
+                    static_cast<size_t>(h_EE_cp_num) * 2);
+                lbvh_E.detect_edges_no_mask(Es,
+                                            info.v2b(),
+                                            info.body_self_collision(),
+                                            candidate_AllE_AllE_pairs);
+            }
+            else
+            {
+                candidate_AllE_AllE_pairs.m_size = h_EE_cp_num;
+            }
+        }
 
-                Vector4i cids = {contact_element_ids(V),
-                                 contact_element_ids(F[0]),
-                                 contact_element_ids(F[1]),
-                                 contact_element_ids(F[2])};
-
-                Vector4i scids = {subscene_element_ids(V),
-                                  subscene_element_ids(F[0]),
-                                  subscene_element_ids(F[1]),
-                                  subscene_element_ids(F[2])};
-
-                // discard if the contact is disabled
-                if(!allow_PT_contact(subscene_mask_tabular, scids))
-                    return false;
-                if(!allow_PT_contact(contact_mask_tabular, cids))
-                    return false;
-
-                // discard if the point is on the triangle
-                if(F[0] == V || F[1] == V || F[2] == V)
-                    return false;
-
-                auto body_i = v2b(V);
-                auto body_j = v2b(F[0]);
-                // skip self-collision for the same body if self collision off
-                if(body_i == body_j && !body_self_collision(body_i))
-                    return false;
-
-
-                Vector3 P  = Ps(V);
-                Vector3 dP = alpha * dxs(V);
-
-                Vector3 F0 = Ps(F[0]);
-                Vector3 F1 = Ps(F[1]);
-                Vector3 F2 = Ps(F[2]);
-
-                Vector3 dF0 = alpha * dxs(F[0]);
-                Vector3 dF1 = alpha * dxs(F[1]);
-                Vector3 dF2 = alpha * dxs(F[2]);
-
-                Float thickness = PT_thickness(thicknesses(V),
-                                               thicknesses(F[0]),
-                                               thicknesses(F[1]),
-                                               thicknesses(F[2]));
-
-                Float d_hat =
-                    PT_d_hat(d_hats(V), d_hats(F[0]), d_hats(F[1]), d_hats(F[2]));
-
-                Float expand = d_hat + thickness;
-
-                if(!distance::point_triangle_ccd_broadphase(P, F0, F1, F2, dP, dF0, dF1, dF2, expand))
-                    return false;
-
-                return true;
-            },
-            candidate_AllP_AllT_pairs);
+        if(pending_fast_PT_count)
+        {
+            UIPC_ASSERT(h_PT_cp_num >= 0, "fatal error");
+            if(h_PT_cp_num > candidate_AllP_AllT_pairs.m_pairs.size())
+            {
+                candidate_AllP_AllT_pairs.m_pairs.resize(
+                    static_cast<size_t>(h_PT_cp_num) * 2);
+                lbvh_T.query_points_triangles_no_mask(point_aabbs,
+                                                      Vs,
+                                                      Fs,
+                                                      Ps,
+                                                      dxs,
+                                                      info.thicknesses(),
+                                                      info.d_hats(),
+                                                      alpha,
+                                                      info.v2b(),
+                                                      info.body_self_collision(),
+                                                      candidate_AllP_AllT_pairs);
+            }
+            else
+            {
+                candidate_AllP_AllT_pairs.m_size = h_PT_cp_num;
+            }
+        }
     }
 
     if(trace_simplex_filter)
@@ -1354,7 +1778,7 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
         (std::getenv("UIPC_COREX_TRACE_FILTER_ACTIVE_DIAG") != nullptr);
     const bool selected_set_diag = corex_selected_set_diag_enabled();
     const bool selected_set_hash_diag = corex_selected_set_hash_diag_enabled();
-    const bool view_slice_output = corex_filter_view_slice_enabled();
+    constexpr bool view_slice_output = true;
     Float pt_pe_hyst_scale = static_cast<Float>(0.0);
     if(const char* env = std::getenv("UIPC_COREX_PTPE_HYST_SCALE"))
     {
@@ -1370,6 +1794,213 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
     SizeT N_CodimPE = candidate_CodimP_AllE_pairs.size();
     SizeT N_PTs     = candidate_AllP_AllT_pairs.size();
     SizeT N_EEs     = candidate_AllE_AllE_pairs.size();
+
+    if(N_PCoimP + N_CodimPE + N_PTs + N_EEs == 0)
+    {
+        PPs.resize(0);
+        PEs.resize(0);
+        PTs.resize(0);
+        EEs.resize(0);
+        info.PPs(PPs);
+        info.PEs(PEs);
+        info.PTs(PTs);
+        info.EEs(EEs);
+        return;
+    }
+
+    {
+        corex_profile::ScopedPhase phase("contact_filter_detail", "append_valid_all");
+
+        IndexT PP_count = 0;
+        IndexT PE_count = 0;
+        IndexT PT_count = 0;
+        IndexT EE_count = 0;
+
+        SizeT PP_capacity = N_PCoimP + N_CodimPE + N_PTs + N_EEs;
+        SizeT PE_capacity = N_CodimPE + N_PTs + N_EEs;
+        SizeT PT_capacity = N_PTs;
+        SizeT EE_capacity = N_EEs;
+
+        if(view_slice_output)
+        {
+            corex_filter_loose_resize(PPs, PP_capacity);
+            corex_filter_loose_resize(PEs, PE_capacity);
+            corex_filter_loose_resize(PTs, PT_capacity);
+            corex_filter_loose_resize(EEs, EE_capacity);
+        }
+        else
+        {
+            PPs.resize(PP_capacity);
+            PEs.resize(PE_capacity);
+            PTs.resize(PT_capacity);
+            EEs.resize(EE_capacity);
+        }
+
+        checkCudaErrors(cudaMemsetAsync(selected_PP_count.data(), 0, sizeof(IndexT)));
+        checkCudaErrors(cudaMemsetAsync(selected_PE_count.data(), 0, sizeof(IndexT)));
+        checkCudaErrors(cudaMemsetAsync(selected_PT_count.data(), 0, sizeof(IndexT)));
+        checkCudaErrors(cudaMemsetAsync(selected_EE_count.data(), 0, sizeof(IndexT)));
+
+        constexpr int block = 256;
+        if(N_PCoimP > 0)
+        {
+            int n = static_cast<int>(N_PCoimP);
+            int grid = (n + block - 1) / block;
+            corex_filter::kernel_filter_active_PP_append<<<grid, block>>>(
+                n,
+                (const Vector2i*)candidate_AllP_CodimP_pairs.view().data(),
+                (const IndexT*)info.surf_vertices().data(),
+                (const IndexT*)info.codim_vertices().data(),
+                (const Vector3*)positions.data(),
+                (const Float*)info.thicknesses().data(),
+                (const Float*)info.d_hats().data(),
+                PPs.data(),
+                selected_PP_count.data());
+            corex_filter::corex_filter_active_post_launch();
+        }
+        if(N_CodimPE > 0)
+        {
+            int n = static_cast<int>(N_CodimPE);
+            int grid = (n + block - 1) / block;
+            corex_filter::kernel_filter_active_CodimPE_append<<<grid, block>>>(
+                n,
+                (const Vector2i*)candidate_CodimP_AllE_pairs.view().data(),
+                (const IndexT*)info.codim_vertices().data(),
+                (const Vector2i*)info.surf_edges().data(),
+                (const Vector3*)positions.data(),
+                (const Float*)info.thicknesses().data(),
+                (const Float*)info.d_hats().data(),
+                PPs.data(),
+                PEs.data(),
+                selected_PP_count.data(),
+                selected_PE_count.data());
+            corex_filter::corex_filter_active_post_launch();
+        }
+        if(N_PTs > 0)
+        {
+            int n = static_cast<int>(N_PTs);
+            int grid = (n + block - 1) / block;
+            corex_filter::kernel_filter_active_PT_append<<<grid, block>>>(
+                n,
+                (const Vector2i*)candidate_AllP_AllT_pairs.view().data(),
+                (const IndexT*)info.surf_vertices().data(),
+                (const Vector3i*)info.surf_triangles().data(),
+                (const Vector3*)positions.data(),
+                (const Float*)info.thicknesses().data(),
+                (const Float*)info.d_hats().data(),
+                pt_pe_hyst_scale,
+                PPs.data(),
+                PEs.data(),
+                PTs.data(),
+                selected_PP_count.data(),
+                selected_PE_count.data(),
+                selected_PT_count.data());
+            corex_filter::corex_filter_active_post_launch();
+        }
+        if(N_EEs > 0)
+        {
+            int n = static_cast<int>(N_EEs);
+            int grid = (n + block - 1) / block;
+            corex_filter::kernel_filter_active_EE_append<<<grid, block>>>(
+                n,
+                (const Vector2i*)candidate_AllE_AllE_pairs.view().data(),
+                (const Vector2i*)info.surf_edges().data(),
+                (const Vector3*)positions.data(),
+                (const Vector3*)info.rest_positions().data(),
+                (const Float*)info.thicknesses().data(),
+                (const Float*)info.d_hats().data(),
+                PPs.data(),
+                PEs.data(),
+                EEs.data(),
+                selected_PP_count.data(),
+                selected_PE_count.data(),
+                selected_EE_count.data());
+            corex_filter::corex_filter_active_post_launch();
+        }
+
+        selected_counts.resize(4);
+        kernel_pack_selected_counts<<<1, 1>>>(
+            selected_PP_count.data(),
+            selected_PE_count.data(),
+            selected_PT_count.data(),
+            selected_EE_count.data(),
+            selected_counts.data());
+
+        IndexT h_selected_counts[4] = {0, 0, 0, 0};
+        {
+            corex_profile::ScopedPhase count_phase("contact_filter_detail",
+                                                   "append_count_readback");
+            checkCudaErrors(cudaMemcpy(h_selected_counts,
+                                       selected_counts.data(),
+                                       sizeof(h_selected_counts),
+                                       cudaMemcpyDeviceToHost));
+        }
+        PP_count = h_selected_counts[0];
+        PE_count = h_selected_counts[1];
+        PT_count = h_selected_counts[2];
+        EE_count = h_selected_counts[3];
+
+        if(selected_set_diag)
+        {
+            spdlog::info("[corex_selected_set] frame={} newton={} "
+                         "cand_PP={} cand_CodimPE={} cand_PT={} cand_EE={} "
+                         "temp_PP={} temp_PE={} temp_PT={} temp_EE={} "
+                         "selected_PP={} selected_PE={} selected_PT={} selected_EE={}",
+                         frame,
+                         newton_iter,
+                         static_cast<int>(N_PCoimP),
+                         static_cast<int>(N_CodimPE),
+                         static_cast<int>(N_PTs),
+                         static_cast<int>(N_EEs),
+                         static_cast<int>(PP_capacity),
+                         static_cast<int>(PE_capacity),
+                         static_cast<int>(PT_capacity),
+                         static_cast<int>(EE_capacity),
+                         PP_count,
+                         PE_count,
+                         PT_count,
+                         EE_count);
+        }
+
+        if(selected_set_hash_diag)
+        {
+            corex_log_selected_hash(frame,
+                                    newton_iter,
+                                    PP_count,
+                                    PE_count,
+                                    PT_count,
+                                    EE_count,
+                                    PPs,
+                                    PEs,
+                                    PTs,
+                                    EEs);
+        }
+
+        if(!view_slice_output)
+        {
+            PPs.resize(PP_count);
+            PEs.resize(PE_count);
+            PTs.resize(PT_count);
+            EEs.resize(EE_count);
+        }
+
+        if(view_slice_output)
+        {
+            info.PPs(PPs.view(0, PP_count));
+            info.PEs(PEs.view(0, PE_count));
+            info.PTs(PTs.view(0, PT_count));
+            info.EEs(EEs.view(0, EE_count));
+        }
+        else
+        {
+            info.PPs(PPs);
+            info.PEs(PEs);
+            info.PTs(PTs);
+            info.EEs(EEs);
+        }
+
+        return;
+    }
 
     // PT, EE, PT, PP can degenerate to PP
     if(view_slice_output)
@@ -1709,38 +2340,83 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_active(FilterActiveInfo& 
             EEs.resize(temp_EEs.size());
         }
 
-        DeviceSelect().If(temp_PPs.data(),
-                          PPs.data(),
-                          selected_PP_count.data(),
-                          temp_PPs.size(),
-                          [] CUB_RUNTIME_FUNCTION(const Vector2i& PP)
-                          { return PP(0) != -1; });
+        if(temp_PPs.size())
+        {
+            DeviceSelect().If(temp_PPs.data(),
+                              PPs.data(),
+                              selected_PP_count.data(),
+                              temp_PPs.size(),
+                              [] CUB_RUNTIME_FUNCTION(const Vector2i& PP)
+                              { return PP(0) != -1; });
+        }
+        else
+        {
+            checkCudaErrors(cudaMemsetAsync(selected_PP_count.data(), 0, sizeof(IndexT)));
+        }
 
-        DeviceSelect().If(temp_PEs.data(),
-                          PEs.data(),
-                          selected_PE_count.data(),
-                          temp_PEs.size(),
-                          [] CUB_RUNTIME_FUNCTION(const Vector3i& PE)
-                          { return PE(0) != -1; });
+        if(temp_PEs.size())
+        {
+            DeviceSelect().If(temp_PEs.data(),
+                              PEs.data(),
+                              selected_PE_count.data(),
+                              temp_PEs.size(),
+                              [] CUB_RUNTIME_FUNCTION(const Vector3i& PE)
+                              { return PE(0) != -1; });
+        }
+        else
+        {
+            checkCudaErrors(cudaMemsetAsync(selected_PE_count.data(), 0, sizeof(IndexT)));
+        }
 
-        DeviceSelect().If(temp_PTs.data(),
-                          PTs.data(),
-                          selected_PT_count.data(),
-                          temp_PTs.size(),
-                          [] CUB_RUNTIME_FUNCTION(const Vector4i& PT)
-                          { return PT(0) != -1; });
+        if(temp_PTs.size())
+        {
+            DeviceSelect().If(temp_PTs.data(),
+                              PTs.data(),
+                              selected_PT_count.data(),
+                              temp_PTs.size(),
+                              [] CUB_RUNTIME_FUNCTION(const Vector4i& PT)
+                              { return PT(0) != -1; });
+        }
+        else
+        {
+            checkCudaErrors(cudaMemsetAsync(selected_PT_count.data(), 0, sizeof(IndexT)));
+        }
 
-        DeviceSelect().If(temp_EEs.data(),
-                          EEs.data(),
-                          selected_EE_count.data(),
-                          temp_EEs.size(),
-                          [] CUB_RUNTIME_FUNCTION(const Vector4i& EE)
-                          { return EE(0) != -1; });
+        if(temp_EEs.size())
+        {
+            DeviceSelect().If(temp_EEs.data(),
+                              EEs.data(),
+                              selected_EE_count.data(),
+                              temp_EEs.size(),
+                              [] CUB_RUNTIME_FUNCTION(const Vector4i& EE)
+                              { return EE(0) != -1; });
+        }
+        else
+        {
+            checkCudaErrors(cudaMemsetAsync(selected_EE_count.data(), 0, sizeof(IndexT)));
+        }
 
-        PP_count = selected_PP_count;
-        PE_count = selected_PE_count;
-        PT_count = selected_PT_count;
-        EE_count = selected_EE_count;
+        selected_counts.resize(4);
+        kernel_pack_selected_counts<<<1, 1>>>(
+            selected_PP_count.data(),
+            selected_PE_count.data(),
+            selected_PT_count.data(),
+            selected_EE_count.data(),
+            selected_counts.data());
+
+        IndexT h_selected_counts[4] = {0, 0, 0, 0};
+        {
+            corex_profile::ScopedPhase count_phase("contact_filter_detail",
+                                                   "select_count_readback");
+            checkCudaErrors(cudaMemcpy(h_selected_counts,
+                                       selected_counts.data(),
+                                       sizeof(h_selected_counts),
+                                       cudaMemcpyDeviceToHost));
+        }
+        PP_count = h_selected_counts[0];
+        PE_count = h_selected_counts[1];
+        PT_count = h_selected_counts[2];
+        EE_count = h_selected_counts[3];
 
         if(selected_set_diag)
         {
@@ -2155,8 +2831,6 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::filter_toi(FilterTOIInfo& info)
     // kernels in corex_filter (ParallelFor device lambdas are unreliable on CoreX).
     if(toi_size > 0)
     {
-        cudaDeviceSynchronize();
-
         constexpr int block_dim = 256;
         SizeT         toi_seg = 0;
         Float*        d_tois    = tois.data();
@@ -2641,8 +3315,22 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
     // Use AllE to query AllE
     if(Es.size() > 0)
     {
-        muda::KernelLabel label{__FUNCTION__, __FILE__, __LINE__};
-        lbvh_E.detect(
+        corex_profile::ScopedPhase phase(
+            "contact_detect_detail",
+            contact_mask_fast && subscene_mask_fast
+                ? (alpha > 0 ? "query_alle_alle_ccd_fast" : "query_alle_alle_dcd_fast")
+                : "query_alle_alle");
+        if(contact_mask_fast && subscene_mask_fast)
+        {
+            lbvh_E.detect_edges_no_mask(Es,
+                                        info.v2b(),
+                                        info.body_self_collision(),
+                                        candidate_AllE_AllE_pairs);
+        }
+        else
+        {
+            muda::KernelLabel label{__FUNCTION__, __FILE__, __LINE__};
+            lbvh_E.detect(
             [Es          = Es.viewer().name("Es"),
              Ps          = Ps.viewer().name("Ps"),
              dxs         = dxs.viewer().name("dxs"),
@@ -2654,26 +3342,32 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
              v2b = info.v2b().viewer().name("v2b"),
              body_self_collision = info.body_self_collision().viewer().name("body_self_collision"),
              d_hats = info.d_hats().viewer().name("d_hats"),
-             alpha  = alpha] __device__(IndexT i, IndexT j)
+             alpha  = alpha,
+             contact_mask_fast,
+             subscene_mask_fast] __device__(IndexT i, IndexT j)
             {
                 const auto& E0 = Es(i);
                 const auto& E1 = Es(j);
 
-                Vector4i cids = {contact_element_ids(E0[0]),
-                                 contact_element_ids(E0[1]),
-                                 contact_element_ids(E1[0]),
-                                 contact_element_ids(E1[1])};
-
-                Vector4i scids = {subscene_element_ids(E0[0]),
-                                  subscene_element_ids(E0[1]),
-                                  subscene_element_ids(E1[0]),
-                                  subscene_element_ids(E1[1])};
-
                 // discard if the contact is disabled
-                if(!allow_EE_contact(subscene_mask_tabular, scids))
-                    return false;
-                if(!allow_EE_contact(contact_mask_tabular, cids))
-                    return false;
+                if(!subscene_mask_fast)
+                {
+                    Vector4i scids = {subscene_element_ids(E0[0]),
+                                      subscene_element_ids(E0[1]),
+                                      subscene_element_ids(E1[0]),
+                                      subscene_element_ids(E1[1])};
+                    if(!allow_EE_contact(subscene_mask_tabular, scids))
+                        return false;
+                }
+                if(!contact_mask_fast)
+                {
+                    Vector4i cids = {contact_element_ids(E0[0]),
+                                     contact_element_ids(E0[1]),
+                                     contact_element_ids(E1[0]),
+                                     contact_element_ids(E1[1])};
+                    if(!allow_EE_contact(contact_mask_tabular, cids))
+                        return false;
+                }
 
                 // discard if the edges share same vertex
                 if(E0[0] == E1[0] || E0[0] == E1[1] || E0[1] == E1[0] || E0[1] == E1[1])
@@ -2684,6 +3378,8 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
                 if(body_i == body_j && !body_self_collision(body_i))
                     return false;  // skip self-collision for the same body
 
+                if(contact_mask_fast && subscene_mask_fast)
+                    return true;
 
                 Vector3 E0_0  = Ps(E0[0]);
                 Vector3 E0_1  = Ps(E0[1]);
@@ -2705,18 +3401,31 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
 
                 Float expand = d_hat + thickness;
 
-                if(!distance::edge_edge_ccd_broadphase(
-                       E0_0, E0_1, E1_0, E1_1, dE0_0, dE0_1, dE1_0, dE1_1, expand))
-                    return false;
+                if(alpha == 0)
+                {
+                    if(!distance::edge_edge_cd_broadphase(E0_0, E0_1, E1_0, E1_1, expand))
+                        return false;
+                }
+                else
+                {
+                    if(!distance::edge_edge_ccd_broadphase(
+                           E0_0, E0_1, E1_0, E1_1, dE0_0, dE0_1, dE1_0, dE1_1, expand))
+                        return false;
+                }
 
                 return true;
             },
             candidate_AllE_AllE_pairs);
+        }
     }
 
     // Use AllP to query AllT
     if(Fs.size() > 0)
     {
+        corex_profile::ScopedPhase phase(
+            "contact_detect_detail",
+            contact_mask_fast && subscene_mask_fast ? "query_allp_allt_fast"
+                                                    : "query_allp_allt");
         muda::KernelLabel label{__FUNCTION__, __FILE__, __LINE__};
         lbvh_T.query(
             point_aabbs,
@@ -2732,26 +3441,32 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
              v2b = info.v2b().viewer().name("v2b"),
              body_self_collision = info.body_self_collision().viewer().name("body_self_collision"),
              d_hats = info.d_hats().viewer().name("d_hats"),
-             alpha  = alpha] __device__(IndexT i, IndexT j)
+             alpha  = alpha,
+             contact_mask_fast,
+             subscene_mask_fast] __device__(IndexT i, IndexT j)
             {
                 auto V = Vs(i);
                 auto F = Fs(j);
 
-                Vector4i cids = {contact_element_ids(V),
-                                 contact_element_ids(F[0]),
-                                 contact_element_ids(F[1]),
-                                 contact_element_ids(F[2])};
-
-                Vector4i scids = {subscene_element_ids(V),
-                                  subscene_element_ids(F[0]),
-                                  subscene_element_ids(F[1]),
-                                  subscene_element_ids(F[2])};
-
                 // discard if the contact is disabled
-                if(!allow_PT_contact(subscene_mask_tabular, scids))
-                    return false;
-                if(!allow_PT_contact(contact_mask_tabular, cids))
-                    return false;
+                if(!subscene_mask_fast)
+                {
+                    Vector4i scids = {subscene_element_ids(V),
+                                      subscene_element_ids(F[0]),
+                                      subscene_element_ids(F[1]),
+                                      subscene_element_ids(F[2])};
+                    if(!allow_PT_contact(subscene_mask_tabular, scids))
+                        return false;
+                }
+                if(!contact_mask_fast)
+                {
+                    Vector4i cids = {contact_element_ids(V),
+                                     contact_element_ids(F[0]),
+                                     contact_element_ids(F[1]),
+                                     contact_element_ids(F[2])};
+                    if(!allow_PT_contact(contact_mask_tabular, cids))
+                        return false;
+                }
 
                 // discard if the point is on the triangle
                 if(F[0] == V || F[1] == V || F[2] == V)
@@ -2785,8 +3500,17 @@ void StacklessBVHSimplexTrajectoryFilter::Impl::detect(DetectInfo& info)
 
                 Float expand = d_hat + thickness;
 
-                if(!distance::point_triangle_ccd_broadphase(P, F0, F1, F2, dP, dF0, dF1, dF2, expand))
-                    return false;
+                if(alpha == 0)
+                {
+                    if(!distance::point_triangle_cd_broadphase(P, F0, F1, F2, expand))
+                        return false;
+                }
+                else
+                {
+                    if(!distance::point_triangle_ccd_broadphase(
+                           P, F0, F1, F2, dP, dF0, dF1, dF2, expand))
+                        return false;
+                }
 
                 return true;
             },

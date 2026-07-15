@@ -26,6 +26,32 @@ __global__ void kernel_step_forward(int            n,
         qs[i * 12 + k] = q_temps[i * 12 + k] + alpha * dqs[i * 12 + k];
 }
 
+__global__ void kernel_sum_line_search_energy(int           body_count,
+                                              int           reporter_count,
+                                              const IndexT* is_fixed,
+                                              const IndexT* external_kinetic,
+                                              const Float*  kinetic_energy,
+                                              const Float*  shape_energy,
+                                              const Float*  reporter_energy,
+                                              Float*        total_energy)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    Float local = 0.0;
+
+    if(i < body_count)
+    {
+        if(!is_fixed[i] && !external_kinetic[i])
+            local += kinetic_energy[i];
+        local += shape_energy[i];
+    }
+
+    if(i < reporter_count)
+        local += reporter_energy[i];
+
+    if(local != 0.0)
+        atomicAdd(total_energy, local);
+}
+
 REGISTER_SIM_SYSTEM(ABDLineSearchReporter);
 
 void ABDLineSearchReporter::do_build(LineSearchReporter::BuildInfo& info)
@@ -107,7 +133,6 @@ void ABDLineSearchReporter::Impl::compute_energy(LineSearcher::ComputeEnergyInfo
 
     // Compute kinetic energy
     {
-        const int nk = static_cast<int>(body_count);
         body_id_to_kinetic_energy.resize(body_count);
 
         ABDLineSearchReporter::ComputeEnergyInfo this_info;
@@ -115,13 +140,6 @@ void ABDLineSearchReporter::Impl::compute_energy(LineSearcher::ComputeEnergyInfo
         this_info.m_dt       = info.dt();
 
         abd().kinetic->compute_energy(this_info);
-
-        std::vector<Float> hke(nk);
-        checkCudaErrors(cudaMemcpy(hke.data(), body_id_to_kinetic_energy.data(), sizeof(Float) * nk, cudaMemcpyDeviceToHost));
-        Float sum = 0;
-        for(int i = 0; i < nk; ++i)
-            sum += hke[i];
-        checkCudaErrors(cudaMemcpy(abd_kinetic_energy.data(), &sum, sizeof(Float), cudaMemcpyHostToDevice));
     }
 
     // Compute shape energy
@@ -138,14 +156,6 @@ void ABDLineSearchReporter::Impl::compute_energy(LineSearcher::ComputeEnergyInfo
             cst->compute_energy(this_info);
         }
 
-        int ns = static_cast<int>(body_id_to_shape_energy.size());
-        std::vector<Float> hse(ns);
-        checkCudaErrors(cudaMemcpy(hse.data(), body_id_to_shape_energy.data(),
-                                   sizeof(Float) * ns, cudaMemcpyDeviceToHost));
-        Float sum = 0;
-        for(int i = 0; i < ns; ++i)
-            sum += hse[i];
-        checkCudaErrors(cudaMemcpy(abd_shape_energy.data(), &sum, sizeof(Float), cudaMemcpyHostToDevice));
     }
 
     // Collect the energy from other reporters
@@ -171,30 +181,33 @@ void ABDLineSearchReporter::Impl::compute_energy(LineSearcher::ComputeEnergyInfo
             R->compute_energy(this_info);
         }
 
-        // Compute the total energy from all reporters
-        int nr = static_cast<int>(reporter_energies.size());
-        Float sum = 0;
-        if(nr > 0)
-        {
-            std::vector<Float> hre(nr);
-            checkCudaErrors(cudaMemcpy(hre.data(), reporter_energies.data(),
-                                       sizeof(Float) * nr, cudaMemcpyDeviceToHost));
-            for(int i = 0; i < nr; ++i)
-                sum += hre[i];
-        }
-        checkCudaErrors(cudaMemcpy(total_reporter_energy.data(), &sum, sizeof(Float), cudaMemcpyHostToDevice));
     }
 
-    // Copy from device to host
-    Float K, shape_E, other_E;
-    abd_kinetic_energy.view().copy_to(&K);
-    abd_shape_energy.view().copy_to(&shape_E);
-    total_reporter_energy.view().copy_to(&other_E);
+    const int n_body     = static_cast<int>(body_count);
+    const int n_reporter = static_cast<int>(reporter_energies.size());
+    const int n_sum      = std::max(n_body, n_reporter);
 
-    Float E = K + shape_E + other_E;
+    checkCudaErrors(cudaMemset(total_reporter_energy.data(), 0, sizeof(Float)));
+    if(n_sum > 0)
+    {
+        constexpr int block = 256;
+        int           grid  = (n_sum + block - 1) / block;
+        kernel_sum_line_search_energy<<<grid, block>>>(n_body,
+                                                       n_reporter,
+                                                       abd().body_id_to_is_fixed.data(),
+                                                       abd().body_id_to_external_kinetic.data(),
+                                                       body_id_to_kinetic_energy.data(),
+                                                       body_id_to_shape_energy.data(),
+                                                       reporter_energies.data(),
+                                                       total_reporter_energy.data());
+        checkCudaErrors(cudaGetLastError());
+    }
+
+    Float E = 0.0;
+    total_reporter_energy.view().copy_to(&E);
 
     if(std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM"))
-        logger::info("[corex_trace][energy] K={}, shape={}, other={}, total={}", K, shape_E, other_E, E);
+        logger::info("[corex_trace][energy] total={}", E);
 
     info.energy(E);
 }

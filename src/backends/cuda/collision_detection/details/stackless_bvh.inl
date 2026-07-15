@@ -306,7 +306,8 @@ static __global__ void kernel_refitIntNodes(int             size,
                                             uint32_t*       flags)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if(idx >= size || size <= 1) return;
+    if(idx >= size || size <= 1)
+        return;
 
     int cur = static_cast<int>(ext_par[idx]);
 
@@ -710,7 +711,8 @@ inline void StacklessBVH::Impl::refit(muda::CBufferView<AABB> aabbs)
     {
         thrust::fill(thrust::device, flags.data(), flags.data() + flags.size(), 0);
 
-        int block = 256, grid = (numObjs + block - 1) / block;
+        int block = 256;
+        int grid  = (numObjs + block - 1) / block;
         corex_bvh::kernel_refitIntNodes<<<grid, block>>>(numObjs,
                                                          RAW_PTR(ext_par),
                                                          RAW_PTR(ext_aabb),
@@ -932,6 +934,326 @@ void StacklessBVH::Impl::StacklessCDSharedSelf(Pred               pred,
                     if(done)
                         break;
                 }
+	        });
+}
+
+inline void StacklessBVH::Impl::StacklessCDSharedSelfEdgesNoMask(
+    muda::CBufferView<Vector2i> edges,
+    muda::CBufferView<IndexT>   vertex_to_body,
+    muda::CBufferView<IndexT>   body_self_collision,
+    muda::VarView<int>          cpNum,
+    muda::BufferView<Vector2i>  buffer)
+{
+    using namespace muda;
+    using namespace culbvh;
+
+    auto numQuery = static_cast<int>(ext_aabb.size());
+    auto numObjs  = numQuery;
+    auto BlockDim = K_THREADS;
+    auto GridDim  = (numQuery + BlockDim - 1) / BlockDim;
+
+    Launch(GridDim, BlockDim)
+        .apply(
+            [Size       = numQuery,
+             _box       = objs.viewer().name("_box"),
+             intSize    = numObjs - 1,
+             numObjs    = numObjs,
+             _lvs_idx   = ext_idx.viewer().name("_lvs_idx"),
+             _nodes     = nodes.viewer().name("_nodes"),
+             edges      = edges.viewer().name("edges"),
+             v2b        = vertex_to_body.viewer().name("v2b"),
+             body_self_collision = body_self_collision.viewer().name("body_self_collision"),
+             resCounter = cpNum.viewer().name("resCounter"),
+             res        = buffer.viewer().name("res")] __device__()
+            {
+                int  tid    = blockIdx.x * blockDim.x + threadIdx.x;
+                bool active = tid < Size;
+                int  idx;
+                Vector2i E0;
+                IndexT body_i = -1;
+                AABB bv;
+                if(active)
+                {
+                    idx    = _lvs_idx(tid);
+                    bv     = _box(idx);
+                    E0     = edges(idx);
+                    body_i = v2b(E0[0]);
+                }
+
+                __shared__ int2 sharedRes[MAX_RES_PER_BLOCK];
+                __shared__ int  sharedCounter;
+                __shared__ int  sharedGlobalIdx;
+                if(threadIdx.x == 0)
+                    sharedCounter = 0;
+
+                int  st = 0;
+                Node node;
+                const int MaxIter = numObjs * 2;
+
+                while(true)
+                {
+                    __syncthreads();
+                    if(active)
+                    {
+                        int inner_I = 0;
+                        for(; inner_I < MaxIter; inner_I++)
+                        {
+                            if(st == -1)
+                                break;
+
+                            node.lc     = _nodes(st).lc;
+                            node.escape = _nodes(st).escape;
+                            node.bound  = _nodes(st).bound;
+
+                            if(node.bound.intersects(bv))
+                            {
+                                if(node.lc == -1)
+                                {
+                                    if(tid < st - intSize)
+                                    {
+                                        const int j  = _lvs_idx(st - intSize);
+                                        const auto E1 = edges(j);
+
+                                        const bool shared_vertex =
+                                            E0[0] == E1[0] || E0[0] == E1[1]
+                                            || E0[1] == E1[0] || E0[1] == E1[1];
+                                        bool accept = !shared_vertex;
+                                        if(accept)
+                                        {
+                                            const auto body_j = v2b(E1[0]);
+                                            accept = !(body_i == body_j
+                                                       && !body_self_collision(body_i));
+                                        }
+                                        if(accept)
+                                        {
+                                            auto pair = make_ordered_pair(idx, j);
+                                            int  sIdx = atomicAdd(&sharedCounter, 1);
+                                            if(sIdx >= MAX_RES_PER_BLOCK)
+                                                break;
+
+                                            sharedRes[sIdx] = pair;
+                                        }
+                                    }
+                                    st = node.escape;
+                                }
+                                else
+                                {
+                                    st = node.lc;
+                                }
+                            }
+                            else
+                            {
+                                st = node.escape;
+                            }
+                        }
+
+                        MUDA_ASSERT(inner_I < MaxIter,
+                                    "Exceeded max iteration in stackless traversal, %d (Max=%d), numObj=(%d)",
+                                    inner_I,
+                                    MaxIter,
+                                    numObjs);
+                    }
+
+                    __syncthreads();
+                    int totalResInBlock = min(sharedCounter, MAX_RES_PER_BLOCK);
+
+                    if(threadIdx.x == 0)
+                        sharedGlobalIdx = atomicAdd(resCounter.data(), totalResInBlock);
+
+                    __syncthreads();
+
+                    const int globalIdx = sharedGlobalIdx;
+
+                    if(threadIdx.x == 0)
+                        sharedCounter = 0;
+
+                    bool done = totalResInBlock < MAX_RES_PER_BLOCK;
+
+                    SafeCopyTo(sharedRes,
+                               totalResInBlock,
+                               res.data(),
+                               globalIdx,
+                               static_cast<int>(res.total_size()));
+
+                    if(done)
+                        break;
+                }
+            });
+}
+
+inline void StacklessBVH::Impl::StacklessCDSharedOtherPointsTrianglesNoMask(
+    muda::CBufferView<AABB>     point_aabbs,
+    muda::CBufferView<IndexT>   surf_vertices,
+    muda::CBufferView<Vector3i> surf_triangles,
+    muda::CBufferView<Vector3>  positions,
+    muda::CBufferView<Vector3>  displacements,
+    muda::CBufferView<Float>    thicknesses,
+    muda::CBufferView<Float>    d_hats,
+    Float                       alpha,
+    muda::CBufferView<IndexT>   vertex_to_body,
+    muda::CBufferView<IndexT>   body_self_collision,
+    muda::VarView<int>          cpNum,
+    muda::BufferView<Vector2i>  buffer)
+{
+    using namespace muda;
+    using namespace culbvh;
+
+    auto numQuery = static_cast<int>(point_aabbs.size());
+    auto numObjs  = static_cast<int>(ext_aabb.size());
+    auto BlockDim = K_THREADS;
+    auto GridDim  = (numQuery + BlockDim - 1) / BlockDim;
+
+    Launch(GridDim, BlockDim)
+        .apply(
+            [Size       = numQuery,
+             _box       = point_aabbs.viewer().name("_box"),
+             intSize    = numObjs - 1,
+             numObjs    = numObjs,
+             _lvs_idx   = ext_idx.viewer().name("_lvs_idx"),
+             _nodes     = nodes.viewer().name("_nodes"),
+             Vs         = surf_vertices.viewer().name("Vs"),
+             Fs         = surf_triangles.viewer().name("Fs"),
+             Ps         = positions.viewer().name("positions"),
+             dxs        = displacements.viewer().name("displacements"),
+             thicknesses = thicknesses.viewer().name("thicknesses"),
+             d_hats     = d_hats.viewer().name("d_hats"),
+             alpha,
+             v2b        = vertex_to_body.viewer().name("v2b"),
+             body_self_collision = body_self_collision.viewer().name("body_self_collision"),
+             resCounter = cpNum.viewer().name("resCounter"),
+             res        = buffer.viewer().name("res")] __device__()
+            {
+                int  tid    = blockIdx.x * blockDim.x + threadIdx.x;
+                bool active = tid < Size;
+                int  idx;
+                AABB bv;
+                if(active)
+                {
+                    idx = tid;
+                    bv  = _box(idx);
+                }
+
+                __shared__ int2 sharedRes[MAX_RES_PER_BLOCK];
+                __shared__ int  sharedCounter;
+                __shared__ int  sharedGlobalIdx;
+                if(threadIdx.x == 0)
+                    sharedCounter = 0;
+
+                int  st = 0;
+                Node node;
+                const int MaxIter = numObjs * 2;
+
+                while(true)
+                {
+                    __syncthreads();
+                    if(active)
+                    {
+                        int inner_I = 0;
+                        for(; inner_I < MaxIter; inner_I++)
+                        {
+                            if(st == -1)
+                                break;
+
+                            node.lc     = _nodes(st).lc;
+                            node.escape = _nodes(st).escape;
+                            node.bound  = _nodes(st).bound;
+
+                            if(node.bound.intersects(bv))
+                            {
+                                if(node.lc == -1)
+                                {
+                                    const int j = _lvs_idx(st - intSize);
+
+                                    const auto V = Vs(idx);
+                                    const auto F = Fs(j);
+                                    bool accept =
+                                        !(F[0] == V || F[1] == V || F[2] == V);
+                                    if(accept)
+                                    {
+                                        const auto body_i = v2b(V);
+                                        const auto body_j = v2b(F[0]);
+                                        accept = !(body_i == body_j
+                                                   && !body_self_collision(body_i));
+                                    }
+                                    if(accept)
+                                    {
+                                        Vector3 P  = Ps(V);
+                                        Vector3 dP = alpha * dxs(V);
+
+                                        Vector3 F0  = Ps(F[0]);
+                                        Vector3 F1  = Ps(F[1]);
+                                        Vector3 F2  = Ps(F[2]);
+                                        Vector3 dF0 = alpha * dxs(F[0]);
+                                        Vector3 dF1 = alpha * dxs(F[1]);
+                                        Vector3 dF2 = alpha * dxs(F[2]);
+
+                                        Float thickness = PT_thickness(
+                                            thicknesses(V),
+                                            thicknesses(F[0]),
+                                            thicknesses(F[1]),
+                                            thicknesses(F[2]));
+                                        Float d_hat = PT_d_hat(d_hats(V),
+                                                               d_hats(F[0]),
+                                                               d_hats(F[1]),
+                                                               d_hats(F[2]));
+                                        accept = distance::point_triangle_ccd_broadphase(
+                                            P, F0, F1, F2, dP, dF0, dF1, dF2, d_hat + thickness);
+                                    }
+                                    if(accept)
+                                    {
+                                        int sIdx = atomicAdd(&sharedCounter, 1);
+                                        if(sIdx >= MAX_RES_PER_BLOCK)
+                                            break;
+
+                                        sharedRes[sIdx] = int2{idx, j};
+                                    }
+
+                                    st = node.escape;
+                                }
+                                else
+                                {
+                                    st = node.lc;
+                                }
+                            }
+                            else
+                            {
+                                st = node.escape;
+                            }
+                        }
+
+                        MUDA_ASSERT(inner_I < MaxIter,
+                                    "Exceeded max iteration in stackless traversal, %d (Max=%d), numObj=(%d)",
+                                    inner_I,
+                                    MaxIter,
+                                    numObjs);
+                    }
+
+                    __syncthreads();
+                    int totalResInBlock = min(sharedCounter, MAX_RES_PER_BLOCK);
+
+                    if(threadIdx.x == 0)
+                        sharedGlobalIdx = atomicAdd(resCounter.data(), totalResInBlock);
+
+                    __syncthreads();
+
+                    const int globalIdx = sharedGlobalIdx;
+
+                    if(threadIdx.x == 0)
+                        sharedCounter = 0;
+
+                    __syncthreads();
+
+                    bool done = totalResInBlock < MAX_RES_PER_BLOCK;
+
+                    SafeCopyTo(sharedRes,
+                               totalResInBlock,
+                               res.data(),
+                               globalIdx,
+                               static_cast<int>(res.total_size()));
+
+                    if(done)
+                        break;
+                }
             });
 }
 
@@ -1104,7 +1426,7 @@ void StacklessBVH::detect(Pred callback, QueryBuffer& qbuffer)
     auto do_query = [&]
     {
         // clear counter
-        cudaMemset(qbuffer.m_cpNum.data(), 0, sizeof(int));
+        cudaMemsetAsync(qbuffer.m_cpNum.data(), 0, sizeof(int));
 
         m_impl.StacklessCDSharedSelf(
             callback, qbuffer.m_cpNum.view(), qbuffer.m_pairs.view());
@@ -1119,6 +1441,74 @@ void StacklessBVH::detect(Pred callback, QueryBuffer& qbuffer)
     {
         qbuffer.m_pairs.resize(h_cp_num * m_impl.config.reserve_ratio);
         do_query();
+    }
+
+    UIPC_ASSERT(h_cp_num >= 0, "fatal error");
+    qbuffer.m_size = h_cp_num;
+}
+
+inline bool StacklessBVH::detect_edges_no_mask_launch(
+    muda::CBufferView<Vector2i> edges,
+    muda::CBufferView<IndexT>   vertex_to_body,
+    muda::CBufferView<IndexT>   body_self_collision,
+    QueryBuffer&                qbuffer)
+{
+    using namespace muda;
+
+    if(m_impl.objs.size() == 0)
+    {
+        qbuffer.m_size = 0;
+        return false;
+    }
+
+    if(qbuffer.m_pairs.size() == 0)
+        qbuffer.m_pairs.resize(128 * 1024);
+
+    {
+        {
+            corex_profile::ScopedPhase phase("bvh_query_detail",
+                                             "edge_nomask_memset_counter");
+            cudaMemsetAsync(qbuffer.m_cpNum.data(), 0, sizeof(int));
+        }
+
+        {
+            corex_profile::ScopedPhase phase("bvh_query_detail", "edge_nomask_kernel");
+            m_impl.StacklessCDSharedSelfEdgesNoMask(edges,
+                                                    vertex_to_body,
+                                                    body_self_collision,
+                                                    qbuffer.m_cpNum.view(),
+                                                    qbuffer.m_pairs.view());
+        }
+    }
+
+    return true;
+}
+
+inline void StacklessBVH::detect_edges_no_mask(
+    muda::CBufferView<Vector2i> edges,
+    muda::CBufferView<IndexT>   vertex_to_body,
+    muda::CBufferView<IndexT>   body_self_collision,
+    QueryBuffer&                qbuffer)
+{
+    auto launched = detect_edges_no_mask_launch(edges,
+                                                vertex_to_body,
+                                                body_self_collision,
+                                                qbuffer);
+    if(!launched)
+        return;
+
+    int h_cp_num = 0;
+    {
+        corex_profile::ScopedPhase phase("bvh_query_detail", "edge_nomask_count_readback");
+        h_cp_num = qbuffer.m_cpNum;
+    }
+    if(h_cp_num > qbuffer.m_pairs.size())
+    {
+        qbuffer.m_pairs.resize(h_cp_num * m_impl.config.reserve_ratio);
+        detect_edges_no_mask_launch(edges,
+                                    vertex_to_body,
+                                    body_self_collision,
+                                    qbuffer);
     }
 
     UIPC_ASSERT(h_cp_num >= 0, "fatal error");
@@ -1145,6 +1535,108 @@ inline void StacklessBVH::QueryBuffer::build(muda::CBufferView<AABB> aabbs)
     thrust::sort_by_key(null_stream, d_queryMtCode, d_queryMtCode + numQuery, d_querySortedId);
 }
 
+inline bool StacklessBVH::query_points_triangles_no_mask_launch(
+    muda::CBufferView<AABB>     point_aabbs,
+    muda::CBufferView<IndexT>   surf_vertices,
+    muda::CBufferView<Vector3i> surf_triangles,
+    muda::CBufferView<Vector3>  positions,
+    muda::CBufferView<Vector3>  displacements,
+    muda::CBufferView<Float>    thicknesses,
+    muda::CBufferView<Float>    d_hats,
+    Float                       alpha,
+    muda::CBufferView<IndexT>   vertex_to_body,
+    muda::CBufferView<IndexT>   body_self_collision,
+    QueryBuffer&                qbuffer)
+{
+    if(point_aabbs.size() == 0 || m_impl.objs.size() == 0)
+    {
+        qbuffer.m_size = 0;
+        return false;
+    }
+
+    using namespace muda;
+    if(qbuffer.m_pairs.size() == 0)
+        qbuffer.m_pairs.resize(50 * 1024);
+
+    {
+        {
+            corex_profile::ScopedPhase phase("bvh_query_detail",
+                                             "pt_nomask_memset_counter");
+            cudaMemsetAsync(qbuffer.m_cpNum.data(), 0, sizeof(int));
+        }
+
+        {
+            corex_profile::ScopedPhase phase("bvh_query_detail", "pt_nomask_kernel");
+            m_impl.StacklessCDSharedOtherPointsTrianglesNoMask(point_aabbs,
+                                                               surf_vertices,
+                                                               surf_triangles,
+                                                               positions,
+                                                               displacements,
+                                                               thicknesses,
+                                                               d_hats,
+                                                               alpha,
+                                                               vertex_to_body,
+                                                               body_self_collision,
+                                                               qbuffer.m_cpNum.view(),
+                                                               qbuffer.m_pairs.view());
+        }
+    }
+
+    return true;
+}
+
+inline void StacklessBVH::query_points_triangles_no_mask(
+    muda::CBufferView<AABB>     point_aabbs,
+    muda::CBufferView<IndexT>   surf_vertices,
+    muda::CBufferView<Vector3i> surf_triangles,
+    muda::CBufferView<Vector3>  positions,
+    muda::CBufferView<Vector3>  displacements,
+    muda::CBufferView<Float>    thicknesses,
+    muda::CBufferView<Float>    d_hats,
+    Float                       alpha,
+    muda::CBufferView<IndexT>   vertex_to_body,
+    muda::CBufferView<IndexT>   body_self_collision,
+    QueryBuffer&                qbuffer)
+{
+    auto launched = query_points_triangles_no_mask_launch(point_aabbs,
+                                                          surf_vertices,
+                                                          surf_triangles,
+                                                          positions,
+                                                          displacements,
+                                                          thicknesses,
+                                                          d_hats,
+                                                          alpha,
+                                                          vertex_to_body,
+                                                          body_self_collision,
+                                                          qbuffer);
+    if(!launched)
+        return;
+
+    int h_cp_num = 0;
+    {
+        corex_profile::ScopedPhase phase("bvh_query_detail", "pt_nomask_count_readback");
+        h_cp_num = qbuffer.m_cpNum;
+    }
+    if(h_cp_num > qbuffer.m_pairs.size())
+    {
+        qbuffer.m_pairs.resize(h_cp_num * m_impl.config.reserve_ratio);
+        query_points_triangles_no_mask_launch(point_aabbs,
+                                              surf_vertices,
+                                              surf_triangles,
+                                              positions,
+                                              displacements,
+                                              thicknesses,
+                                              d_hats,
+                                              alpha,
+                                              vertex_to_body,
+                                              body_self_collision,
+                                              qbuffer);
+    }
+
+    UIPC_ASSERT(h_cp_num >= 0, "fatal error");
+    qbuffer.m_size = h_cp_num;
+}
+
 template <typename Pred>
 void StacklessBVH::query(muda::CBufferView<AABB> aabbs, Pred callback, QueryBuffer& qbuffer)
 {
@@ -1162,7 +1654,7 @@ void StacklessBVH::query(muda::CBufferView<AABB> aabbs, Pred callback, QueryBuff
     auto do_query = [&]
     {
         // clear counter
-        cudaMemset(qbuffer.m_cpNum.data(), 0, sizeof(int));
+        cudaMemsetAsync(qbuffer.m_cpNum.data(), 0, sizeof(int));
 
         m_impl.StacklessCDSharedOther(callback,
                                       aabbs,
@@ -2182,7 +2674,7 @@ void StacklessBVH::detect(Pred callback, QueryBuffer& qbuffer)
     auto do_query = [&]
     {
         // clear counter
-        BufferLaunch().fill(qbuffer.m_cpNum.view(), 0);
+        cudaMemsetAsync(qbuffer.m_cpNum.data(), 0, sizeof(int));
 
         m_impl.StacklessCDSharedSelf(
             callback, qbuffer.m_cpNum.view(), qbuffer.m_pairs.view());
@@ -2238,7 +2730,7 @@ void StacklessBVH::query(muda::CBufferView<AABB> aabbs, Pred callback, QueryBuff
     auto do_query = [&]
     {
         // clear counter
-        BufferLaunch().fill(qbuffer.m_cpNum.view(), 0);
+        cudaMemsetAsync(qbuffer.m_cpNum.data(), 0, sizeof(int));
 
         m_impl.StacklessCDSharedOther(callback,
                                       aabbs,

@@ -14,6 +14,16 @@ void DyTopoEffectReceiver::do_build()
 
 void DyTopoEffectReceiver::do_init(InitInfo&) {}
 
+bool DyTopoEffectReceiver::do_accept_raw_full_gradient() const
+{
+    return false;
+}
+
+bool DyTopoEffectReceiver::do_accept_raw_full_hessian() const
+{
+    return false;
+}
+
 void DyTopoEffectReceiver::init()
 {
     InitInfo info;
@@ -30,5 +40,15 @@ void DyTopoEffectReceiver::report(GlobalDyTopoEffectManager::ClassifyInfo& info)
 void DyTopoEffectReceiver::receive(GlobalDyTopoEffectManager::ClassifiedDyTopoEffectInfo& info)
 {
     do_receive(info);
+}
+
+bool DyTopoEffectReceiver::accept_raw_full_hessian() const
+{
+    return do_accept_raw_full_hessian();
+}
+
+bool DyTopoEffectReceiver::accept_raw_full_gradient() const
+{
+    return do_accept_raw_full_gradient();
 }
 }  // namespace uipc::backend::cuda

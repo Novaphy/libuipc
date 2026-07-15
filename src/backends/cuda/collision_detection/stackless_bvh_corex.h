@@ -16,6 +16,10 @@
 #include <uipc/common/logger.h>
 #include <type_define.h>
 #include <collision_detection/aabb.h>
+#include <utils/corex_phase_profile.h>
+#include <utils/codim_thickness.h>
+#include <utils/distance.h>
+#include <utils/primitive_d_hat.h>
 #include <muda/buffer.h>
 
 #include <thrust/device_vector.h>
@@ -114,8 +118,7 @@ class StacklessBVH
      * @brief Refit the Stackless BVH from given AABBs, reusing the topology
      * created by the previous build().
      *
-     * The primitive count must match the previous build. A missing or mismatched
-     * topology is treated as a caller error instead of a hidden rebuild.
+     * The primitive count must match the previous build.
      */
     void refit(muda::CBufferView<AABB> aabbs);
 
@@ -128,6 +131,16 @@ class StacklessBVH
     template <typename Pred = DefaultQueryCallback>
     void detect(Pred callback, QueryBuffer& qbuffer);
 
+    void detect_edges_no_mask(muda::CBufferView<Vector2i> edges,
+                              muda::CBufferView<IndexT>   vertex_to_body,
+                              muda::CBufferView<IndexT>   body_self_collision,
+                              QueryBuffer&                qbuffer);
+
+    bool detect_edges_no_mask_launch(muda::CBufferView<Vector2i> edges,
+                                     muda::CBufferView<IndexT>   vertex_to_body,
+                                     muda::CBufferView<IndexT>   body_self_collision,
+                                     QueryBuffer&                qbuffer);
+
 
     /*
     * @brief Query overlapping AABBs from external AABBs
@@ -138,6 +151,30 @@ class StacklessBVH
     */
     template <typename Pred = DefaultQueryCallback>
     void query(muda::CBufferView<AABB> aabbs, Pred callback, QueryBuffer& qbuffer);
+
+    void query_points_triangles_no_mask(muda::CBufferView<AABB>     point_aabbs,
+                                        muda::CBufferView<IndexT>   surf_vertices,
+                                        muda::CBufferView<Vector3i> surf_triangles,
+                                        muda::CBufferView<Vector3>  positions,
+                                        muda::CBufferView<Vector3>  displacements,
+                                        muda::CBufferView<Float>    thicknesses,
+                                        muda::CBufferView<Float>    d_hats,
+                                        Float                       alpha,
+                                        muda::CBufferView<IndexT>   vertex_to_body,
+                                        muda::CBufferView<IndexT>   body_self_collision,
+                                        QueryBuffer&                qbuffer);
+
+    bool query_points_triangles_no_mask_launch(muda::CBufferView<AABB>     point_aabbs,
+                                               muda::CBufferView<IndexT>   surf_vertices,
+                                               muda::CBufferView<Vector3i> surf_triangles,
+                                               muda::CBufferView<Vector3>  positions,
+                                               muda::CBufferView<Vector3>  displacements,
+                                               muda::CBufferView<Float>    thicknesses,
+                                               muda::CBufferView<Float>    d_hats,
+                                               Float                       alpha,
+                                               muda::CBufferView<IndexT>   vertex_to_body,
+                                               muda::CBufferView<IndexT>   body_self_collision,
+                                               QueryBuffer&                qbuffer);
 
 
   public:
@@ -151,6 +188,25 @@ class StacklessBVH
         void StacklessCDSharedSelf(Pred                       pred,
                                    muda::VarView<int>         cpNum,
                                    muda::BufferView<Vector2i> buffer);
+        void StacklessCDSharedSelfEdgesNoMask(
+            muda::CBufferView<Vector2i> edges,
+            muda::CBufferView<IndexT>   vertex_to_body,
+            muda::CBufferView<IndexT>   body_self_collision,
+            muda::VarView<int>          cpNum,
+            muda::BufferView<Vector2i>  buffer);
+        void StacklessCDSharedOtherPointsTrianglesNoMask(
+            muda::CBufferView<AABB>     point_aabbs,
+            muda::CBufferView<IndexT>   surf_vertices,
+            muda::CBufferView<Vector3i> surf_triangles,
+            muda::CBufferView<Vector3>  positions,
+            muda::CBufferView<Vector3>  displacements,
+            muda::CBufferView<Float>    thicknesses,
+            muda::CBufferView<Float>    d_hats,
+            Float                       alpha,
+            muda::CBufferView<IndexT>   vertex_to_body,
+            muda::CBufferView<IndexT>   body_self_collision,
+            muda::VarView<int>          cpNum,
+            muda::BufferView<Vector2i>  buffer);
         template <typename Pred>
         void StacklessCDSharedOther(Pred                       pred,
                                     muda::CBufferView<AABB>    query_aabbs,
@@ -171,8 +227,6 @@ class StacklessBVH
         void        calcIntNodeOrders(int size);
         void        updateBvhExtNodeLinks(int size);
         void        reorderNode(int intSize);
-
-
         muda::CBufferView<AABB> objs;  // external AABBs, should be kept valid
         muda::DeviceVar<AABB>      scene_box;  // external bounding boxes
         muda::DeviceBuffer<uint32_t> flags;

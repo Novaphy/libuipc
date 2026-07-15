@@ -13,6 +13,7 @@
 #include <affine_body/abd_jacobi_matrix_corex.h>
 #include <utils/report_extent_check.h>
 #include <utils/corex_phase_profile.h>
+#include <algorithm>
 #include <cstdlib>
 #include <vector>
 
@@ -36,11 +37,11 @@ REGISTER_SIM_SYSTEM(ABDLinearSubsystem);
 
 // ref: https://github.com/spiriMirror/libuipc/issues/271
 constexpr U64 ABDLinearSubsystemUID = 0ull;
+constexpr int ABD_BODY_H3X3_BLOCK_COUNT = 10;
 
 static bool corex_abd_assemble_sync_enabled()
 {
-    return std::getenv("UIPC_COREX_ABD_ASSEMBLE_ASYNC") == nullptr
-           || std::getenv("UIPC_COREX_ABD_ASSEMBLE_SYNC") != nullptr
+    return std::getenv("UIPC_COREX_ABD_ASSEMBLE_SYNC") != nullptr
            || std::getenv("UIPC_COREX_TRACE_ABD_ASSEMBLE") != nullptr
            || std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
 }
@@ -152,12 +153,13 @@ static __global__ void kernel_abd_assemble_hessians(int n,
     }
 
     constexpr int BLK = 3;
-    int base_triplet = I * 16;
+    int base_triplet = I * ABD_BODY_H3X3_BLOCK_COUNT;
+    int out = 0;
     for(int ii = 0; ii < 4; ++ii)
     {
-        for(int jj = 0; jj < 4; ++jj)
+        for(int jj = ii; jj < 4; ++jj)
         {
-            int idx     = base_triplet + ii * 4 + jj;
+            int idx     = base_triplet + out++;
             dst_rows[idx] = I * 4 + ii;
             dst_cols[idx] = I * 4 + jj;
             // dst_vals[idx] is column-major Matrix3x3: element (r,c) at c*3+r
@@ -299,12 +301,13 @@ static __global__ void kernel_abd_assemble_hessians_direct_kinetic(
                 for(int r = 0; r < 3; ++r)
                     local_h[(jj * 3 + c) * 12 + (ii * 3 + r)] = Float(0);
 
-    int base_triplet = I * 16;
+    int base_triplet = I * ABD_BODY_H3X3_BLOCK_COUNT;
+    int out = 0;
     for(int ii = 0; ii < 4; ++ii)
     {
-        for(int jj = 0; jj < 4; ++jj)
+        for(int jj = ii; jj < 4; ++jj)
         {
-            int idx       = base_triplet + ii * 4 + jj;
+            int idx       = base_triplet + out++;
             dst_rows[idx] = I * 4 + ii;
             dst_cols[idx] = I * 4 + jj;
             Float* block_ptr = reinterpret_cast<Float*>(dst_vals + idx);
@@ -324,6 +327,7 @@ static __global__ void kernel_abd_assemble_bdf1_direct(int n,
                                                        const ABDJacobiDyadicMass* masses,
                                                        const Vector12* shape_gradient,
                                                        const Matrix12x12* shape_hessian,
+                                                       bool has_shape,
                                                        Float* gradients,
                                                        Matrix12x12* diag_hessian,
                                                        int* dst_rows,
@@ -348,12 +352,14 @@ static __global__ void kernel_abd_assemble_bdf1_direct(int n,
     if(!fixed && !external_kinetic)
         corex_abd_mass_mul_values(masses[I], dq, kinetic_g);
 
-    const Vector12& shape_g = shape_gradient[I];
     for(int k = 0; k < 12; ++k)
-        gradients[grad_base + k] = fixed ? Float(0) : shape_g(k) + kinetic_g[k];
+    {
+        Float shape_g = has_shape ? shape_gradient[I](k) : Float(0);
+        gradients[grad_base + k] = fixed ? Float(0) : shape_g + kinetic_g[k];
+    }
 
     Float        local_h[12 * 12];
-    const Float* shape_ptr = reinterpret_cast<const Float*>(shape_hessian + I);
+    const Float* shape_ptr = has_shape ? reinterpret_cast<const Float*>(shape_hessian + I) : nullptr;
     for(int c = 0; c < 12; ++c)
     {
         for(int r = 0; r < 12; ++r)
@@ -362,7 +368,7 @@ static __global__ void kernel_abd_assemble_bdf1_direct(int n,
             if(fixed)
                 local_h[cm_idx] = (r == c) ? Float(1) : Float(0);
             else
-                local_h[cm_idx] = shape_ptr[cm_idx];
+                local_h[cm_idx] = has_shape ? shape_ptr[cm_idx] : Float(0);
         }
     }
 
@@ -390,12 +396,13 @@ static __global__ void kernel_abd_assemble_bdf1_direct(int n,
     }
 
     constexpr int BLK = 3;
-    int           base_triplet = I * 16;
+    int           base_triplet = I * ABD_BODY_H3X3_BLOCK_COUNT;
+    int           out = 0;
     for(int ii = 0; ii < 4; ++ii)
     {
-        for(int jj = 0; jj < 4; ++jj)
+        for(int jj = ii; jj < 4; ++jj)
         {
-            int idx = base_triplet + ii * 4 + jj;
+            int idx = base_triplet + out++;
             dst_rows[idx] = I * 4 + ii;
             dst_cols[idx] = I * 4 + jj;
             Float* block_ptr = reinterpret_cast<Float*>(dst_vals + idx);
@@ -774,13 +781,15 @@ void ABDLinearSubsystem::Impl::report_extent(GlobalLinearSystem::DiagExtentInfo&
     auto has_complement =
         has_flags(info.component_flags(), GlobalLinearSystem::ComponentFlags::Complement);
 
-    SizeT H12x12_count = 0;
+    SizeT body_H12x12_count = 0;
+    SizeT reporter_H12x12_count = 0;
+    SizeT dytopo_H12x12_count = 0;
 
     if(has_complement)
     {
         // 1) Body hessian: kinetic + shape
         if(!info.gradient_only())
-            H12x12_count += abd().body_count();
+            body_H12x12_count += abd().body_count();
 
         // 2) Reporters
         auto reporter_view = reporters.view();
@@ -801,19 +810,20 @@ void ABDLinearSubsystem::Impl::report_extent(GlobalLinearSystem::DiagExtentInfo&
         reporter_hessian_offsets_counts.scan();
 
         if(!info.gradient_only())
-            H12x12_count += reporter_hessian_offsets_counts.total_count();
+            reporter_H12x12_count += reporter_hessian_offsets_counts.total_count();
     }
 
 
     if(dytopo_effect_receiver && !info.gradient_only())
     {
 #if !(defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE)
-        H12x12_count += dytopo_effect_receiver->hessians().triplet_count();
+        dytopo_H12x12_count += dytopo_effect_receiver->hessians().triplet_count();
 #endif
     }
 
 
-    auto H3x3_count = H12x12_count * (4 * 4);
+    auto H3x3_count = body_H12x12_count * ABD_BODY_H3X3_BLOCK_COUNT
+                    + (reporter_H12x12_count + dytopo_H12x12_count) * (4 * 4);
 
     // Debug: check whether kinetic+shape (Complement part) is considered.
     // Print only once per process to avoid log spam.
@@ -822,11 +832,14 @@ void ABDLinearSubsystem::Impl::report_extent(GlobalLinearSystem::DiagExtentInfo&
     {
         logger::info("[debug] ABDLinearSubsystem::report_extent "
                      "component_flags={}, gradient_only={}, has_complement={}, "
-                     "H12x12_count={}, H3x3_count={}, dof_count={}",
+                     "body_H12x12_count={}, reporter_H12x12_count={}, "
+                     "dytopo_H12x12_count={}, H3x3_count={}, dof_count={}",
                      enum_flags_name(info.component_flags()),
                      info.gradient_only(),
                      has_complement,
-                     H12x12_count,
+                     body_H12x12_count,
+                     reporter_H12x12_count,
+                     dytopo_H12x12_count,
                      H3x3_count,
                      dof_count);
         printed = true;
@@ -940,13 +953,17 @@ void ABDLinearSubsystem::Impl::_assemble_kinetic_shape(IndexT& hess_offset,
         logger::info("[corex_trace][abd] kinetic_shape: sync ok at {}", where);
     };
     const bool direct_bdf1_assembly =
-        std::getenv("UIPC_COREX_ABD_BDF1_DIRECT_ASSEMBLY") != nullptr
+        std::getenv("UIPC_COREX_ABD_BDF1_DIRECT_ASSEMBLY_DISABLE") == nullptr
         && !info.gradient_only();
+    auto cst_view = abd().constitutions.view();
+    const bool has_shape_constitutions = !cst_view.empty();
 
     // Collect Kinetic
     if(!direct_bdf1_assembly)
     {
         trace("collect kinetic begin");
+        corex_profile::ScopedPhase kinetic_phase("abd_assemble_detail",
+                                                 "kinetic_compute");
         ABDLinearSubsystem::ComputeGradientHessianInfo this_info{
             info.gradient_only(), body_id_to_kinetic_gradient, body_id_to_kinetic_hessian, dt};
         abd().kinetic->compute_gradient_hessian(this_info);
@@ -961,21 +978,52 @@ void ABDLinearSubsystem::Impl::_assemble_kinetic_shape(IndexT& hess_offset,
     // Collect Shape
     trace("collect constitutions begin");
     {
+        corex_profile::ScopedPhase shape_phase("abd_assemble_detail",
+                                               "shape_compute");
         auto body_count = abd().body_count();
-        auto err0 = cudaMemset(body_id_to_shape_gradient.data(),
-                               0,
-                               sizeof(Vector12) * body_count);
-        UIPC_ASSERT(err0 == cudaSuccess,
-                    "cudaMemset(shape_gradient) failed: {}",
-                    cudaGetErrorString(err0));
-        auto err1 = cudaMemset(body_id_to_shape_hessian.data(),
-                               0,
-                               sizeof(Matrix12x12) * body_count);
-        UIPC_ASSERT(err1 == cudaSuccess,
-                    "cudaMemset(shape_hessian) failed: {}",
-                    cudaGetErrorString(err1));
+        auto clear_shape_range = [&](SizeT offset, SizeT count)
+        {
+            if(count == 0)
+                return;
+            auto err0 = cudaMemset(body_id_to_shape_gradient.data() + offset,
+                                   0,
+                                   sizeof(Vector12) * count);
+            UIPC_ASSERT(err0 == cudaSuccess,
+                        "cudaMemset(shape_gradient) failed: {}",
+                        cudaGetErrorString(err0));
+            auto err1 = cudaMemset(body_id_to_shape_hessian.data() + offset,
+                                   0,
+                                   sizeof(Matrix12x12) * count);
+            UIPC_ASSERT(err1 == cudaSuccess,
+                        "cudaMemset(shape_hessian) failed: {}",
+                        cudaGetErrorString(err1));
+        };
 
-        for(auto&& [i, cst] : enumerate(abd().constitutions.view()))
+        if(has_shape_constitutions || !direct_bdf1_assembly)
+        {
+            corex_profile::ScopedPhase zero_phase("abd_assemble_detail",
+                                                  "shape_zero");
+            if(!has_shape_constitutions || !direct_bdf1_assembly)
+            {
+                clear_shape_range(0, body_count);
+            }
+            else
+            {
+                SizeT clear_begin = 0;
+                for(auto* cst : cst_view)
+                {
+                    const auto& cst_info = abd().constitution_infos[cst->m_index];
+                    if(cst_info.body_offset > clear_begin)
+                        clear_shape_range(clear_begin, cst_info.body_offset - clear_begin);
+                    clear_begin =
+                        std::max(clear_begin, cst_info.body_offset + cst_info.body_count);
+                }
+                if(clear_begin < body_count)
+                    clear_shape_range(clear_begin, body_count - clear_begin);
+            }
+        }
+
+        for(auto&& [i, cst] : enumerate(cst_view))
         {
             if(corex_trace)
                 logger::info("[corex_trace][abd] kinetic_shape: constitution {} uid={} begin",
@@ -1005,7 +1053,7 @@ void ABDLinearSubsystem::Impl::_assemble_kinetic_shape(IndexT& hess_offset,
     if(direct_bdf1_assembly)
     {
         auto body_count = body_id_to_shape_hessian.size();
-        auto H3x3_count = body_count * (4 * 4);
+        auto H3x3_count = body_count * ABD_BODY_H3X3_BLOCK_COUNT;
         auto body_H3x3  = info.hessians().subview(hess_offset, H3x3_count);
 
         int n = static_cast<int>(body_count);
@@ -1022,6 +1070,7 @@ void ABDLinearSubsystem::Impl::_assemble_kinetic_shape(IndexT& hess_offset,
                 abd().body_id_to_abd_mass.data(),
                 body_id_to_shape_gradient.data(),
                 body_id_to_shape_hessian.data(),
+                has_shape_constitutions,
                 info.gradients().data(),
                 this->diag_hessian.data(),
                 body_H3x3.row_indices().data(),
@@ -1038,6 +1087,8 @@ void ABDLinearSubsystem::Impl::_assemble_kinetic_shape(IndexT& hess_offset,
 
     trace("assemble gradients kernel begin");
     {
+        corex_profile::ScopedPhase grad_phase("abd_assemble_detail",
+                                              "assemble_gradients");
         int n = static_cast<int>(abd().body_count());
         if(n > 0)
         {
@@ -1060,11 +1111,13 @@ void ABDLinearSubsystem::Impl::_assemble_kinetic_shape(IndexT& hess_offset,
         return;
 
     auto body_count = body_id_to_shape_hessian.size();
-    auto H3x3_count = body_count * (4 * 4);
+    auto H3x3_count = body_count * ABD_BODY_H3X3_BLOCK_COUNT;
     auto body_H3x3  = info.hessians().subview(hess_offset, H3x3_count);
 
     trace("assemble hessians kernel begin");
     {
+        corex_profile::ScopedPhase hess_phase("abd_assemble_detail",
+                                              "assemble_hessians");
         int n = static_cast<int>(body_count);
         if(n > 0)
         {
@@ -1076,7 +1129,7 @@ void ABDLinearSubsystem::Impl::_assemble_kinetic_shape(IndexT& hess_offset,
             {
                 logger::info("[corex_trace][abd] hess host: n={}, triplets={}, "
                              "dst_rows.data()={}, dst_cols.data()={}, dst_vals.data()={}",
-                             n, n * 16,
+                             n, n * ABD_BODY_H3X3_BLOCK_COUNT,
                              (void*)dst_rows.data(), (void*)dst_cols.data(), (void*)dst_vals.data());
             }
 
@@ -1253,10 +1306,30 @@ void ABDLinearSubsystem::Impl::_assemble_dytopo_effect(IndexT& offset,
     if(dytopo_effect_receiver)
         dytopo_effect_hessian_count = dytopo_effect_receiver->hessians().triplet_count();
 
+    auto H3x3_count = dytopo_effect_hessian_count * (4 * 4);
+
 #if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
-    auto H3x3_count = SizeT{0};
+    auto src_hess = dytopo_effect_receiver ? dytopo_effect_receiver->hessians()
+                                           : muda::CTripletMatrixView<Float, 3>{};
+
+    if(!has_flags(info.component_flags(), GlobalLinearSystem::ComponentFlags::Complement))
+    {
+        checkCudaErrors(cudaMemset(this->diag_hessian.data(),
+                                   0,
+                                   sizeof(Matrix12x12) * this->diag_hessian.size()));
+    }
+
+    dytopo_hessian_reducer.build(src_hess,
+                                 vertex_offset,
+                                 static_cast<IndexT>(abd().body_count()),
+                                 abd().vertex_id_to_body_id.view(),
+                                 abd().vertex_id_to_J.view(),
+                                 abd().body_id_to_is_fixed.view(),
+                                 this->diag_hessian.view());
+
+    corex_abd_assemble_sync_if_requested("after dytopo hessian reducer");
+    return;
 #else
-    auto H3x3_count         = dytopo_effect_hessian_count * (4 * 4);
     auto dytopo_effect_H3x3 = info.hessians().subview(offset, H3x3_count);
 #endif
 
@@ -1319,30 +1392,7 @@ void ABDLinearSubsystem::Impl::_assemble_dytopo_effect(IndexT& offset,
 void ABDLinearSubsystem::Impl::matrix_free_spmv(GlobalLinearSystem::MatrixFreeSpMVInfo& info)
 {
 #if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
-    if(!dytopo_effect_receiver)
-        return;
-
-    auto hess_count = dytopo_effect_receiver->hessians().triplet_count();
-    if(!hess_count)
-        return;
-
-    auto          vertex_offset = affine_body_vertex_reporter->vertex_offset();
-    auto          src_hess      = dytopo_effect_receiver->hessians();
-    constexpr int kBlk          = 256;
-    int           n             = static_cast<int>(hess_count);
-    kernel_abd_dytopo_matrix_free_spmv<<<(n + kBlk - 1) / kBlk, kBlk>>>(
-        n,
-        static_cast<int>(vertex_offset),
-        src_hess.row_indices().data(),
-        src_hess.col_indices().data(),
-        src_hess.values().data(),
-        abd().vertex_id_to_body_id.data(),
-        abd().vertex_id_to_J.data(),
-        abd().body_id_to_is_fixed.data(),
-        info.x().data(),
-        info.y().data(),
-        info.a());
-    checkCudaErrors(cudaGetLastError());
+    dytopo_hessian_reducer.spmv(info.a(), info.x(), info.y());
 #else
     (void)info;
 #endif

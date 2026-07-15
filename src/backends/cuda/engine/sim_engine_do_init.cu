@@ -25,8 +25,11 @@ namespace uipc::backend::cuda
 {
 static void corex_init_trace(const char* msg)
 {
-    std::fprintf(stderr, "[corex_demo] init_scene: %s\n", msg);
-    std::fflush(stderr);
+    if(std::getenv("UIPC_COREX_TRACE_INIT_SCENE") != nullptr)
+    {
+        std::fprintf(stderr, "[corex_demo] init_scene: %s\n", msg);
+        std::fflush(stderr);
+    }
 }
 
 void SimEngine::build()

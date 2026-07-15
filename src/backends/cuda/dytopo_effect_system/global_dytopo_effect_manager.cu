@@ -162,7 +162,8 @@ void GlobalDyTopoEffectManager::Impl::_assemble(ComputeDyTopoEffectInfo& info)
     }
 
     // collect
-    auto profile_collect_t0 = corex_profile::now_ms();
+    const bool profile_enabled = corex_profile::enabled();
+    auto profile_collect_t0 = profile_enabled ? corex_profile::now_ms() : 0.0;
     for(auto&& [i, reporter] : enumerate(dytopo_effect_reporters.view()))
     {
         if(!has_flags(info.m_component_flags, reporter->component_flags()))
@@ -180,19 +181,107 @@ void GlobalDyTopoEffectManager::Impl::_assemble(ComputeDyTopoEffectInfo& info)
 
         reporter->assemble(info);
     }
-    corex_profile::log_phase("dytopo",
-                             "reporter_assemble",
-                             -1,
-                             -1,
-                             -1,
-                             corex_profile::now_ms() - profile_collect_t0);
+    if(profile_enabled)
+        corex_profile::log_phase("dytopo",
+                                 "reporter_assemble",
+                                 -1,
+                                 -1,
+                                 -1,
+                                 corex_profile::now_ms() - profile_collect_t0);
 }
 
 void GlobalDyTopoEffectManager::Impl::_convert_matrix()
 {
     Timer timer{"Convert Dytopo Matrix"};
-    matrix_converter.convert(collected_dytopo_effect_hessian, sorted_dytopo_effect_hessian);
-    matrix_converter.convert(collected_dytopo_effect_gradient, sorted_dytopo_effect_gradient);
+    use_raw_full_gradient_distribution =
+        !collected_dytopo_effect_gradient.doublet_count() ? false :
+        _can_distribute_raw_full_gradient();
+    use_raw_full_hessian_distribution =
+        !collected_dytopo_effect_hessian.triplet_count() ? false :
+        _can_distribute_raw_full_hessian();
+
+    static const bool matrixfree_contact = []
+    {
+#if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
+        const char* e = std::getenv("UIPC_GIPC_MATRIXFREE_CONTACT");
+        return e && e[0] != '\0' && e[0] != '0';
+#else
+        return false;
+#endif
+    }();
+
+    if(use_raw_full_hessian_distribution)
+    {
+        sorted_dytopo_effect_hessian.reshape(collected_dytopo_effect_hessian.rows(),
+                                             collected_dytopo_effect_hessian.cols());
+        sorted_dytopo_effect_hessian.resize_triplets(0);
+    }
+    else if(matrixfree_contact)
+    {
+        auto& from = collected_dytopo_effect_hessian;
+        auto& to   = sorted_dytopo_effect_hessian;
+        to.reshape(from.rows(), from.cols());
+        to.resize_triplets(from.triplet_count());
+        if(from.triplet_count() > 0)
+        {
+            to.row_indices().copy_from(from.row_indices());
+            to.col_indices().copy_from(from.col_indices());
+            to.values().copy_from(from.values());
+        }
+    }
+    else
+    {
+        matrix_converter.convert(collected_dytopo_effect_hessian, sorted_dytopo_effect_hessian);
+    }
+
+    if(use_raw_full_gradient_distribution)
+    {
+        sorted_dytopo_effect_gradient.reshape(collected_dytopo_effect_gradient.count());
+        sorted_dytopo_effect_gradient.resize_doublets(0);
+    }
+    else
+    {
+        matrix_converter.convert(collected_dytopo_effect_gradient, sorted_dytopo_effect_gradient);
+    }
+}
+
+bool GlobalDyTopoEffectManager::Impl::_can_distribute_raw_full_gradient()
+{
+    auto receivers = dytopo_effect_receivers.view();
+    if(receivers.size() != 1)
+        return false;
+
+    auto* receiver = receivers[0];
+    if(!receiver || !receiver->accept_raw_full_gradient())
+        return false;
+
+    DyTopoClassifyInfo classify_info;
+    receiver->report(classify_info);
+    if(!classify_info.is_diag())
+        return false;
+
+    auto vertex_count = static_cast<IndexT>(global_vertex_manager->positions().size());
+    return classify_info.gradient_i_range() == Vector2i{0, vertex_count};
+}
+
+bool GlobalDyTopoEffectManager::Impl::_can_distribute_raw_full_hessian()
+{
+    auto receivers = dytopo_effect_receivers.view();
+    if(receivers.size() != 1)
+        return false;
+
+    auto* receiver = receivers[0];
+    if(!receiver || !receiver->accept_raw_full_hessian())
+        return false;
+
+    DyTopoClassifyInfo classify_info;
+    receiver->report(classify_info);
+    if(!classify_info.is_diag())
+        return false;
+
+    auto vertex_count = static_cast<IndexT>(global_vertex_manager->positions().size());
+    return classify_info.hessian_i_range() == Vector2i{0, vertex_count}
+           && classify_info.hessian_j_range() == Vector2i{0, vertex_count};
 }
 
 void GlobalDyTopoEffectManager::Impl::_distribute(ComputeDyTopoEffectInfo& info)
@@ -208,7 +297,6 @@ void GlobalDyTopoEffectManager::Impl::_distribute(ComputeDyTopoEffectInfo& info)
         DyTopoClassifyInfo classify_info;
         receiver->report(classify_info);
 
-
         ClassifiedDyTopoEffectInfo classified_info;
         auto& classified_gradients = classified_dytopo_effect_gradients[i];
         classified_gradients.reshape(vertex_count);
@@ -216,7 +304,11 @@ void GlobalDyTopoEffectManager::Impl::_distribute(ComputeDyTopoEffectInfo& info)
         classified_hessians.reshape(vertex_count, vertex_count);
 
         // 1) report gradient
-        if(classify_info.is_diag())
+        if(use_raw_full_gradient_distribution && receiver->accept_raw_full_gradient())
+        {
+            classified_info.m_gradients = collected_dytopo_effect_gradient.view();
+        }
+        else if(classify_info.is_diag())
         {
             const auto N = sorted_dytopo_effect_gradient.doublet_count();
 
@@ -298,6 +390,13 @@ void GlobalDyTopoEffectManager::Impl::_distribute(ComputeDyTopoEffectInfo& info)
         // 2) report hessian
         if(!info.m_gradient_only && !classify_info.is_empty())
         {
+            if(use_raw_full_hessian_distribution && receiver->accept_raw_full_hessian())
+            {
+                classified_info.m_hessians = collected_dytopo_effect_hessian.view();
+                receiver->receive(classified_info);
+                continue;
+            }
+
             const auto N = sorted_dytopo_effect_hessian.triplet_count();
 
             // +1 for calculate the total count
@@ -459,11 +558,15 @@ namespace
 {
 inline bool corex_matconv_trace()
 {
-    return std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+    static const bool enabled = std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+    return enabled;
 }
 
 inline void corex_matconv_sync_if_needed(const char* name)
 {
+    if(!corex_matconv_trace())
+        return;
+
     auto start = corex_profile::now_ms();
     cudaDeviceSynchronize();
     corex_profile::log_phase(
@@ -475,18 +578,21 @@ class MatconvPhase
   public:
     explicit MatconvPhase(const char* name)
         : m_name(name)
-        , m_start(corex_profile::now_ms())
+        , m_enabled(corex_profile::enabled())
+        , m_start(m_enabled ? corex_profile::now_ms() : 0.0)
     {
     }
 
     ~MatconvPhase()
     {
-        corex_profile::log_phase(
-            "matconv_kernel", m_name, -1, -1, -1, corex_profile::now_ms() - m_start);
+        if(m_enabled)
+            corex_profile::log_phase(
+                "matconv_kernel", m_name, -1, -1, -1, corex_profile::now_ms() - m_start);
     }
 
   private:
     const char* m_name;
+    bool        m_enabled;
     double      m_start;
 };
 }  // namespace
@@ -821,14 +927,16 @@ void launch_segmental_reduce_3x3(int N, const int* segment_ids,
         fmt::println(stderr, "[corex_seg3x3] enter N={} out_count={}", N, out_count);
         std::fflush(stderr);
     }
-    auto memset_start = corex_profile::now_ms();
+    const bool profile_enabled = corex_profile::enabled();
+    auto memset_start = profile_enabled ? corex_profile::now_ms() : 0.0;
     cudaMemsetAsync(out_blocks, 0, out_count * sizeof(BlockT3));
-    corex_profile::log_phase("matconv_kernel",
-                             "segmental_reduce_3x3_memset",
-                             -1,
-                             -1,
-                             -1,
-                             corex_profile::now_ms() - memset_start);
+    if(profile_enabled)
+        corex_profile::log_phase("matconv_kernel",
+                                 "segmental_reduce_3x3_memset",
+                                 -1,
+                                 -1,
+                                 -1,
+                                 corex_profile::now_ms() - memset_start);
     corex_matconv_sync_if_needed("segmental_reduce_3x3_memset");
     if(corex_matconv_trace())
     {
@@ -1014,14 +1122,16 @@ void launch_segmental_reduce_3x1(int N, const int* segment_ids,
         fmt::println(stderr, "[corex_seg3x1] enter N={} out_count={}", N, out_count);
         std::fflush(stderr);
     }
-    auto memset_start = corex_profile::now_ms();
+    const bool profile_enabled = corex_profile::enabled();
+    auto memset_start = profile_enabled ? corex_profile::now_ms() : 0.0;
     cudaMemsetAsync(out_vecs, 0, out_count * sizeof(VecT3));
-    corex_profile::log_phase("matconv_kernel",
-                             "segmental_reduce_3x1_memset",
-                             -1,
-                             -1,
-                             -1,
-                             corex_profile::now_ms() - memset_start);
+    if(profile_enabled)
+        corex_profile::log_phase("matconv_kernel",
+                                 "segmental_reduce_3x1_memset",
+                                 -1,
+                                 -1,
+                                 -1,
+                                 corex_profile::now_ms() - memset_start);
     corex_matconv_sync_if_needed("segmental_reduce_3x1_memset");
     if(corex_matconv_trace())
     {
@@ -1225,9 +1335,48 @@ void GlobalDyTopoEffectManager::Impl::_assemble(ComputeDyTopoEffectInfo& info)
 void GlobalDyTopoEffectManager::Impl::_convert_matrix()
 {
     Timer timer{"Convert Dytopo Matrix"};
+    use_raw_full_gradient_distribution = false;
+    use_raw_full_hessian_distribution = false;
 
-    matrix_converter.convert(collected_dytopo_effect_hessian, sorted_dytopo_effect_hessian);
+    static const bool matrixfree_contact = []
+    {
+#if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
+        const char* e = std::getenv("UIPC_GIPC_MATRIXFREE_CONTACT");
+        return e && e[0] != '\0' && e[0] != '0';
+#else
+        return false;
+#endif
+    }();
+
+    if(matrixfree_contact)
+    {
+        auto& from = collected_dytopo_effect_hessian;
+        auto& to   = sorted_dytopo_effect_hessian;
+        to.reshape(from.rows(), from.cols());
+        to.resize_triplets(from.triplet_count());
+        if(from.triplet_count() > 0)
+        {
+            to.row_indices().copy_from(from.row_indices());
+            to.col_indices().copy_from(from.col_indices());
+            to.values().copy_from(from.values());
+        }
+    }
+    else
+    {
+        matrix_converter.convert(collected_dytopo_effect_hessian, sorted_dytopo_effect_hessian);
+    }
+
     matrix_converter.convert(collected_dytopo_effect_gradient, sorted_dytopo_effect_gradient);
+}
+
+bool GlobalDyTopoEffectManager::Impl::_can_distribute_raw_full_gradient()
+{
+    return false;
+}
+
+bool GlobalDyTopoEffectManager::Impl::_can_distribute_raw_full_hessian()
+{
+    return false;
 }
 
 void GlobalDyTopoEffectManager::Impl::_distribute(ComputeDyTopoEffectInfo& info)
@@ -1242,7 +1391,6 @@ void GlobalDyTopoEffectManager::Impl::_distribute(ComputeDyTopoEffectInfo& info)
     {
         DyTopoClassifyInfo classify_info;
         receiver->report(classify_info);
-
 
         ClassifiedDyTopoEffectInfo classified_info;
         auto& classified_gradients = classified_dytopo_effect_gradients[i];

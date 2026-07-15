@@ -18,7 +18,7 @@ class StacklessBVHSimplexTrajectoryFilter final : public SimplexTrajectoryFilter
     class Impl
     {
       public:
-        void detect(DetectInfo& info);
+        void detect(DetectInfo& info, SizeT frame, SizeT newton_iter);
         void filter_active(FilterActiveInfo& info, int frame, int newton_iter);
         void filter_toi(FilterTOIInfo& info);
 
@@ -50,17 +50,43 @@ class StacklessBVHSimplexTrajectoryFilter final : public SimplexTrajectoryFilter
         muda::DeviceVar<IndexT> selected_EE_count;
         muda::DeviceVar<IndexT> selected_PE_count;
         muda::DeviceVar<IndexT> selected_PP_count;
+        muda::DeviceBuffer<IndexT> selected_counts;
 
         muda::DeviceBuffer<Vector4i> temp_PTs;
         muda::DeviceBuffer<Vector4i> temp_EEs;
         muda::DeviceBuffer<Vector3i> temp_PEs;
         muda::DeviceBuffer<Vector2i> temp_PPs;
 
+        muda::DeviceBuffer<std::byte> select_temp_PP;
+        muda::DeviceBuffer<std::byte> select_temp_PE;
+        muda::DeviceBuffer<std::byte> select_temp_PT;
+        muda::DeviceBuffer<std::byte> select_temp_EE;
+        size_t                        select_temp_PP_bytes = 0;
+        size_t                        select_temp_PE_bytes = 0;
+        size_t                        select_temp_PT_bytes = 0;
+        size_t                        select_temp_EE_bytes = 0;
+        int                           select_temp_PP_capacity = 0;
+        int                           select_temp_PE_capacity = 0;
+        int                           select_temp_PT_capacity = 0;
+        int                           select_temp_EE_capacity = 0;
+
         muda::DeviceBuffer<Vector4i> PTs;
         muda::DeviceBuffer<Vector4i> EEs;
         muda::DeviceBuffer<Vector3i> PEs;
         muda::DeviceBuffer<Vector2i> PPs;
 
+        bool          mask_cache_valid = false;
+        const IndexT* cached_contact_mask_ptr = nullptr;
+        const IndexT* cached_subscene_mask_ptr = nullptr;
+        int           cached_contact_mask_w = 0;
+        int           cached_contact_mask_h = 0;
+        int           cached_subscene_mask_w = 0;
+        int           cached_subscene_mask_h = 0;
+        bool          contact_mask_all_enabled = false;
+        bool          subscene_mask_all_enabled = false;
+        bool          edge_tri_bvh_valid = false;
+        SizeT         edge_bvh_size = 0;
+        SizeT         tri_bvh_size = 0;
 
         /****************************************************
         *                   CCD TOI
@@ -135,6 +161,9 @@ class StacklessBVHSimplexTrajectoryFilter final : public SimplexTrajectoryFilter
         muda::DeviceVar<IndexT> selected_EE_count;
         muda::DeviceVar<IndexT> selected_PE_count;
         muda::DeviceVar<IndexT> selected_PP_count;
+        muda::DeviceBuffer<IndexT> selected_counts;
+        muda::DeviceBuffer<int>    compact_flags;
+        muda::DeviceBuffer<int>    compact_offsets;
 
         muda::DeviceBuffer<Vector4i> temp_PTs;
         muda::DeviceBuffer<Vector4i> temp_EEs;

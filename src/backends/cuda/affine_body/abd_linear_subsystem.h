@@ -3,6 +3,7 @@
 #include <linear_system/diag_linear_subsystem.h>
 #include <affine_body/affine_body_dynamics.h>
 #include <affine_body/abd_dytopo_effect_receiver.h>
+#include <affine_body/abd_dytopo_hessian_reducer.h>
 #include <affine_body/affine_body_vertex_reporter.h>
 #include <utils/offset_count_collection.h>
 
@@ -128,6 +129,7 @@ class ABDLinearSubsystem final : public DiagLinearSubsystem
 
         // diag hessian for preconditioner
         muda::DeviceBuffer<Matrix12x12> diag_hessian;
+        ABDDyTopoHessianReducer         dytopo_hessian_reducer;
         muda::DeviceBuffer<Float>       block_norm;
         muda::DeviceBuffer<Float>       reduced_norm;
 

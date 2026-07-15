@@ -26,36 +26,48 @@ class UIPC_CORE_API Logger
     template <typename... Args>
     void debug(std::string_view fmt, Args&&... args)
     {
+        if(get_level() > spdlog::level::debug)
+            return;
         _debug(fmt::format(fmt::runtime(fmt), std::forward<Args>(args)...));
     }
 
     template <typename... Args>
     void info(std::string_view fmt, Args&&... args)
     {
+        if(get_level() > spdlog::level::info)
+            return;
         _info(fmt::format(fmt::runtime(fmt), std::forward<Args>(args)...));
     }
 
     template <typename... Args>
     void warn(std::string_view fmt, Args&&... args)
     {
+        if(get_level() > spdlog::level::warn)
+            return;
         _warn(fmt::format(fmt::runtime(fmt), std::forward<Args>(args)...));
     }
 
     template <typename... Args>
     void error(std::string_view fmt, Args&&... args)
     {
+        if(get_level() > spdlog::level::err)
+            return;
         _error(fmt::format(fmt::runtime(fmt), std::forward<Args>(args)...));
     }
 
     template <typename... Args>
     void critical(std::string_view fmt, Args&&... args)
     {
+        if(get_level() > spdlog::level::critical)
+            return;
         _critical(fmt::format(fmt::runtime(fmt), std::forward<Args>(args)...));
     }
 
     template <typename... Args>
     void log(Level level, std::string_view fmt, Args&&... args)
     {
+        if(get_level() > level)
+            return;
         _log(level, fmt::format(fmt::runtime(fmt), std::forward<Args>(args)...));
     }
 
