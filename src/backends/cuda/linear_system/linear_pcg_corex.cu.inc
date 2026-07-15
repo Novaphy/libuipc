@@ -54,15 +54,9 @@ bool corex_pcg_diag_enabled()
 // drain plus two implicit per-scalar drains). Pinned host memory makes the
 // async memcpys cheap, so the critical path collapses to one stream sync.
 //
-// Toggle:
-//   - default: ON
-//   - UIPC_COREX_PCG_PINNED_SCALAR=0: rollback to the legacy
-//     cudaDeviceSynchronize + implicit memcpy path.
 inline bool corex_pcg_pinned_scalar_enabled()
 {
-    const char* env = std::getenv("UIPC_COREX_PCG_PINNED_SCALAR");
-    if(!env) return true;
-    return env[0] != '\0' && env[0] != '0';
+    return true;
 }
 
 inline bool corex_pcg_env_enabled(const char* name)
@@ -91,7 +85,7 @@ inline Float* corex_pcg_pinned_scalar_slot()
 bool corex_pcg_fused_rz_norm_enabled()
 {
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-    return std::getenv("UIPC_COREX_PCG_SEPARATE_RZ_NORM") == nullptr;
+    return true;
 #else
     return false;
 #endif
