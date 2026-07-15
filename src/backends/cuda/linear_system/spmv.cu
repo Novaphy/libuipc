@@ -145,7 +145,7 @@ void Spmv::sym_spmv(Float                           a,
     }
     else
     {
-        checkCudaErrors(cudaMemset(y.buffer_view().data(), 0, sizeof(Float) * ny));
+        checkCudaErrors(cudaMemsetAsync(y.buffer_view().data(), 0, sizeof(Float) * ny));
     }
     if(nt > 0)
     {
