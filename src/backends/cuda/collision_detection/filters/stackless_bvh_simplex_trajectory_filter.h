@@ -30,6 +30,9 @@ class StacklessBVHSimplexTrajectoryFilter final : public SimplexTrajectoryFilter
         muda::DeviceBuffer<AABB> point_aabbs;
         muda::DeviceBuffer<AABB> edge_aabbs;
         muda::DeviceBuffer<AABB> triangle_aabbs;
+        muda::DeviceBuffer<IndexT> point_body_ids;
+        muda::DeviceBuffer<IndexT> edge_body_ids;
+        muda::DeviceBuffer<IndexT> triangle_body_ids;
         muda::DeviceBuffer<Float> edge_thicknesses;
         muda::DeviceBuffer<Float> edge_d_hats;
         muda::DeviceBuffer<Float> triangle_thicknesses;
@@ -60,31 +63,25 @@ class StacklessBVHSimplexTrajectoryFilter final : public SimplexTrajectoryFilter
         muda::DeviceBuffer<Vector4i> temp_EEs;
         muda::DeviceBuffer<Vector3i> temp_PEs;
         muda::DeviceBuffer<Vector2i> temp_PPs;
+        muda::DeviceBuffer<std::byte> select_temp_storage;
+        muda::DeviceBuffer<std::byte> select_temp_storage_pe;
+        muda::DeviceBuffer<std::byte> select_temp_storage_pt;
+        muda::DeviceBuffer<std::byte> select_temp_storage_ee;
+        size_t select_temp_storage_bytes = 0;
+        size_t select_temp_storage_pe_bytes = 0;
+        size_t select_temp_storage_pt_bytes = 0;
+        size_t select_temp_storage_ee_bytes = 0;
+        size_t select_cached_pp_items = 0;
+        size_t select_cached_pe_items = 0;
+        size_t select_cached_pt_items = 0;
+        size_t select_cached_ee_items = 0;
+        size_t select_cached_pp_bytes = 0;
+        size_t select_cached_pe_bytes = 0;
+        size_t select_cached_pt_bytes = 0;
+        size_t select_cached_ee_bytes = 0;
 
-        muda::DeviceBuffer<std::byte> select_temp_PP;
-        muda::DeviceBuffer<std::byte> select_temp_PE;
-        muda::DeviceBuffer<std::byte> select_temp_PT;
-        muda::DeviceBuffer<std::byte> select_temp_EE;
-        size_t                        select_temp_PP_bytes = 0;
-        size_t                        select_temp_PE_bytes = 0;
-        size_t                        select_temp_PT_bytes = 0;
-        size_t                        select_temp_EE_bytes = 0;
-        int                           select_temp_PP_capacity = 0;
-        int                           select_temp_PE_capacity = 0;
-        int                           select_temp_PT_capacity = 0;
-        int                           select_temp_EE_capacity = 0;
         muda::DeviceBuffer<int>       compact_flags;
         muda::DeviceBuffer<int>       compact_offsets;
-        muda::DeviceBuffer<int>       block_select_counts;
-        muda::DeviceBuffer<int>       block_select_offsets;
-        muda::DeviceBuffer<int>       block_select_counts_PP;
-        muda::DeviceBuffer<int>       block_select_offsets_PP;
-        muda::DeviceBuffer<int>       block_select_counts_PE;
-        muda::DeviceBuffer<int>       block_select_offsets_PE;
-        muda::DeviceBuffer<int>       block_select_counts_PT;
-        muda::DeviceBuffer<int>       block_select_offsets_PT;
-        muda::DeviceBuffer<int>       block_select_counts_EE;
-        muda::DeviceBuffer<int>       block_select_offsets_EE;
 
         muda::DeviceBuffer<Vector4i> PTs;
         muda::DeviceBuffer<Vector4i> EEs;
@@ -100,17 +97,17 @@ class StacklessBVHSimplexTrajectoryFilter final : public SimplexTrajectoryFilter
         int           cached_subscene_mask_h = 0;
         int           contact_mask_fast_mode = 0;
         int           subscene_mask_fast_mode = 0;
-        bool          edge_tri_bvh_valid = false;
-        SizeT         edge_bvh_size = 0;
-        SizeT         tri_bvh_size = 0;
-        bool          direct_active_valid = false;
-        IndexT        direct_active_counts[4] = {0, 0, 0, 0};
-
-        /****************************************************
-        *                   CCD TOI
-        ****************************************************/
+	        bool          edge_tri_bvh_valid = false;
+		        SizeT         edge_bvh_size = 0;
+		        SizeT         tri_bvh_size = 0;
+		        SizeT         edge_tri_bvh_frame = 0;
+		        SizeT         edge_tri_bvh_newton = 0;
+		        /****************************************************
+		        *                   CCD TOI
+		        ****************************************************/
 
         muda::DeviceBuffer<Float> tois;  // PP, PE, PT, EE
+        muda::DeviceBuffer<Float> toi_block_mins;
     };
 
     virtual muda::CBufferView<Vector2i> candidate_PTs() const noexcept override;

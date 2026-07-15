@@ -274,7 +274,8 @@ namespace uipc::backend::cuda::corex_bvh
 using AABB = uipc::backend::cuda::AABB;
 using namespace uipc::culbvh;
 
-static __global__ void kernel_calcMCs(int N, const AABB* boxes, const AABB* scene, uint32_t* codes)
+static __global__ void kernel_calcMCs(
+    int N, const AABB* boxes, const AABB* scene, uint32_t* codes, int* ids)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(idx >= N) return;
@@ -286,6 +287,8 @@ static __global__ void kernel_calcMCs(int N, const AABB* boxes, const AABB* scen
     float3 offset = c - sceneMinVec;
     auto sceneSize = scene->sizes();
     codes[idx] = morton3D(offset.x / sceneSize.x(), offset.y / sceneSize.y(), offset.z / sceneSize.z());
+    if(ids)
+        ids[idx] = idx;
 }
 
 static __global__ void kernel_calcInverseMapping(int N, const int* sorted_id, int* primMap)
@@ -461,23 +464,18 @@ struct CorexVector2iLess
     }
 };
 
-bool corex_sort_nomask_pairs_enabled()
+template <typename T>
+void corex_bvh_resize_no_construct(muda::DeviceBuffer<T>& buffer, SizeT size)
 {
-    static const bool enabled = []
-    {
-        const char* env = std::getenv("UIPC_COREX_SORT_NOMASK_PAIRS");
-        return env && env[0] != '\0' && env[0] != '0';
-    }();
-    return enabled;
+    if(size > buffer.capacity())
+        buffer.reserve(size);
+    buffer.unsafe_resize_no_construct(size);
 }
 
 inline void corex_sort_nomask_pairs(StacklessBVH::QueryBuffer& qbuffer, int pair_count)
 {
-    if(pair_count <= 1 || !corex_sort_nomask_pairs_enabled())
-        return;
-    corex_profile::ScopedPhase phase("bvh_query_detail", "nomask_sort_pairs");
-    auto begin = thrust::device_pointer_cast(qbuffer.m_pairs.data());
-    thrust::sort(thrust::device, begin, begin + pair_count, CorexVector2iLess{});
+    (void)qbuffer;
+    (void)pair_count;
 }
 }  // namespace
 
@@ -492,11 +490,11 @@ MUDA_INLINE void StacklessBVH::Impl::calcMaxBVFromBox(muda::CBufferView<AABB> aa
 
     using namespace muda;
 
-    kernel_init_scene_box<<<1, 1>>>(
+    corex_bvh::kernel_init_scene_box<<<1, 1>>>(
         reinterpret_cast<AABB*>(scene_box.data()));
     checkCudaErrors(cudaGetLastError());
 
-    kernel_reduce_scene_box<<<GridDim, K_THREADS>>>(
+    corex_bvh::kernel_reduce_scene_box<<<GridDim, K_THREADS>>>(
         static_cast<int>(numQuery),
         reinterpret_cast<const AABB*>(aabbs.data()),
         reinterpret_cast<AABB*>(scene_box.data()));
@@ -605,7 +603,8 @@ MUDA_INLINE void StacklessBVH::Impl::calcMaxBVFromBox(muda::CBufferView<AABB> aa
 
 MUDA_INLINE void StacklessBVH::Impl::calcMCsFromBox(muda::CBufferView<AABB> aabbs,
                                                     muda::CVarView<AABB> scene_box,
-                                                    muda::BufferView<uint32_t> codes)
+                                                    muda::BufferView<uint32_t> codes,
+                                                    muda::BufferView<int> ids)
 {
     using namespace culbvh;
     using namespace muda;
@@ -614,7 +613,11 @@ MUDA_INLINE void StacklessBVH::Impl::calcMCsFromBox(muda::CBufferView<AABB> aabb
 
     int block = 256;
     int grid = (N + block - 1) / block;
-    corex_bvh::kernel_calcMCs<<<grid, block>>>(N, (const AABB*)aabbs.data(), (const AABB*)scene_box.data(), (uint32_t*)codes.data());
+    corex_bvh::kernel_calcMCs<<<grid, block>>>(N,
+                                               (const AABB*)aabbs.data(),
+                                               (const AABB*)scene_box.data(),
+                                               (uint32_t*)codes.data(),
+                                               ids.data());
     checkCudaErrors(cudaGetLastError());
 }
 
@@ -637,8 +640,9 @@ MUDA_INLINE void StacklessBVH::Impl::buildPrimitivesFromBox(muda::CBufferView<AA
     if(N == 0) return;
 
     int block = 256, grid = (N + block - 1) / block;
-    corex_bvh::kernel_buildPrimitives<<<grid, block>>>(N, RAW_PTR(primMap), (const AABB*)aabbs.data(),
-                                                        RAW_PTR(ext_idx), RAW_PTR(ext_aabb));
+    corex_bvh::kernel_buildPrimitives<<<grid, block>>>(
+        N, RAW_PTR(primMap), (const AABB*)aabbs.data(),
+        RAW_PTR(ext_idx), RAW_PTR(ext_aabb));
     checkCudaErrors(cudaGetLastError());
 }
 
@@ -662,7 +666,6 @@ MUDA_INLINE void StacklessBVH::Impl::buildIntNodes(int size)
 
     auto GridDim  = (size + 255) / 256;
     auto BlockDim = 256;
-
     Launch(GridDim, BlockDim)
         .file_line(__FILE__, __LINE__)
         .apply(
@@ -744,7 +747,6 @@ MUDA_INLINE void StacklessBVH::Impl::buildIntNodes(int size)
                     {
                         _tks_box(cur).extend(_tks_box(chr));
                     }
-
                     _tks_mark(cur) &= 0x00000007;
 
                     l               = _tks_range_x(cur) - 1;
@@ -913,41 +915,41 @@ inline void StacklessBVH::Impl::build(muda::CBufferView<AABB> aabbs)
     const unsigned int numNodes = numObjs * 2 - 1;  // Total number of nodes
 
 
-    mtcode.resize(numObjs);
-    mtcode_sorted.resize(numObjs);
-    sorted_id_input.resize(numObjs);
-    sorted_id.resize(numObjs);
-    primMap.resize(numObjs);
-    ext_aabb.resize(numObjs);
-    ext_idx.resize(numObjs);
-    ext_lca.resize(numObjs + 1);
-    ext_par.resize(numObjs);
-    ext_mark.resize(numObjs);
+    corex_bvh_resize_no_construct(mtcode, numObjs);
+    corex_bvh_resize_no_construct(mtcode_sorted, numObjs);
+    corex_bvh_resize_no_construct(sorted_id_input, numObjs);
+    corex_bvh_resize_no_construct(sorted_id, numObjs);
+    corex_bvh_resize_no_construct(primMap, numObjs);
+    corex_bvh_resize_no_construct(ext_aabb, numObjs);
+    corex_bvh_resize_no_construct(ext_idx, numObjs);
+    corex_bvh_resize_no_construct(ext_lca, numObjs + 1);
+    corex_bvh_resize_no_construct(ext_par, numObjs);
+    corex_bvh_resize_no_construct(ext_mark, numObjs);
 
-    metric.resize(numObjs);
-    tkMap.resize(numObjs);
-    offsetTable.resize(numObjs);
-    count.resize(numObjs);
+    corex_bvh_resize_no_construct(metric, numObjs);
+    corex_bvh_resize_no_construct(tkMap, numObjs);
+    corex_bvh_resize_no_construct(offsetTable, numObjs);
+    corex_bvh_resize_no_construct(count, numObjs);
 
-    flags.resize(numInternalNodes);
-    int_lc.resize(numInternalNodes);
-    int_rc.resize(numInternalNodes);
-    int_par.resize(numInternalNodes);
-    int_range_x.resize(numInternalNodes);
-    int_range_y.resize(numInternalNodes);
-    int_mark.resize(numInternalNodes);
-    int_aabb.resize(numInternalNodes);
+    corex_bvh_resize_no_construct(flags, numInternalNodes);
+    corex_bvh_resize_no_construct(int_lc, numInternalNodes);
+    corex_bvh_resize_no_construct(int_rc, numInternalNodes);
+    corex_bvh_resize_no_construct(int_par, numInternalNodes);
+    corex_bvh_resize_no_construct(int_range_x, numInternalNodes);
+    corex_bvh_resize_no_construct(int_range_y, numInternalNodes);
+    corex_bvh_resize_no_construct(int_mark, numInternalNodes);
+    corex_bvh_resize_no_construct(int_aabb, numInternalNodes);
 
-    nodes.resize(numNodes);
-    node_range_y.resize(numNodes);
+    corex_bvh_resize_no_construct(nodes, numNodes);
+    corex_bvh_resize_no_construct(node_range_y, numNodes);
 
 
     if(flags.size() > 0)
         checkCudaErrors(cudaMemsetAsync(RAW_PTR(flags), 0, sizeof(uint32_t) * flags.size()));
     if(ext_lca.size() > 0)
-        checkCudaErrors(cudaMemsetAsync(RAW_PTR(ext_lca), 0, sizeof(int) * ext_lca.size()));
-    if(ext_par.size() > 0)
-        checkCudaErrors(cudaMemsetAsync(RAW_PTR(ext_par), 0, sizeof(uint32_t) * ext_par.size()));
+        checkCudaErrors(cudaMemsetAsync(RAW_PTR(ext_lca) + numObjs,
+                                        0xff,
+                                        sizeof(int)));
     if(ext_mark.size() > 0)
     {
         constexpr int block = 256;
@@ -962,15 +964,12 @@ inline void StacklessBVH::Impl::build(muda::CBufferView<AABB> aabbs)
     }
 
     {
-        calcMCsFromBox(aabbs, scene_box.view(), mtcode.view());
+        calcMCsFromBox(aabbs, scene_box.view(), mtcode.view(), sorted_id_input.view());
     }
 
     auto null_stream = thrust::cuda::par.on(nullptr);
 
     {
-        thrust::sequence(null_stream,
-                         sorted_id_input.data(),
-                         sorted_id_input.data() + sorted_id_input.size());
         muda::DeviceRadixSort().SortPairs(mtcode.data(),
                                           mtcode_sorted.data(),
                                           sorted_id_input.data(),
@@ -1006,8 +1005,6 @@ inline void StacklessBVH::Impl::build(muda::CBufferView<AABB> aabbs)
     }
 
     {
-        // fill the last ext_lca to -1
-        thrust::fill(null_stream, ext_lca.data() + numObjs, ext_lca.data() + numObjs + 1, -1);
         updateBvhExtNodeLinks(numObjs);
     }
 
@@ -1115,11 +1112,6 @@ void StacklessBVH::Impl::StacklessCDSharedSelf(Pred               pred,
                             }
                         }
 
-                        MUDA_ASSERT(inner_I < MaxIter,
-                                    "Exceeded max iteration in stackless traversal, %d (Max=%d), numObj=(%d)",
-                                    inner_I,
-                                    MaxIter,
-                                    numObjs);
                     }
                     // Flush whatever we have
                     __syncthreads();
@@ -1158,10 +1150,16 @@ void StacklessBVH::Impl::StacklessCDSharedSelf(Pred               pred,
 
 inline void StacklessBVH::Impl::StacklessCDSharedSelfEdgesNoMask(
     muda::CBufferView<Vector2i> edges,
-    muda::CBufferView<IndexT>   vertex_to_body,
+    muda::CBufferView<Vector3>  positions,
+    muda::CBufferView<Vector3>  displacements,
+    muda::CBufferView<Float>    edge_thicknesses,
+    muda::CBufferView<Float>    edge_d_hats,
+    Float                       alpha,
+    muda::CBufferView<IndexT>   edge_body_ids,
     muda::CBufferView<IndexT>   body_self_collision,
     muda::VarView<int>          cpNum,
-    muda::BufferView<Vector2i>  buffer)
+    muda::BufferView<Vector2i>  buffer,
+    cudaStream_t                stream)
 {
     using namespace muda;
     using namespace culbvh;
@@ -1171,7 +1169,7 @@ inline void StacklessBVH::Impl::StacklessCDSharedSelfEdgesNoMask(
     auto BlockDim = K_THREADS;
     auto GridDim  = (numQuery + BlockDim - 1) / BlockDim;
 
-    Launch(GridDim, BlockDim)
+    Launch(GridDim, BlockDim, 0, stream)
         .apply(
             [Size       = numQuery,
              _box       = objs.viewer().name("_box"),
@@ -1181,24 +1179,44 @@ inline void StacklessBVH::Impl::StacklessCDSharedSelfEdgesNoMask(
              _nodes     = nodes.viewer().name("_nodes"),
              _node_range_y = node_range_y.viewer().name("_node_range_y"),
              edges      = edges.viewer().name("edges"),
-             v2b        = vertex_to_body.viewer().name("v2b"),
+             Ps         = positions.viewer().name("positions"),
+             dxs        = displacements.viewer().name("displacements"),
+             edge_thicknesses = edge_thicknesses.viewer().name("edge_thicknesses"),
+             edge_d_hats = edge_d_hats.viewer().name("edge_d_hats"),
+             alpha,
+             edge_body_ids = edge_body_ids.viewer().name("edge_body_ids"),
              body_self_collision = body_self_collision.viewer().name("body_self_collision"),
-             resCounter = cpNum.viewer().name("resCounter"),
-             res        = buffer.viewer().name("res")] __device__()
-            {
-                int  tid    = blockIdx.x * blockDim.x + threadIdx.x;
-                bool active = tid < Size;
-                int  idx;
-                Vector2i E0;
-                IndexT body_i = -1;
-                AABB bv;
-                if(active)
-                {
-                    idx    = _lvs_idx(tid);
-                    bv     = _box(idx);
-                    E0     = edges(idx);
-                    body_i = v2b(E0[0]);
-                }
+	             resCounter = cpNum.viewer().name("resCounter"),
+	             res        = buffer.viewer().name("res")] __device__()
+	            {
+	                int  tid    = blockIdx.x * blockDim.x + threadIdx.x;
+	                bool active = tid < Size;
+	                int  idx;
+	                Vector2i E0;
+	                IndexT body_i = -1;
+	                Vector3 E0_P0;
+	                Vector3 E0_P1;
+	                Vector3 E0_dP0;
+	                Vector3 E0_dP1;
+	                Float E0_thickness = 0;
+	                Float E0_d_hat = 0;
+	                AABB bv;
+	                if(active)
+	                {
+	                    idx    = _lvs_idx(tid);
+	                    bv     = _box(idx);
+	                    E0     = edges(idx);
+	                    body_i = edge_body_ids(idx);
+	                    E0_P0 = Ps(E0[0]);
+	                    E0_P1 = Ps(E0[1]);
+	                    if(alpha != static_cast<Float>(0))
+	                    {
+	                        E0_dP0 = alpha * dxs(E0[0]);
+	                        E0_dP1 = alpha * dxs(E0[1]);
+	                    }
+	                    E0_thickness = edge_thicknesses(idx);
+	                    E0_d_hat = edge_d_hats(idx);
+	                }
 
                 __shared__ int2 sharedRes[MAX_RES_PER_BLOCK];
                 __shared__ int  sharedCounter;
@@ -1229,7 +1247,6 @@ inline void StacklessBVH::Impl::StacklessCDSharedSelfEdgesNoMask(
                                 st = node.escape;
                                 continue;
                             }
-
                             if(node.bound.intersects(bv))
                             {
                                 if(node.lc == -1)
@@ -1242,12 +1259,50 @@ inline void StacklessBVH::Impl::StacklessCDSharedSelfEdgesNoMask(
                                         const bool shared_vertex =
                                             E0[0] == E1[0] || E0[0] == E1[1]
                                             || E0[1] == E1[0] || E0[1] == E1[1];
-                                        bool accept = !shared_vertex;
-                                        if(accept)
-                                        {
-                                            const auto body_j = v2b(E1[0]);
-                                            accept = !(body_i == body_j
-                                                       && !body_self_collision(body_i));
+                                        const bool same_body_inactive =
+                                            body_i == edge_body_ids(j)
+                                            && !body_self_collision(body_i);
+                                        bool accept = !shared_vertex
+                                                   && !same_body_inactive;
+	                                    if(accept)
+	                                    {
+	                                        const Vector4i vIs = {E0[0], E0[1], E1[0], E1[1]};
+	                                        Vector3 Ps_arr[] = {E0_P0,
+	                                                            E0_P1,
+	                                                            Ps(vIs(2)),
+	                                                            Ps(vIs(3))};
+	                                        Float thickness = E0_thickness
+	                                                        + edge_thicknesses(j);
+	                                            Float d_hat = (E0_d_hat + edge_d_hats(j))
+	                                                        * Float{0.5};
+	                                        if(alpha == static_cast<Float>(0))
+	                                        {
+	                                            Vector2 range = D_range(thickness, d_hat);
+	                                            Vector3 e0_min = Ps_arr[0].cwiseMin(Ps_arr[1]);
+	                                            Vector3 e0_max = Ps_arr[0].cwiseMax(Ps_arr[1]);
+	                                            Vector3 e1_min = Ps_arr[2].cwiseMin(Ps_arr[3]);
+	                                            Vector3 e1_max = Ps_arr[2].cwiseMax(Ps_arr[3]);
+	                                            accept = box_box_distance2_lower_bound(
+	                                                         e0_min, e0_max, e1_min, e1_max)
+	                                                     < range.y();
+	                                        }
+	                                        else
+	                                        {
+	                                            Vector3 dE0_0 = E0_dP0;
+                                                Vector3 dE0_1 = E0_dP1;
+                                                Vector3 dE1_0 = alpha * dxs(E1[0]);
+                                                Vector3 dE1_1 = alpha * dxs(E1[1]);
+                                                accept = distance::edge_edge_ccd_broadphase(
+                                                    Ps_arr[0],
+                                                    Ps_arr[1],
+                                                    Ps_arr[2],
+                                                    Ps_arr[3],
+                                                    dE0_0,
+                                                    dE0_1,
+                                                    dE1_0,
+                                                    dE1_1,
+                                                    d_hat + thickness);
+                                            }
                                         }
                                         if(accept)
                                         {
@@ -1272,11 +1327,6 @@ inline void StacklessBVH::Impl::StacklessCDSharedSelfEdgesNoMask(
                             }
                         }
 
-                        MUDA_ASSERT(inner_I < MaxIter,
-                                    "Exceeded max iteration in stackless traversal, %d (Max=%d), numObj=(%d)",
-                                    inner_I,
-                                    MaxIter,
-                                    numObjs);
                     }
 
                     __syncthreads();
@@ -1291,6 +1341,8 @@ inline void StacklessBVH::Impl::StacklessCDSharedSelfEdgesNoMask(
 
                     if(threadIdx.x == 0)
                         sharedCounter = 0;
+
+                    __syncthreads();
 
                     bool done = totalResInBlock < MAX_RES_PER_BLOCK;
 
@@ -1353,24 +1405,24 @@ inline void StacklessBVH::Impl::StacklessCDSharedSelfEdgesActiveNoMask(
              out_PPs    = out_PPs.viewer().name("out_PPs"),
              out_PEs    = out_PEs.viewer().name("out_PEs"),
              out_EEs    = out_EEs.viewer().name("out_EEs"),
-             counts     = selected_counts.viewer().name("selected_counts"),
-             pp_cap,
-             pe_cap,
-             ee_cap] __device__()
-            {
-                int  tid    = blockIdx.x * blockDim.x + threadIdx.x;
-                bool active = tid < Size;
-                int  idx;
-                Vector2i E0;
-                IndexT body_i = -1;
-                AABB bv;
-                if(active)
-                {
-                    idx    = _lvs_idx(tid);
-                    bv     = _box(idx);
-                    E0     = edges(idx);
-                    body_i = v2b(E0[0]);
-                }
+	             counts     = selected_counts.viewer().name("selected_counts"),
+	             pp_cap,
+	             pe_cap,
+	             ee_cap] __device__()
+	            {
+	                int  tid    = blockIdx.x * blockDim.x + threadIdx.x;
+	                bool active = tid < Size;
+	                int  idx;
+	                Vector2i E0;
+	                IndexT body_i = -1;
+	                AABB bv;
+	                if(active)
+	                {
+	                    idx    = _lvs_idx(tid);
+	                    bv     = _box(idx);
+	                    E0     = edges(idx);
+	                    body_i = v2b(E0[0]);
+	                }
 
                 int  st = 0;
                 Node node;
@@ -1412,47 +1464,47 @@ inline void StacklessBVH::Impl::StacklessCDSharedSelfEdgesActiveNoMask(
                                         accept = !(body_i == body_j
                                                    && !body_self_collision(body_i));
                                     }
-                                    if(accept)
-                                    {
-                                        const Vector4i vIs = {E0[0], E0[1], E1[0], E1[1]};
-                                        Vector3 Ps_arr[] = {Ps(vIs(0)),
-                                                            Ps(vIs(1)),
-                                                            Ps(vIs(2)),
-                                                            Ps(vIs(3))};
-                                        Float thickness = edge_thicknesses(idx)
-                                                        + edge_thicknesses(j);
-                                        Float d_hat = (edge_d_hats(idx) + edge_d_hats(j))
-                                                    * Float{0.5};
-                                        Vector2 range = D_range(thickness, d_hat);
-                                        Vector3 e0_min = Ps_arr[0].cwiseMin(Ps_arr[1]);
-                                        Vector3 e0_max = Ps_arr[0].cwiseMax(Ps_arr[1]);
-                                        Vector3 e1_min = Ps_arr[2].cwiseMin(Ps_arr[3]);
-                                        Vector3 e1_max = Ps_arr[2].cwiseMax(Ps_arr[3]);
-                                        if(box_box_distance2_lower_bound(e0_min,
-                                                                         e0_max,
-                                                                         e1_min,
-                                                                         e1_max)
-                                           >= range.y())
+	                                    if(accept)
+	                                    {
+	                                        const Vector4i vIs = {E0[0], E0[1], E1[0], E1[1]};
+	                                        Vector3 Ps_arr[] = {Ps(vIs(0)),
+	                                                            Ps(vIs(1)),
+	                                                            Ps(vIs(2)),
+	                                                            Ps(vIs(3))};
+	                                        Float thickness = edge_thicknesses(idx)
+	                                                        + edge_thicknesses(j);
+	                                        Float d_hat = (edge_d_hats(idx) + edge_d_hats(j))
+	                                                    * Float{0.5};
+	                                        Vector2 range = D_range(thickness, d_hat);
+	                                        Vector3 e0_min = Ps_arr[0].cwiseMin(Ps_arr[1]);
+	                                        Vector3 e0_max = Ps_arr[0].cwiseMax(Ps_arr[1]);
+	                                        Vector3 e1_min = Ps_arr[2].cwiseMin(Ps_arr[3]);
+	                                        Vector3 e1_max = Ps_arr[2].cwiseMax(Ps_arr[3]);
+	                                        if(box_box_distance2_lower_bound(e0_min,
+	                                                                         e0_max,
+	                                                                         e1_min,
+	                                                                         e1_max)
+	                                           >= range.y())
                                         {
                                             st = node.escape;
                                             continue;
                                         }
-                                        if(alpha != static_cast<Float>(0))
-                                        {
-                                            Vector3 dE0_0 = alpha * dxs(E0[0]);
-                                            Vector3 dE0_1 = alpha * dxs(E0[1]);
-                                            Vector3 dE1_0 = alpha * dxs(E1[0]);
-                                            Vector3 dE1_1 = alpha * dxs(E1[1]);
-                                            if(!distance::edge_edge_ccd_broadphase(
+	                                        if(alpha != static_cast<Float>(0))
+	                                        {
+	                                            Vector3 dE0_0 = alpha * dxs(E0[0]);
+	                                            Vector3 dE0_1 = alpha * dxs(E0[1]);
+	                                            Vector3 dE1_0 = alpha * dxs(E1[0]);
+	                                            Vector3 dE1_1 = alpha * dxs(E1[1]);
+	                                            if(!distance::edge_edge_ccd_broadphase(
                                                    Ps_arr[0],
                                                    Ps_arr[1],
                                                    Ps_arr[2],
                                                    Ps_arr[3],
-                                                   dE0_0,
-                                                   dE0_1,
-                                                   dE1_0,
-                                                   dE1_1,
-                                                   d_hat + thickness))
+	                                                   dE0_0,
+	                                                   dE0_1,
+	                                                   dE1_0,
+	                                                   dE1_1,
+	                                                   d_hat + thickness))
                                             {
                                                 st = node.escape;
                                                 continue;
@@ -1476,12 +1528,12 @@ inline void StacklessBVH::Impl::StacklessCDSharedSelfEdgesActiveNoMask(
                                             auto dim = distance::degenerate_edge_edge(flag, offsets);
                                             if(dim == 4)
                                             {
-                                                Float eps_x;
-                                                distance::edge_edge_mollifier_threshold(
-                                                    rest_Ps(vIs(0)),
-                                                    rest_Ps(vIs(1)),
-                                                    rest_Ps(vIs(2)),
-                                                    rest_Ps(vIs(3)),
+	                                                Float eps_x;
+	                                                distance::edge_edge_mollifier_threshold(
+	                                                    rest_Ps(vIs(0)),
+	                                                    rest_Ps(vIs(1)),
+	                                                    rest_Ps(vIs(2)),
+	                                                    rest_Ps(vIs(3)),
                                                     static_cast<Float>(1e-3),
                                                     eps_x);
                                                 if(distance::need_mollify(Ps_arr[0],
@@ -1533,11 +1585,6 @@ inline void StacklessBVH::Impl::StacklessCDSharedSelfEdgesActiveNoMask(
                         }
                     }
 
-                    MUDA_ASSERT(inner_I < MaxIter,
-                                "Exceeded max iteration in stackless traversal, %d (Max=%d), numObj=(%d)",
-                                inner_I,
-                                MaxIter,
-                                numObjs);
                 }
             });
 }
@@ -1551,10 +1598,12 @@ inline void StacklessBVH::Impl::StacklessCDSharedOtherPointsTrianglesNoMask(
     muda::CBufferView<Float>    thicknesses,
     muda::CBufferView<Float>    d_hats,
     Float                       alpha,
-    muda::CBufferView<IndexT>   vertex_to_body,
+    muda::CBufferView<IndexT>   point_body_ids,
+    muda::CBufferView<IndexT>   triangle_body_ids,
     muda::CBufferView<IndexT>   body_self_collision,
     muda::VarView<int>          cpNum,
-    muda::BufferView<Vector2i>  buffer)
+    muda::BufferView<Vector2i>  buffer,
+    cudaStream_t                stream)
 {
     using namespace muda;
     using namespace culbvh;
@@ -1564,7 +1613,7 @@ inline void StacklessBVH::Impl::StacklessCDSharedOtherPointsTrianglesNoMask(
     auto BlockDim = K_THREADS;
     auto GridDim  = (numQuery + BlockDim - 1) / BlockDim;
 
-    Launch(GridDim, BlockDim)
+    Launch(GridDim, BlockDim, 0, stream)
         .apply(
             [Size       = numQuery,
              _box       = point_aabbs.viewer().name("_box"),
@@ -1579,7 +1628,8 @@ inline void StacklessBVH::Impl::StacklessCDSharedOtherPointsTrianglesNoMask(
              thicknesses = thicknesses.viewer().name("thicknesses"),
              d_hats     = d_hats.viewer().name("d_hats"),
              alpha,
-             v2b        = vertex_to_body.viewer().name("v2b"),
+             point_body_ids = point_body_ids.viewer().name("point_body_ids"),
+             triangle_body_ids = triangle_body_ids.viewer().name("triangle_body_ids"),
              body_self_collision = body_self_collision.viewer().name("body_self_collision"),
              resCounter = cpNum.viewer().name("resCounter"),
              res        = buffer.viewer().name("res")] __device__()
@@ -1587,11 +1637,24 @@ inline void StacklessBVH::Impl::StacklessCDSharedOtherPointsTrianglesNoMask(
                 int  tid    = blockIdx.x * blockDim.x + threadIdx.x;
                 bool active = tid < Size;
                 int  idx;
+                IndexT V = -1;
+                IndexT body_i = -1;
+                Vector3 P;
+                Vector3 dP;
+                Float V_thickness = 0;
+                Float V_d_hat = 0;
                 AABB bv;
                 if(active)
                 {
-                    idx = tid;
-                    bv  = _box(idx);
+                    idx         = tid;
+                    bv          = _box(idx);
+                    V           = Vs(idx);
+                    body_i      = point_body_ids(idx);
+                    P           = Ps(V);
+                    if(alpha != static_cast<Float>(0))
+                        dP = alpha * dxs(V);
+                    V_thickness = thicknesses(V);
+                    V_d_hat     = d_hats(V);
                 }
 
                 __shared__ int2 sharedRes[MAX_RES_PER_BLOCK];
@@ -1624,49 +1687,41 @@ inline void StacklessBVH::Impl::StacklessCDSharedOtherPointsTrianglesNoMask(
                                 if(node.lc == -1)
                                 {
                                     const int j = _lvs_idx(st - intSize);
-
-                                    const auto V = Vs(idx);
                                     const auto F = Fs(j);
+                                    const bool same_body_inactive =
+                                        body_i == triangle_body_ids(j)
+                                        && !body_self_collision(body_i);
                                     bool accept =
-                                        !(F[0] == V || F[1] == V || F[2] == V);
+                                        !(F[0] == V || F[1] == V || F[2] == V)
+                                        && !same_body_inactive;
                                     if(accept)
                                     {
-                                        const auto body_i = v2b(V);
-                                        const auto body_j = v2b(F[0]);
-                                        accept = !(body_i == body_j
-                                                   && !body_self_collision(body_i));
-                                    }
-                                    if(accept)
-                                    {
-                                        Vector3 P  = Ps(V);
                                         Vector3 F0 = Ps(F[0]);
                                         Vector3 F1 = Ps(F[1]);
                                         Vector3 F2 = Ps(F[2]);
 
-                                        Float thickness = PT_thickness(
-                                            thicknesses(V),
-                                            thicknesses(F[0]),
-                                            thicknesses(F[1]),
-                                            thicknesses(F[2]));
-                                        Float d_hat = PT_d_hat(d_hats(V),
-                                                               d_hats(F[0]),
-                                                               d_hats(F[1]),
-                                                               d_hats(F[2]));
+                                        Float thickness =
+                                            PT_thickness(V_thickness,
+                                                         thicknesses(F[0]),
+                                                         thicknesses(F[1]),
+                                                         thicknesses(F[2]));
+                                        Float d_hat =
+                                            PT_d_hat(V_d_hat,
+                                                     d_hats(F[0]),
+                                                     d_hats(F[1]),
+                                                     d_hats(F[2]));
                                         Float expand = d_hat + thickness;
                                         if(alpha == static_cast<Float>(0))
                                         {
-                                            const auto max_p = P.array();
-                                            const auto min_p = P.array();
-                                            const auto max_tri =
-                                                F0.array().max(F1.array()).max(F2.array());
-                                            const auto min_tri =
-                                                F0.array().min(F1.array()).min(F2.array());
-                                            accept = !((min_p - max_tri > expand).any()
-                                                       || (min_tri - max_p > expand).any());
+                                            Vector2 range   = D_range(thickness, d_hat);
+                                            Vector3 tri_min = F0.cwiseMin(F1).cwiseMin(F2);
+                                            Vector3 tri_max = F0.cwiseMax(F1).cwiseMax(F2);
+                                            accept = point_box_distance2_lower_bound(
+                                                         P, tri_min, tri_max)
+                                                     < range.y();
                                         }
                                         else
                                         {
-                                            Vector3 dP  = alpha * dxs(V);
                                             Vector3 dF0 = alpha * dxs(F[0]);
                                             Vector3 dF1 = alpha * dxs(F[1]);
                                             Vector3 dF2 = alpha * dxs(F[2]);
@@ -1696,11 +1751,6 @@ inline void StacklessBVH::Impl::StacklessCDSharedOtherPointsTrianglesNoMask(
                             }
                         }
 
-                        MUDA_ASSERT(inner_I < MaxIter,
-                                    "Exceeded max iteration in stackless traversal, %d (Max=%d), numObj=(%d)",
-                                    inner_I,
-                                    MaxIter,
-                                    numObjs);
                     }
 
                     __syncthreads();
@@ -1715,8 +1765,6 @@ inline void StacklessBVH::Impl::StacklessCDSharedOtherPointsTrianglesNoMask(
 
                     if(threadIdx.x == 0)
                         sharedCounter = 0;
-
-                    __syncthreads();
 
                     bool done = totalResInBlock < MAX_RES_PER_BLOCK;
 
@@ -1787,16 +1835,16 @@ inline void StacklessBVH::Impl::StacklessCDSharedOtherPointsTrianglesActiveNoMas
              pp_cap,
              pe_cap,
              pt_cap] __device__()
-            {
-                int  tid    = blockIdx.x * blockDim.x + threadIdx.x;
-                bool active = tid < Size;
-                int  idx;
-                AABB bv;
-                if(active)
-                {
-                    idx = tid;
-                    bv  = _box(idx);
-                }
+	            {
+	                int  tid    = blockIdx.x * blockDim.x + threadIdx.x;
+	                bool active = tid < Size;
+	                int  idx;
+	                AABB bv;
+	                if(active)
+	                {
+	                    idx = tid;
+	                    bv  = _box(idx);
+	                }
 
                 int  st = 0;
                 Node node;
@@ -1816,37 +1864,37 @@ inline void StacklessBVH::Impl::StacklessCDSharedOtherPointsTrianglesActiveNoMas
 
                         if(node.bound.intersects(bv))
                         {
-                            if(node.lc == -1)
-                            {
-                                const int j = _lvs_idx(st - intSize);
+	                            if(node.lc == -1)
+	                            {
+	                                const int j = _lvs_idx(st - intSize);
 
-                                const auto V = Vs(idx);
-                                const auto F = Fs(j);
-                                bool accept = !(F[0] == V || F[1] == V || F[2] == V);
-                                if(accept)
-                                {
-                                    const auto body_i = v2b(V);
-                                    const auto body_j = v2b(F[0]);
-                                    accept = !(body_i == body_j
-                                               && !body_self_collision(body_i));
-                                }
-                                if(accept)
-                                {
-                                    const Vector4i vIs = {V, F(0), F(1), F(2)};
-                                    Vector3 Ps_arr[] = {Ps(vIs(0)),
-                                                        Ps(vIs(1)),
-                                                        Ps(vIs(2)),
-                                                        Ps(vIs(3))};
-                                    Float thickness = thicknesses(V) + triangle_thicknesses(j);
-                                    Float d_hat =
-                                        (d_hats(V) + triangle_d_hats(j)) * Float{0.5};
-                                    Vector2 range = D_range(thickness, d_hat);
-                                    if(alpha != static_cast<Float>(0))
-                                    {
-                                        Vector3 dP  = alpha * dxs(V);
-                                        Vector3 dF0 = alpha * dxs(F[0]);
-                                        Vector3 dF1 = alpha * dxs(F[1]);
-                                        Vector3 dF2 = alpha * dxs(F[2]);
+	                                const auto V = Vs(idx);
+	                                const auto F = Fs(j);
+	                                bool accept = !(F[0] == V || F[1] == V || F[2] == V);
+	                                if(accept)
+	                                {
+	                                    const auto body_i = v2b(V);
+	                                    const auto body_j = v2b(F[0]);
+	                                    accept = !(body_i == body_j
+	                                               && !body_self_collision(body_i));
+	                                }
+	                                if(accept)
+	                                {
+	                                    const Vector4i vIs = {V, F(0), F(1), F(2)};
+	                                    Vector3 Ps_arr[] = {Ps(vIs(0)),
+	                                                        Ps(vIs(1)),
+	                                                        Ps(vIs(2)),
+	                                                        Ps(vIs(3))};
+	                                    Float thickness = thicknesses(V) + triangle_thicknesses(j);
+	                                    Float d_hat =
+	                                        (d_hats(V) + triangle_d_hats(j)) * Float{0.5};
+	                                    Vector2 range = D_range(thickness, d_hat);
+	                                    if(alpha != static_cast<Float>(0))
+	                                    {
+	                                        Vector3 dP  = alpha * dxs(V);
+	                                        Vector3 dF0 = alpha * dxs(F[0]);
+	                                        Vector3 dF1 = alpha * dxs(F[1]);
+	                                        Vector3 dF2 = alpha * dxs(F[2]);
                                         if(!distance::point_triangle_ccd_broadphase(
                                                Ps_arr[0],
                                                Ps_arr[1],
@@ -1923,11 +1971,6 @@ inline void StacklessBVH::Impl::StacklessCDSharedOtherPointsTrianglesActiveNoMas
                         }
                     }
 
-                    MUDA_ASSERT(inner_I < MaxIter,
-                                "Exceeded max iteration in stackless traversal, %d (Max=%d), numObj=(%d)",
-                                inner_I,
-                                MaxIter,
-                                numObjs);
                 }
             });
 }
@@ -2029,11 +2072,6 @@ void StacklessBVH::Impl::StacklessCDSharedOther(Pred pred,
                             }
                         }
 
-                        MUDA_ASSERT(inner_I < MaxIter,
-                                    "Exceeded max iteration in stackless traversal, %d (Max=%d), numObj=(%d)",
-                                    inner_I,
-                                    MaxIter,
-                                    numObjs);
                     }
 
 
@@ -2096,7 +2134,7 @@ void StacklessBVH::detect(Pred callback, QueryBuffer& qbuffer)
     }
 
     if(qbuffer.m_pairs.size() == 0)
-        qbuffer.m_pairs.resize(50 * 1024);
+        qbuffer.m_pairs.resize(64 * 1024);
 
     auto do_query = [&]
     {
@@ -2125,9 +2163,15 @@ void StacklessBVH::detect(Pred callback, QueryBuffer& qbuffer)
 
 inline bool StacklessBVH::detect_edges_no_mask_launch(
     muda::CBufferView<Vector2i> edges,
-    muda::CBufferView<IndexT>   vertex_to_body,
+    muda::CBufferView<Vector3>  positions,
+    muda::CBufferView<Vector3>  displacements,
+    muda::CBufferView<Float>    edge_thicknesses,
+    muda::CBufferView<Float>    edge_d_hats,
+    Float                       alpha,
+    muda::CBufferView<IndexT>   edge_body_ids,
     muda::CBufferView<IndexT>   body_self_collision,
-    QueryBuffer&                qbuffer)
+    QueryBuffer&                qbuffer,
+    cudaStream_t                stream)
 {
     using namespace muda;
 
@@ -2144,16 +2188,22 @@ inline bool StacklessBVH::detect_edges_no_mask_launch(
         {
             corex_profile::ScopedPhase phase("bvh_query_detail",
                                              "edge_nomask_memset_counter");
-            cudaMemsetAsync(qbuffer.m_cpNum.data(), 0, sizeof(int));
+            cudaMemsetAsync(qbuffer.m_cpNum.data(), 0, sizeof(int), stream);
         }
 
         {
             corex_profile::ScopedPhase phase("bvh_query_detail", "edge_nomask_kernel");
             m_impl.StacklessCDSharedSelfEdgesNoMask(edges,
-                                                    vertex_to_body,
+                                                    positions,
+                                                    displacements,
+                                                    edge_thicknesses,
+                                                    edge_d_hats,
+                                                    alpha,
+                                                    edge_body_ids,
                                                     body_self_collision,
                                                     qbuffer.m_cpNum.view(),
-                                                    qbuffer.m_pairs.view());
+                                                    qbuffer.m_pairs.view(),
+                                                    stream);
         }
     }
 
@@ -2162,12 +2212,22 @@ inline bool StacklessBVH::detect_edges_no_mask_launch(
 
 inline void StacklessBVH::detect_edges_no_mask(
     muda::CBufferView<Vector2i> edges,
-    muda::CBufferView<IndexT>   vertex_to_body,
+    muda::CBufferView<Vector3>  positions,
+    muda::CBufferView<Vector3>  displacements,
+    muda::CBufferView<Float>    edge_thicknesses,
+    muda::CBufferView<Float>    edge_d_hats,
+    Float                       alpha,
+    muda::CBufferView<IndexT>   edge_body_ids,
     muda::CBufferView<IndexT>   body_self_collision,
     QueryBuffer&                qbuffer)
 {
     auto launched = detect_edges_no_mask_launch(edges,
-                                                vertex_to_body,
+                                                positions,
+                                                displacements,
+                                                edge_thicknesses,
+                                                edge_d_hats,
+                                                alpha,
+                                                edge_body_ids,
                                                 body_self_collision,
                                                 qbuffer);
     if(!launched)
@@ -2182,7 +2242,12 @@ inline void StacklessBVH::detect_edges_no_mask(
     {
         qbuffer.m_pairs.resize(h_cp_num * m_impl.config.reserve_ratio);
         detect_edges_no_mask_launch(edges,
-                                    vertex_to_body,
+                                    positions,
+                                    displacements,
+                                    edge_thicknesses,
+                                    edge_d_hats,
+                                    alpha,
+                                    edge_body_ids,
                                     body_self_collision,
                                     qbuffer);
     }
@@ -2229,12 +2294,12 @@ inline void StacklessBVH::detect_edges_active_no_mask(
 inline void StacklessBVH::QueryBuffer::build(muda::CBufferView<AABB> aabbs)
 {
     auto size = aabbs.size();
-    m_queryMtCode.resize(size);
-    m_querySortedId.resize(size);
+    corex_bvh_resize_no_construct(m_queryMtCode, size);
+    corex_bvh_resize_no_construct(m_querySortedId, size);
 
 
     Impl::calcMaxBVFromBox(aabbs, m_querySceneBox);
-    Impl::calcMCsFromBox(aabbs, m_querySceneBox, m_queryMtCode);
+    Impl::calcMCsFromBox(aabbs, m_querySceneBox, m_queryMtCode, m_querySortedId.view());
 
     auto d_querySceneBox = m_querySceneBox.data();
     auto d_queryMtCode   = m_queryMtCode.data();
@@ -2242,7 +2307,6 @@ inline void StacklessBVH::QueryBuffer::build(muda::CBufferView<AABB> aabbs)
     auto numQuery        = size;
 
     auto null_stream = thrust::cuda::par.on(nullptr);
-    thrust::sequence(null_stream, d_querySortedId, d_querySortedId + numQuery);
     thrust::sort_by_key(null_stream, d_queryMtCode, d_queryMtCode + numQuery, d_querySortedId);
 }
 
@@ -2255,9 +2319,11 @@ inline bool StacklessBVH::query_points_triangles_no_mask_launch(
     muda::CBufferView<Float>    thicknesses,
     muda::CBufferView<Float>    d_hats,
     Float                       alpha,
-    muda::CBufferView<IndexT>   vertex_to_body,
+    muda::CBufferView<IndexT>   point_body_ids,
+    muda::CBufferView<IndexT>   triangle_body_ids,
     muda::CBufferView<IndexT>   body_self_collision,
-    QueryBuffer&                qbuffer)
+    QueryBuffer&                qbuffer,
+    cudaStream_t                stream)
 {
     if(point_aabbs.size() == 0 || m_impl.objs.size() == 0)
     {
@@ -2267,13 +2333,13 @@ inline bool StacklessBVH::query_points_triangles_no_mask_launch(
 
     using namespace muda;
     if(qbuffer.m_pairs.size() == 0)
-        qbuffer.m_pairs.resize(50 * 1024);
+        qbuffer.m_pairs.resize(64 * 1024);
 
     {
         {
             corex_profile::ScopedPhase phase("bvh_query_detail",
                                              "pt_nomask_memset_counter");
-            cudaMemsetAsync(qbuffer.m_cpNum.data(), 0, sizeof(int));
+            cudaMemsetAsync(qbuffer.m_cpNum.data(), 0, sizeof(int), stream);
         }
 
         {
@@ -2286,10 +2352,12 @@ inline bool StacklessBVH::query_points_triangles_no_mask_launch(
                                                                thicknesses,
                                                                d_hats,
                                                                alpha,
-                                                               vertex_to_body,
+                                                               point_body_ids,
+                                                               triangle_body_ids,
                                                                body_self_collision,
                                                                qbuffer.m_cpNum.view(),
-                                                               qbuffer.m_pairs.view());
+                                                               qbuffer.m_pairs.view(),
+                                                               stream);
         }
     }
 
@@ -2305,7 +2373,8 @@ inline void StacklessBVH::query_points_triangles_no_mask(
     muda::CBufferView<Float>    thicknesses,
     muda::CBufferView<Float>    d_hats,
     Float                       alpha,
-    muda::CBufferView<IndexT>   vertex_to_body,
+    muda::CBufferView<IndexT>   point_body_ids,
+    muda::CBufferView<IndexT>   triangle_body_ids,
     muda::CBufferView<IndexT>   body_self_collision,
     QueryBuffer&                qbuffer)
 {
@@ -2317,7 +2386,8 @@ inline void StacklessBVH::query_points_triangles_no_mask(
                                                           thicknesses,
                                                           d_hats,
                                                           alpha,
-                                                          vertex_to_body,
+                                                          point_body_ids,
+                                                          triangle_body_ids,
                                                           body_self_collision,
                                                           qbuffer);
     if(!launched)
@@ -2339,7 +2409,8 @@ inline void StacklessBVH::query_points_triangles_no_mask(
                                               thicknesses,
                                               d_hats,
                                               alpha,
-                                              vertex_to_body,
+                                              point_body_ids,
+                                              triangle_body_ids,
                                               body_self_collision,
                                               qbuffer);
     }
@@ -2399,7 +2470,7 @@ void StacklessBVH::query(muda::CBufferView<AABB> aabbs, Pred callback, QueryBuff
 
     using namespace muda;
     if(qbuffer.m_pairs.size() == 0)
-        qbuffer.m_pairs.resize(50 * 1024);
+        qbuffer.m_pairs.resize(64 * 1024);
     qbuffer.build(aabbs);
 
     auto do_query = [&]
