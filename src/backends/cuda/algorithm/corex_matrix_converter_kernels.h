@@ -21,6 +21,10 @@ void launch_decode_hash_compact(int N, const uint64_t* ij_hash, int col_count,
 void launch_write_unique_ij(int N, const int* unique_ij_pairs_xy,
                             int* row_indices, int* col_indices);
 
+void launch_write_unique_ij_compact(int N, const uint64_t* unique_hashes,
+                                    int col_count, int* row_indices,
+                                    int* col_indices);
+
 void launch_mark_partition(int N, const int* unique_counts,
                            const int* offsets, int* sorted_partition);
 

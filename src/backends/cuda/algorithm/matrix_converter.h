@@ -44,6 +44,7 @@ class MatrixConverter
 
     muda::DeviceBuffer<uint64_t> ij_hash_input;
     muda::DeviceBuffer<uint64_t> ij_hash;
+    muda::DeviceBuffer<uint64_t> unique_ij_hashes;
 
     muda::DeviceBuffer<BlockMatrix> blocks_sorted;
     muda::DeviceBuffer<BlockMatrix> diag_blocks;

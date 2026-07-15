@@ -620,12 +620,25 @@ static __global__ void kernel_decode_hash_compact(int N, const uint64_t* ij_hash
 }
 
 static __global__ void kernel_write_unique_ij(int N, const int2* unique_ij_pairs,
-                                              int* row_indices, int* col_indices)
+                                               int* row_indices, int* col_indices)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if(i >= N) return;
     row_indices[i] = unique_ij_pairs[i].x;
     col_indices[i] = unique_ij_pairs[i].y;
+}
+
+static __global__ void kernel_write_unique_ij_compact(int N,
+                                                      const uint64_t* unique_hashes,
+                                                      int col_count,
+                                                      int* row_indices,
+                                                      int* col_indices)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    const uint64_t hash = unique_hashes[i];
+    row_indices[i] = static_cast<int>(hash / static_cast<uint64_t>(col_count));
+    col_indices[i] = static_cast<int>(hash % static_cast<uint64_t>(col_count));
 }
 
 static __global__ void kernel_mark_partition(int N, const int* unique_counts,
@@ -754,6 +767,16 @@ void launch_write_unique_ij(int N, const int* unique_ij_pairs_xy,
     kernel_write_unique_ij<<<grid_for(N), kBlock>>>(
         N, reinterpret_cast<const int2*>(unique_ij_pairs_xy), row_indices, col_indices);
     corex_matconv_sync_if_needed("write_unique_ij");
+}
+
+void launch_write_unique_ij_compact(int N, const uint64_t* unique_hashes,
+                                    int col_count, int* row_indices,
+                                    int* col_indices)
+{
+    MatconvPhase phase("write_unique_ij_compact");
+    kernel_write_unique_ij_compact<<<grid_for(N), kBlock>>>(
+        N, unique_hashes, col_count, row_indices, col_indices);
+    corex_matconv_sync_if_needed("write_unique_ij_compact");
 }
 
 void launch_mark_partition(int N, const int* unique_counts,

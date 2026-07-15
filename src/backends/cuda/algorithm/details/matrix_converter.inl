@@ -286,22 +286,22 @@ void MatrixConverter<T, N>::_make_unique_indices(const muda::DeviceTripletMatrix
     auto row_indices = to.row_indices();
     auto col_indices = to.col_indices();
 
-    loose_resize_no_construct(unique_ij_pairs, ij_pairs.size());
-    loose_resize_no_construct(unique_counts, ij_pairs.size());
+    loose_resize_no_construct(unique_counts, ij_hash.size());
 
 
     {
-        corex_profile::ScopedPhase phase("matconv", "triplet_rle_ij");
-        DeviceRunLengthEncode().Encode(ij_pairs.data(),
-                                       unique_ij_pairs.data(),
+        corex_profile::ScopedPhase phase("matconv", "triplet_rle_hash");
+        loose_resize_no_construct(unique_ij_hashes, ij_hash.size());
+        DeviceRunLengthEncode().Encode(ij_hash.data(),
+                                       unique_ij_hashes.data(),
                                        unique_counts.data(),
                                        count.data(),
-                                       ij_pairs.size());
+                                       ij_hash.size());
     }
 
     int h_count = corex_readback_int(count);
 
-    unique_ij_pairs.unsafe_resize_no_construct(h_count);
+    unique_ij_hashes.unsafe_resize_no_construct(h_count);
     unique_counts.unsafe_resize_no_construct(h_count);
 
     offsets.unsafe_resize_no_construct(unique_counts.size());
@@ -313,9 +313,10 @@ void MatrixConverter<T, N>::_make_unique_indices(const muda::DeviceTripletMatrix
     }
 
 
-    corex_matconv::launch_write_unique_ij(
+    corex_matconv::launch_write_unique_ij_compact(
         static_cast<int>(unique_counts.size()),
-        reinterpret_cast<const int*>(thrust::raw_pointer_cast(unique_ij_pairs.data())),
+        thrust::raw_pointer_cast(unique_ij_hashes.data()),
+        static_cast<int>(from.cols()),
         thrust::raw_pointer_cast(row_indices.data()),
         thrust::raw_pointer_cast(col_indices.data()));
 
