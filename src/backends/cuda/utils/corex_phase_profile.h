@@ -8,7 +8,7 @@ namespace uipc::backend::cuda::corex_profile
 {
 inline bool enabled()
 {
-#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+#if defined(UIPC_COREX_ENABLE_PHASE_PROFILE) && UIPC_COREX_ENABLE_PHASE_PROFILE
     static const bool enabled = std::getenv("UIPC_COREX_PHASE_PROFILE") != nullptr;
     return enabled;
 #else
@@ -52,6 +52,7 @@ class ScopedPhase
                 long long   frame  = -1,
                 long long   newton = -1,
                 long long   iter   = -1)
+#if defined(UIPC_COREX_ENABLE_PHASE_PROFILE) && UIPC_COREX_ENABLE_PHASE_PROFILE
         : m_category(category)
         , m_name(name)
         , m_frame(frame)
@@ -61,14 +62,21 @@ class ScopedPhase
         , m_start(m_enabled ? now_ms() : 0.0)
     {
     }
+#else
+    {
+    }
+#endif
 
     ~ScopedPhase()
     {
+#if defined(UIPC_COREX_ENABLE_PHASE_PROFILE) && UIPC_COREX_ENABLE_PHASE_PROFILE
         if(m_enabled)
             log_phase(m_category, m_name, m_frame, m_newton, m_iter, now_ms() - m_start);
+#endif
     }
 
   private:
+#if defined(UIPC_COREX_ENABLE_PHASE_PROFILE) && UIPC_COREX_ENABLE_PHASE_PROFILE
     const char* m_category;
     const char* m_name;
     long long   m_frame;
@@ -76,5 +84,6 @@ class ScopedPhase
     long long   m_iter;
     bool        m_enabled;
     double      m_start;
+#endif
 };
 }  // namespace uipc::backend::cuda::corex_profile
