@@ -404,8 +404,8 @@ SizeT LinearFusedPCG::fused_pcg(muda::DenseVectorView<Float>  x,
 {
     Timer pcg_timer{"FusedPCG"};
 
-    SizeT k     = 0;
-    d_converged = 0;
+    SizeT k = 0;
+    checkCudaErrors(cudaMemsetAsync(d_converged.data(), 0, sizeof(IndexT)));
 
     // z = P^{-1} * r
     {
