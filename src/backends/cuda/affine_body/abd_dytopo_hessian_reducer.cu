@@ -72,6 +72,25 @@ inline int corex_abd_compact_hash_sort_end_bit(SizeT rows, SizeT cols)
     return corex_abd_hash_sort_end_bit(rows, cols);
 }
 
+inline int corex_abd_readback_int(const muda::DeviceVar<int>& value)
+{
+    static int* pinned = nullptr;
+    if(!pinned)
+    {
+        int* tmp = nullptr;
+        if(cudaMallocHost(reinterpret_cast<void**>(&tmp), sizeof(int)) == cudaSuccess)
+            pinned = tmp;
+    }
+
+    if(!pinned)
+        return value;
+
+    checkCudaErrors(cudaMemcpyAsync(
+        pinned, value.data(), sizeof(int), cudaMemcpyDeviceToHost, 0));
+    checkCudaErrors(cudaStreamSynchronize(0));
+    return *pinned;
+}
+
 UIPC_HOST UIPC_DEVICE Matrix12x12 make_abd_contact_block(const ABDJacobi& Ji,
                                                          const Matrix3x3& H,
                                                          const ABDJacobi& Jj)
@@ -400,7 +419,7 @@ void ABDDyTopoHessianReducer::reduce_body_triplets(IndexT body_count)
                                        body_triplet_count);
     }
 
-    const int unique_count = m_body_unique_count_var;
+    const int unique_count = corex_abd_readback_int(m_body_unique_count_var);
     m_body_pair_count = unique_count;
     if(unique_count == 0)
         return;
@@ -486,7 +505,7 @@ void ABDDyTopoHessianReducer::build(muda::CTripletMatrixView<Float, 3> raw_hessi
             checkCudaErrors(cudaGetLastError());
         }
 
-        const int body_triplet_count = m_body_triplet_count_var;
+        const int body_triplet_count = corex_abd_readback_int(m_body_triplet_count_var);
         if(body_triplet_count == 0)
         {
             m_body_triplets.resize(body_count, body_count, 0);
