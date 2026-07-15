@@ -70,18 +70,6 @@ cudaEvent_t corex_preconditioner_ready_event()
     return event;
 }
 
-bool corex_env_enabled(const char* name)
-{
-    const char* env = std::getenv(name);
-    return env && env[0] != '\0' && env[0] != '0';
-}
-
-bool corex_linear_sync_enabled(const char* skip_env)
-{
-    return !corex_env_enabled("UIPC_COREX_LINEAR_SKIP_SYNC")
-           && !corex_env_enabled(skip_env);
-}
-
 __global__ void kernel_corex_clear_linear_assembly(Matrix3x3* values,
                                                    int*       rows,
                                                    int*       cols,
@@ -921,15 +909,6 @@ void GlobalLinearSystem::Impl::solve_linear_system()
     const bool corex_trace = corex_linear_trace_enabled();
     if(corex_trace)
         logger::info("[corex_trace] solve_linear_system: pre-sync");
-    auto profile_t0 = corex_profile::now_ms();
-    if(corex_linear_sync_enabled("UIPC_COREX_SKIP_PRE_PCG_SYNC"))
-        checkCudaErrors(cudaDeviceSynchronize());
-    corex_profile::log_phase("linear",
-                             "pre_pcg_sync",
-                             -1,
-                             -1,
-                             -1,
-                             corex_profile::now_ms() - profile_t0);
     if(corex_trace)
         logger::info("[corex_trace] solve_linear_system: post-sync, calling PCG");
     if(iterative_solver)
