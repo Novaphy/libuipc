@@ -48,8 +48,19 @@ __global__ void kernel_sum_line_search_energy(int           body_count,
     if(i < reporter_count)
         local += reporter_energy[i];
 
-    if(local != 0.0)
-        atomicAdd(total_energy, local);
+    __shared__ Float block_sum[256];
+    block_sum[threadIdx.x] = local;
+    __syncthreads();
+
+    for(int stride = blockDim.x >> 1; stride > 0; stride >>= 1)
+    {
+        if(threadIdx.x < stride)
+            block_sum[threadIdx.x] += block_sum[threadIdx.x + stride];
+        __syncthreads();
+    }
+
+    if(threadIdx.x == 0 && block_sum[0] != 0.0)
+        atomicAdd(total_energy, block_sum[0]);
 }
 
 REGISTER_SIM_SYSTEM(ABDLineSearchReporter);
