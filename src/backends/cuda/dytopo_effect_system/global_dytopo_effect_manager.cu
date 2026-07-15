@@ -200,34 +200,11 @@ void GlobalDyTopoEffectManager::Impl::_convert_matrix()
         !collected_dytopo_effect_hessian.triplet_count() ? false :
         _can_distribute_raw_full_hessian();
 
-    static const bool matrixfree_contact = []
-    {
-#if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
-        const char* e = std::getenv("UIPC_GIPC_MATRIXFREE_CONTACT");
-        return e && e[0] != '\0' && e[0] != '0';
-#else
-        return false;
-#endif
-    }();
-
     if(use_raw_full_hessian_distribution)
     {
         sorted_dytopo_effect_hessian.reshape(collected_dytopo_effect_hessian.rows(),
                                              collected_dytopo_effect_hessian.cols());
         sorted_dytopo_effect_hessian.resize_triplets(0);
-    }
-    else if(matrixfree_contact)
-    {
-        auto& from = collected_dytopo_effect_hessian;
-        auto& to   = sorted_dytopo_effect_hessian;
-        to.reshape(from.rows(), from.cols());
-        to.resize_triplets(from.triplet_count());
-        if(from.triplet_count() > 0)
-        {
-            to.row_indices().copy_from(from.row_indices());
-            to.col_indices().copy_from(from.col_indices());
-            to.values().copy_from(from.values());
-        }
     }
     else
     {
@@ -1403,33 +1380,7 @@ void GlobalDyTopoEffectManager::Impl::_convert_matrix()
     use_raw_full_gradient_distribution = false;
     use_raw_full_hessian_distribution = false;
 
-    static const bool matrixfree_contact = []
-    {
-#if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
-        const char* e = std::getenv("UIPC_GIPC_MATRIXFREE_CONTACT");
-        return e && e[0] != '\0' && e[0] != '0';
-#else
-        return false;
-#endif
-    }();
-
-    if(matrixfree_contact)
-    {
-        auto& from = collected_dytopo_effect_hessian;
-        auto& to   = sorted_dytopo_effect_hessian;
-        to.reshape(from.rows(), from.cols());
-        to.resize_triplets(from.triplet_count());
-        if(from.triplet_count() > 0)
-        {
-            to.row_indices().copy_from(from.row_indices());
-            to.col_indices().copy_from(from.col_indices());
-            to.values().copy_from(from.values());
-        }
-    }
-    else
-    {
-        matrix_converter.convert(collected_dytopo_effect_hessian, sorted_dytopo_effect_hessian);
-    }
+    matrix_converter.convert(collected_dytopo_effect_hessian, sorted_dytopo_effect_hessian);
 
     matrix_converter.convert(collected_dytopo_effect_gradient, sorted_dytopo_effect_gradient);
 }
