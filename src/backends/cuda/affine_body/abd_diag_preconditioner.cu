@@ -6,6 +6,7 @@
 #include <muda/ext/eigen/inverse.h>
 #include <kernel_cout.h>
 #include <muda/check/check_cuda_errors.h>
+#include <cub/block/block_reduce.cuh>
 #include <cstdlib>
 #include <limits>
 #include <vector>
@@ -343,21 +344,24 @@ __global__ void kernel_abd_block_inverse_apply(int           n,
                                                Float         block_mix,
                                                const Float*  r,
                                                Float*        z,
-                                               const IndexT* converged)
+                                               const IndexT* converged,
+                                               Float*        dot)
 {
     if(*converged != 0) return;
     constexpr int N = 12;
     constexpr int LanesPerBody = 16;
     constexpr int BodiesPerBlock = 4;
+    constexpr int ThreadsPerBlock = LanesPerBody * BodiesPerBlock;
 
     int local_body = threadIdx.x / LanesPerBody;
     int row        = threadIdx.x - local_body * LanesPerBody;
     int i          = blockIdx.x * BodiesPerBlock + local_body;
-    if(i >= n) return;
+    const bool active = i < n && row < N;
 
-    Float r_lane = row < N ? r[i * N + row] : static_cast<Float>(0);
+    Float r_lane = active ? r[i * N + row] : static_cast<Float>(0);
+    Float dot_term = 0;
 
-    if(row < N)
+    if(active)
     {
         Float s = static_cast<Float>(0);
         for(int col = 0; col < N; ++col)
@@ -371,6 +375,16 @@ __global__ void kernel_abd_block_inverse_apply(int           n,
             s = block_mix * s + (static_cast<Float>(1) - block_mix) * j;
         }
         z[i * N + row] = s;
+        dot_term = r_lane * s;
+    }
+
+    if(dot)
+    {
+        using BlockReduce = cub::BlockReduce<Float, ThreadsPerBlock>;
+        __shared__ typename BlockReduce::TempStorage storage;
+        Float block_dot = BlockReduce(storage).Sum(dot_term);
+        if(threadIdx.x == 0)
+            muda::atomic_add(dot, block_dot);
     }
 }
 
@@ -394,14 +408,35 @@ __global__ void kernel_abd_precond_extract(int          n,
     }
 }
 
-__global__ void kernel_abd_jacobi_apply(
-    int n, const Float* diag_recip, const Float* r, Float* z, const IndexT* converged)
+__global__ void kernel_abd_jacobi_apply(int           n,
+                                        const Float*  diag_recip,
+                                        const Float*  r,
+                                        Float*        z,
+                                        const IndexT* converged,
+                                        Float*        dot)
 {
     if(*converged != 0) return;
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if(i >= n) return;
-    for(int k = 0; k < 12; ++k)
-        z[i * 12 + k] = diag_recip[i * 12 + k] * r[i * 12 + k];
+    Float dot_term = 0;
+    if(i < n)
+    {
+        for(int k = 0; k < 12; ++k)
+        {
+            const int j = i * 12 + k;
+            const Float value = diag_recip[j] * r[j];
+            z[j] = value;
+            dot_term += r[j] * value;
+        }
+    }
+
+    if(dot)
+    {
+        using BlockReduce = cub::BlockReduce<Float, 256>;
+        __shared__ typename BlockReduce::TempStorage storage;
+        Float block_dot = BlockReduce(storage).Sum(dot_term);
+        if(threadIdx.x == 0)
+            muda::atomic_add(dot, block_dot);
+    }
 }
 
 }  // namespace
@@ -428,6 +463,8 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
     }
 
     virtual void do_init(InitInfo& info) override {}
+
+    virtual bool do_supports_apply_dot() const override { return true; }
 
     virtual void do_assemble(GlobalLinearSystem::LocalPreconditionerAssemblyInfo& info) override
     {
@@ -560,6 +597,7 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
     {
         using namespace muda;
         auto converged = info.converged();
+        Float* dot = info.compute_dot() ? info.dot().data() : nullptr;
 
         {
             auto n = static_cast<int>(jacobi_recip.size() / 12);
@@ -577,7 +615,8 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
                         block_inverse_mix,
                         (const Float*)info.r().data(),
                         (Float*)info.z().data(),
-                        (const IndexT*)converged.data());
+                        (const IndexT*)converged.data(),
+                        dot);
                 }
                 else
                 {
@@ -587,7 +626,8 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
                         (const Float*)jacobi_recip.data(),
                         (const Float*)info.r().data(),
                         (Float*)info.z().data(),
-                        (const IndexT*)converged.data());
+                        (const IndexT*)converged.data(),
+                        dot);
                 }
                 checkCudaErrors(cudaGetLastError());
                 if(corex_abd_precond_sync_enabled())

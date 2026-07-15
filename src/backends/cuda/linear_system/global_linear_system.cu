@@ -994,6 +994,53 @@ void GlobalLinearSystem::Impl::apply_preconditioner(muda::DenseVectorView<Float>
     }
 }
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+bool GlobalLinearSystem::Impl::apply_preconditioner_dot(
+    muda::DenseVectorView<Float>  z,
+    muda::CDenseVectorView<Float> r,
+    muda::CVarView<IndexT>        converged,
+    muda::VarView<Float>          dot)
+{
+    // A global preconditioner may cover arbitrary rows, and unpreconditioned
+    // local ranges still use BufferLaunch copies. Until those implementations
+    // expose fused reductions, use the generic dot path for such systems.
+    if(global_preconditioner || !no_precond_diag_subsystem_indices.empty()
+       || local_preconditioners.view().size() == 0)
+    {
+        apply_preconditioner(z, r, converged);
+        return false;
+    }
+
+    for(auto& preconditioner : local_preconditioners.view())
+    {
+        if(!preconditioner->supports_apply_dot())
+        {
+            apply_preconditioner(z, r, converged);
+            return false;
+        }
+    }
+
+    checkCudaErrors(cudaMemsetAsync(dot.data(), 0, sizeof(Float)));
+
+    auto diag_dof_counts  = diag_dof_offsets_counts.counts();
+    auto diag_dof_offsets = diag_dof_offsets_counts.offsets();
+    for(auto& preconditioner : local_preconditioners.view())
+    {
+        ApplyPreconditionerInfo info{this};
+        auto                    index  = preconditioner->m_subsystem->m_index;
+        auto                    offset = diag_dof_offsets[index];
+        auto                    count  = diag_dof_counts[index];
+        info.m_z                       = z.subview(offset, count);
+        info.m_r                       = r.subview(offset, count);
+        info.m_converged               = converged;
+        info.m_dot                     = dot;
+        info.m_compute_dot             = true;
+        preconditioner->apply(info);
+    }
+    return true;
+}
+#endif
+
 void GlobalLinearSystem::Impl::spmv(Float                         a,
                                     muda::CDenseVectorView<Float> x,
                                     Float                         b,

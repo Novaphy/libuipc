@@ -31,6 +31,11 @@ void LocalPreconditioner::apply(GlobalLinearSystem::ApplyPreconditionerInfo& inf
     do_apply(info);
 }
 
+bool LocalPreconditioner::supports_apply_dot() const
+{
+    return do_supports_apply_dot();
+}
+
 void LocalPreconditioner::BuildInfo::connect(DiagLinearSubsystem* system)
 {
     m_subsystem = system;

@@ -548,15 +548,18 @@ SizeT LinearFusedPCG::fused_pcg(muda::DenseVectorView<Float>  x,
                              d_norm2.view());
 
         // z = P^{-1} * r
+        bool rz_fused = false;
         {
             Timer timer{"Apply Preconditioner"};
-            apply_preconditioner(z, r, d_converged.view());
+            rz_fused = apply_preconditioner_dot(
+                z, r, d_converged.view(), d_rz_new.view());
         }
 
         // rz_new = r^T * z and norm(r).  Use the same residual-norm
         // convergence criterion as LinearPCG; |r^T z| is not equivalent when
         // the preconditioner strongly scales contact rows.
-        fused_dot(r.cview(), z.cview(), d_rz_new.view());
+        if(!rz_fused)
+            fused_dot(r.cview(), z.cview(), d_rz_new.view());
         // Check error ratio periodically to avoid per-iteration D2H synchronization.
         bool do_check = (k % effective_check_interval == 0) || (k + 1 == max_iter);
         if(do_check)

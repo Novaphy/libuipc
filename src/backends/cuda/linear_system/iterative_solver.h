@@ -31,6 +31,12 @@ class IterativeSolver : public SimSystem
     void apply_preconditioner(muda::DenseVectorView<Float>  z,
                               muda::CDenseVectorView<Float> r,
                               muda::CVarView<IndexT>        converged);
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+    bool apply_preconditioner_dot(muda::DenseVectorView<Float>  z,
+                                  muda::CDenseVectorView<Float> r,
+                                  muda::CVarView<IndexT>        converged,
+                                  muda::VarView<Float>          dot);
+#endif
     bool accuracy_statisfied(muda::DenseVectorView<Float> r);
     muda::LinearSystemContext& ctx() const;
     SizeT linear_system_triplet_count() const;

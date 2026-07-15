@@ -209,12 +209,20 @@ class GlobalLinearSystem : public SimSystem
         DenseVectorView  z() { return m_z; }
         CDenseVectorView r() { return m_r; }
         muda::CVarView<IndexT> converged() { return m_converged; }
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        bool compute_dot() const { return m_compute_dot; }
+        muda::VarView<Float> dot() { return m_dot; }
+#endif
 
       private:
         friend class Impl;
         DenseVectorView  m_z;
         CDenseVectorView m_r;
         muda::CVarView<IndexT> m_converged;
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        muda::VarView<Float> m_dot;
+        bool                 m_compute_dot = false;
+#endif
         Impl*            m_impl = nullptr;
     };
 
@@ -336,6 +344,12 @@ class GlobalLinearSystem : public SimSystem
         void apply_preconditioner(muda::DenseVectorView<Float>  z,
                                   muda::CDenseVectorView<Float> r,
                                   muda::CVarView<IndexT>        converged);
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+        bool apply_preconditioner_dot(muda::DenseVectorView<Float>  z,
+                                      muda::CDenseVectorView<Float> r,
+                                      muda::CVarView<IndexT>        converged,
+                                      muda::VarView<Float>          dot);
+#endif
 
         void spmv(Float a, muda::CDenseVectorView<Float> x, Float b, muda::DenseVectorView<Float> y);
         void spmv_dot(muda::CDenseVectorView<Float> x,

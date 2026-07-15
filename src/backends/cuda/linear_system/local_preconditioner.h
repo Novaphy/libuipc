@@ -31,6 +31,7 @@ class LocalPreconditioner : public SimSystem
     virtual void do_init(InitInfo& info)   = 0;
     virtual void do_assemble(GlobalLinearSystem::LocalPreconditionerAssemblyInfo& info) = 0;
     virtual void do_apply(GlobalLinearSystem::ApplyPreconditionerInfo& info) = 0;
+    virtual bool do_supports_apply_dot() const { return false; }
 
   private:
     friend class GlobalLinearSystem;
@@ -40,6 +41,7 @@ class LocalPreconditioner : public SimSystem
 
     void assemble(GlobalLinearSystem::LocalPreconditionerAssemblyInfo& info);
     void apply(GlobalLinearSystem::ApplyPreconditionerInfo& info);
+    bool supports_apply_dot() const;
     DiagLinearSubsystem* m_subsystem = nullptr;
 };
 }  // namespace uipc::backend::cuda
