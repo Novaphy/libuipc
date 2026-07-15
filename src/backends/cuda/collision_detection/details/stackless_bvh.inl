@@ -14,7 +14,7 @@ using Vector2i      = uipc::Vector2i;
 using uint   = uint32_t;
 using ullint = unsigned long long int;
 
-constexpr int K_THREADS = 256;
+constexpr int K_THREADS = 224;
 constexpr int K_WARPS   = K_THREADS >> 5;
 
 constexpr int K_REDUCTION_LAYER  = 5;
@@ -32,7 +32,7 @@ constexpr uint   aabbMask  = 0xFFFFFFFFu >> (32 - aabbBits);
 constexpr uint   MaxIndex  = 0xFFFFFFFFFFFFFFFFu >> offset3;
 
 constexpr uint MAX_CD_NUM_PER_VERT = 64;
-constexpr int  MAX_RES_PER_BLOCK   = 2048;
+constexpr int  MAX_RES_PER_BLOCK   = 1024;
 
 static __global__ void kernel_fill_u32(uint32_t* data, int n, uint32_t value)
 {
