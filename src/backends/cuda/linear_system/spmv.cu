@@ -149,7 +149,8 @@ void Spmv::sym_spmv(Float                           a,
     }
     if(nt > 0)
     {
-        const bool force_row_scan = std::getenv("UIPC_COREX_SPMV_ROW_SCAN") != nullptr;
+        static const bool force_row_scan =
+            std::getenv("UIPC_COREX_SPMV_ROW_SCAN") != nullptr;
         if(force_row_scan)
         {
             int n_block_rows = ny / 3;
