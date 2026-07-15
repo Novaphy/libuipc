@@ -173,8 +173,39 @@ class StacklessBVH
                                                muda::CBufferView<Float>    d_hats,
                                                Float                       alpha,
                                                muda::CBufferView<IndexT>   vertex_to_body,
+                                     muda::CBufferView<IndexT>   body_self_collision,
+                                     QueryBuffer&                qbuffer);
+
+    void detect_edges_active_no_mask(muda::CBufferView<Vector2i> edges,
+                                     muda::CBufferView<Vector3>  positions,
+                                     muda::CBufferView<Vector3>  displacements,
+                                     muda::CBufferView<Vector3>  rest_positions,
+                                     muda::CBufferView<Float>    edge_thicknesses,
+                                     muda::CBufferView<Float>    edge_d_hats,
+                                     Float                       alpha,
+                                     muda::CBufferView<IndexT>   vertex_to_body,
+                                     muda::CBufferView<IndexT>   body_self_collision,
+                                     muda::BufferView<Vector2i>  out_PPs,
+                                     muda::BufferView<Vector3i>  out_PEs,
+                                     muda::BufferView<Vector4i>  out_EEs,
+                                     muda::BufferView<IndexT>    selected_counts);
+
+    void query_points_triangles_active_no_mask(muda::CBufferView<AABB>     point_aabbs,
+                                               muda::CBufferView<IndexT>   surf_vertices,
+                                               muda::CBufferView<Vector3i> surf_triangles,
+                                               muda::CBufferView<Vector3>  positions,
+                                               muda::CBufferView<Vector3>  displacements,
+                                               muda::CBufferView<Float>    thicknesses,
+                                               muda::CBufferView<Float>    d_hats,
+                                               muda::CBufferView<Float>    triangle_thicknesses,
+                                               muda::CBufferView<Float>    triangle_d_hats,
+                                               Float                       alpha,
+                                               muda::CBufferView<IndexT>   vertex_to_body,
                                                muda::CBufferView<IndexT>   body_self_collision,
-                                               QueryBuffer&                qbuffer);
+                                               muda::BufferView<Vector2i>  out_PPs,
+                                               muda::BufferView<Vector3i>  out_PEs,
+                                               muda::BufferView<Vector4i>  out_PTs,
+                                               muda::BufferView<IndexT>    selected_counts);
 
 
   public:
@@ -194,6 +225,20 @@ class StacklessBVH
             muda::CBufferView<IndexT>   body_self_collision,
             muda::VarView<int>          cpNum,
             muda::BufferView<Vector2i>  buffer);
+        void StacklessCDSharedSelfEdgesActiveNoMask(
+            muda::CBufferView<Vector2i> edges,
+            muda::CBufferView<Vector3>  positions,
+            muda::CBufferView<Vector3>  displacements,
+            muda::CBufferView<Vector3>  rest_positions,
+            muda::CBufferView<Float>    edge_thicknesses,
+            muda::CBufferView<Float>    edge_d_hats,
+            Float                       alpha,
+            muda::CBufferView<IndexT>   vertex_to_body,
+            muda::CBufferView<IndexT>   body_self_collision,
+            muda::BufferView<Vector2i>  out_PPs,
+            muda::BufferView<Vector3i>  out_PEs,
+            muda::BufferView<Vector4i>  out_EEs,
+            muda::BufferView<IndexT>    selected_counts);
         void StacklessCDSharedOtherPointsTrianglesNoMask(
             muda::CBufferView<AABB>     point_aabbs,
             muda::CBufferView<IndexT>   surf_vertices,
@@ -207,6 +252,23 @@ class StacklessBVH
             muda::CBufferView<IndexT>   body_self_collision,
             muda::VarView<int>          cpNum,
             muda::BufferView<Vector2i>  buffer);
+        void StacklessCDSharedOtherPointsTrianglesActiveNoMask(
+            muda::CBufferView<AABB>     point_aabbs,
+            muda::CBufferView<IndexT>   surf_vertices,
+            muda::CBufferView<Vector3i> surf_triangles,
+            muda::CBufferView<Vector3>  positions,
+            muda::CBufferView<Vector3>  displacements,
+            muda::CBufferView<Float>    thicknesses,
+            muda::CBufferView<Float>    d_hats,
+            muda::CBufferView<Float>    triangle_thicknesses,
+            muda::CBufferView<Float>    triangle_d_hats,
+            Float                       alpha,
+            muda::CBufferView<IndexT>   vertex_to_body,
+            muda::CBufferView<IndexT>   body_self_collision,
+            muda::BufferView<Vector2i>  out_PPs,
+            muda::BufferView<Vector3i>  out_PEs,
+            muda::BufferView<Vector4i>  out_PTs,
+            muda::BufferView<IndexT>    selected_counts);
         template <typename Pred>
         void StacklessCDSharedOther(Pred                       pred,
                                     muda::CBufferView<AABB>    query_aabbs,

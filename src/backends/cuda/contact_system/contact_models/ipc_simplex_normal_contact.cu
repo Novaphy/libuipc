@@ -591,6 +591,259 @@ __global__ void kernel_PT_contact_assemble(
     }
 }
 
+__global__ void kernel_all_contact_assemble(
+    int total_count,
+    int pt_count,
+    int ee_count,
+    int pe_count,
+    bool gradient_only,
+    muda::CDense2D<ContactCoeff> table,
+    muda::CDense1D<int> contact_ids,
+    muda::CDense1D<IndexT> body_ids,
+    muda::CDense1D<Vector3> Ps,
+    muda::CDense1D<Vector3> rest_Ps,
+    muda::CDense1D<Float> thicknesses,
+    muda::CDense1D<Float> d_hats,
+    Float dt,
+    muda::CDense1D<Vector4i> PTs,
+    muda::DoubletVectorViewer<Float, 3> PT_Gs,
+    muda::TripletMatrixViewer<Float, 3> PT_Hs,
+    muda::CDense1D<Vector4i> EEs,
+    muda::DoubletVectorViewer<Float, 3> EE_Gs,
+    muda::TripletMatrixViewer<Float, 3> EE_Hs,
+    muda::CDense1D<Vector3i> PEs,
+    muda::DoubletVectorViewer<Float, 3> PE_Gs,
+    muda::TripletMatrixViewer<Float, 3> PE_Hs,
+    muda::CDense1D<Vector2i> PPs,
+    muda::DoubletVectorViewer<Float, 3> PP_Gs,
+    muda::TripletMatrixViewer<Float, 3> PP_Hs,
+    CorexContactSpdStats* spd_stats,
+    Float pe_diag_reg,
+    Float pe_kappa_scale,
+    Float spd_ratio_trigger,
+    Float pe_diag_scale,
+    Float pp_diag_scale,
+    Float ee_diag_scale,
+    Float pt_diag_scale)
+{
+    using namespace sym::codim_ipc_simplex_contact;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= total_count) return;
+
+    int ee_offset = pt_count;
+    int pe_offset = ee_offset + ee_count;
+    int pp_offset = pe_offset + pe_count;
+
+    if(idx < ee_offset)
+    {
+        int      i  = idx;
+        Vector4i PT = PTs(i);
+        Vector4i cids = {contact_ids(PT[0]), contact_ids(PT[1]),
+                         contact_ids(PT[2]), contact_ids(PT[3])};
+        Float kt2 = PT_kappa(table, cids) * dt * dt;
+
+        const auto& P  = Ps(PT[0]);
+        const auto& T0 = Ps(PT[1]);
+        const auto& T1 = Ps(PT[2]);
+        const auto& T2 = Ps(PT[3]);
+
+        Float thickness = PT_thickness(thicknesses(PT(0)), thicknesses(PT(1)),
+                                       thicknesses(PT(2)), thicknesses(PT(3)));
+        Float d_hat     = PT_d_hat(d_hats(PT(0)), d_hats(PT(1)),
+                                   d_hats(PT(2)), d_hats(PT(3)));
+
+        Vector4i flag = distance::point_triangle_distance_flag(P, T0, T1, T2);
+
+        Vector12 G;
+        if(gradient_only)
+        {
+            PT_barrier_gradient(G, flag, kt2, d_hat, thickness, P, T0, T1, T2);
+            DoubletVectorAssembler DVA{PT_Gs};
+            DVA.segment<4>(i * 4).write(PT, G);
+        }
+        else
+        {
+            Matrix12x12 H;
+            corex_record_contact_inputs(spd_stats, CorexSpdPT, kt2, d_hat, thickness);
+            Matrix12x12 H_before;
+#if UIPC_ENABLE_GIPC_NATIVE_CONTACT
+            PT_barrier_gradient_gipc_native_hessian(
+                G, H, flag, kt2, d_hat, thickness, P, T0, T1, T2);
+            H_before = H;
+#else
+            PT_barrier_gradient_hessian(G, H, flag, kt2, d_hat, thickness,
+                                        P, T0, T1, T2);
+            H_before = H;
+            make_spd(H);
+            corex_apply_spd_conditioning(H_before, H, spd_ratio_trigger, pt_diag_scale);
+#endif
+            corex_record_spd_projection(spd_stats, CorexSpdPT, H_before, H);
+            DoubletVectorAssembler DVA{PT_Gs};
+            DVA.segment<4>(i * 4).write(PT, G);
+            TripletMatrixAssembler TMA{PT_Hs};
+            TMA.half_block<4>(i * SimplexNormalContact::PTHalfHessianSize).write(PT, H);
+        }
+    }
+    else if(idx < pe_offset)
+    {
+        int      i  = idx - ee_offset;
+        Vector4i EE = EEs(i);
+        Vector4i cids = {contact_ids(EE[0]), contact_ids(EE[1]),
+                         contact_ids(EE[2]), contact_ids(EE[3])};
+        Float kt2 = EE_kappa(table, cids) * dt * dt;
+
+        const auto& Ea0 = Ps(EE[0]);
+        const auto& Ea1 = Ps(EE[1]);
+        const auto& Eb0 = Ps(EE[2]);
+        const auto& Eb1 = Ps(EE[3]);
+
+        const auto& t0_Ea0 = rest_Ps(EE[0]);
+        const auto& t0_Ea1 = rest_Ps(EE[1]);
+        const auto& t0_Eb0 = rest_Ps(EE[2]);
+        const auto& t0_Eb1 = rest_Ps(EE[3]);
+
+        Float thickness = EE_thickness(thicknesses(EE(0)), thicknesses(EE(1)),
+                                       thicknesses(EE(2)), thicknesses(EE(3)));
+        Float d_hat     = EE_d_hat(d_hats(EE(0)), d_hats(EE(1)),
+                                   d_hats(EE(2)), d_hats(EE(3)));
+
+        Vector4i flag = distance::edge_edge_distance_flag(Ea0, Ea1, Eb0, Eb1);
+
+        Vector12 G;
+        if(gradient_only)
+        {
+            mollified_EE_barrier_gradient(G, flag, kt2, d_hat, thickness,
+                                          t0_Ea0, t0_Ea1, t0_Eb0, t0_Eb1,
+                                          Ea0, Ea1, Eb0, Eb1);
+            DoubletVectorAssembler DVA{EE_Gs};
+            DVA.segment<4>(i * 4).write(EE, G);
+        }
+        else
+        {
+            Matrix12x12 H;
+            corex_record_contact_inputs(spd_stats, CorexSpdEE, kt2, d_hat, thickness);
+            Matrix12x12 H_before;
+#if UIPC_ENABLE_GIPC_NATIVE_CONTACT
+            mollified_EE_barrier_gradient_gipc_native_hessian(
+                G, H, flag, kt2, d_hat, thickness,
+                t0_Ea0, t0_Ea1, t0_Eb0, t0_Eb1,
+                Ea0, Ea1, Eb0, Eb1);
+            H_before = H;
+#else
+            mollified_EE_barrier_gradient_hessian(G, H, flag, kt2, d_hat, thickness,
+                                                  t0_Ea0, t0_Ea1, t0_Eb0, t0_Eb1,
+                                                  Ea0, Ea1, Eb0, Eb1);
+            H_before = H;
+            make_spd(H);
+            corex_apply_spd_conditioning(H_before, H, spd_ratio_trigger, ee_diag_scale);
+#endif
+            corex_record_spd_projection(spd_stats, CorexSpdEE, H_before, H);
+            DoubletVectorAssembler DVA{EE_Gs};
+            DVA.segment<4>(i * 4).write(EE, G);
+            TripletMatrixAssembler TMA{EE_Hs};
+            TMA.half_block<4>(i * SimplexNormalContact::EEHalfHessianSize).write(EE, H);
+        }
+    }
+    else if(idx < pp_offset)
+    {
+        int      i  = idx - pe_offset;
+        Vector3i PE = PEs(i);
+        Vector3i cids = {contact_ids(PE[0]), contact_ids(PE[1]), contact_ids(PE[2])};
+        Vector3i bids = {body_ids(PE[0]), body_ids(PE[1]), body_ids(PE[2])};
+        Float kt2 = PE_kappa(table, cids) * dt * dt;
+        kt2 *= pe_kappa_scale;
+
+        const auto& P  = Ps(PE[0]);
+        const auto& E0 = Ps(PE[1]);
+        const auto& E1 = Ps(PE[2]);
+
+        Float thickness = PE_thickness(thicknesses(PE(0)), thicknesses(PE(1)), thicknesses(PE(2)));
+        Float d_hat     = PE_d_hat(d_hats(PE(0)), d_hats(PE(1)), d_hats(PE(2)));
+
+        Vector3i flag = distance::point_edge_distance_flag(P, E0, E1);
+
+        Vector9 G;
+        if(gradient_only)
+        {
+            PE_barrier_gradient(G, flag, kt2, d_hat, thickness, P, E0, E1);
+            DoubletVectorAssembler DVA{PE_Gs};
+            DVA.segment<3>(i * 3).write(PE, G);
+        }
+        else
+        {
+            Matrix9x9 H;
+            corex_record_contact_inputs(spd_stats, CorexSpdPE, kt2, d_hat, thickness);
+            Matrix9x9 H_before;
+#if UIPC_ENABLE_GIPC_NATIVE_CONTACT
+            PE_barrier_gradient_gipc_native_hessian(
+                G, H, flag, kt2, d_hat, thickness, P, E0, E1);
+            if(pe_diag_reg > static_cast<Float>(0))
+                for(int d = 0; d < 9; ++d)
+                    H(d, d) += pe_diag_reg;
+            H_before = H;
+#else
+            PE_barrier_gradient_hessian(G, H, flag, kt2, d_hat, thickness, P, E0, E1);
+            if(pe_diag_reg > static_cast<Float>(0))
+                for(int d = 0; d < 9; ++d)
+                    H(d, d) += pe_diag_reg;
+            H_before = H;
+            make_spd(H);
+            corex_apply_spd_conditioning(H_before, H, spd_ratio_trigger, pe_diag_scale);
+#endif
+            corex_record_spd_projection(spd_stats, CorexSpdPE, H_before, H);
+            corex_record_pe_outlier(spd_stats, i, PE, bids, H_before, H);
+            DoubletVectorAssembler DVA{PE_Gs};
+            DVA.segment<3>(i * 3).write(PE, G);
+            TripletMatrixAssembler TMA{PE_Hs};
+            TMA.half_block<3>(i * SimplexNormalContact::PEHalfHessianSize).write(PE, H);
+        }
+    }
+    else
+    {
+        int      i  = idx - pp_offset;
+        Vector2i PP = PPs(i);
+        Vector2i cids = {contact_ids(PP[0]), contact_ids(PP[1])};
+        Float kt2 = PP_kappa(table, cids) * dt * dt;
+
+        const auto& P0 = Ps(PP[0]);
+        const auto& P1 = Ps(PP[1]);
+
+        Float thickness = PP_thickness(thicknesses(PP(0)), thicknesses(PP(1)));
+        Float d_hat     = PP_d_hat(d_hats(PP(0)), d_hats(PP(1)));
+
+        Vector2i flag = distance::point_point_distance_flag(P0, P1);
+
+        Vector6 G;
+        if(gradient_only)
+        {
+            PP_barrier_gradient(G, flag, kt2, d_hat, thickness, P0, P1);
+            DoubletVectorAssembler DVA{PP_Gs};
+            DVA.segment<2>(i * 2).write(PP, G);
+        }
+        else
+        {
+            Matrix6x6 H;
+            corex_record_contact_inputs(spd_stats, CorexSpdPP, kt2, d_hat, thickness);
+            Matrix6x6 H_before;
+#if UIPC_ENABLE_GIPC_NATIVE_CONTACT
+            PP_barrier_gradient_gipc_native_hessian(
+                G, H, flag, kt2, d_hat, thickness, P0, P1);
+            H_before = H;
+#else
+            PP_barrier_gradient_hessian(G, H, flag, kt2, d_hat, thickness, P0, P1);
+            H_before = H;
+            make_spd(H);
+            corex_apply_spd_conditioning(H_before, H, spd_ratio_trigger, pp_diag_scale);
+#endif
+            corex_record_spd_projection(spd_stats, CorexSpdPP, H_before, H);
+            DoubletVectorAssembler DVA{PP_Gs};
+            DVA.segment<2>(i * 2).write(PP, G);
+            TripletMatrixAssembler TMA{PP_Hs};
+            TMA.half_block<2>(i * SimplexNormalContact::PPHalfHessianSize).write(PP, H);
+        }
+    }
+}
+
 __global__ void kernel_PT_energy(
     int count,
     muda::CDense2D<ContactCoeff> table,
@@ -710,6 +963,106 @@ __global__ void kernel_PP_energy(
     Es(i) = PP_barrier_energy(flag, kt2, d_hat, thickness, P0, P1);
 }
 
+__global__ void kernel_all_contact_energy(
+    int total_count,
+    int pt_count,
+    int ee_count,
+    int pe_count,
+    muda::CDense2D<ContactCoeff> table,
+    muda::CDense1D<int> contact_ids,
+    muda::CDense1D<Vector4i> PTs,
+    muda::Dense1D<Float> PT_Es,
+    muda::CDense1D<Vector4i> EEs,
+    muda::Dense1D<Float> EE_Es,
+    muda::CDense1D<Vector3i> PEs,
+    muda::Dense1D<Float> PE_Es,
+    muda::CDense1D<Vector2i> PPs,
+    muda::Dense1D<Float> PP_Es,
+    muda::CDense1D<Vector3> Ps,
+    muda::CDense1D<Vector3> rest_Ps,
+    muda::CDense1D<Float> thicknesses,
+    muda::CDense1D<Float> d_hats,
+    Float dt)
+{
+    using namespace sym::codim_ipc_simplex_contact;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= total_count) return;
+
+    const int ee_offset = pt_count;
+    const int pe_offset = ee_offset + ee_count;
+    const int pp_offset = pe_offset + pe_count;
+    if(idx < ee_offset)
+    {
+        int      i  = idx;
+        Vector4i PT = PTs(i);
+        Vector4i cids = {contact_ids(PT[0]), contact_ids(PT[1]),
+                         contact_ids(PT[2]), contact_ids(PT[3])};
+        Float kt2 = PT_kappa(table, cids) * dt * dt;
+        const auto& P  = Ps(PT[0]);
+        const auto& T0 = Ps(PT[1]);
+        const auto& T1 = Ps(PT[2]);
+        const auto& T2 = Ps(PT[3]);
+        Float thickness = PT_thickness(thicknesses(PT(0)), thicknesses(PT(1)),
+                                       thicknesses(PT(2)), thicknesses(PT(3)));
+        Float d_hat = PT_d_hat(d_hats(PT(0)), d_hats(PT(1)),
+                               d_hats(PT(2)), d_hats(PT(3)));
+        Vector4i flag = distance::point_triangle_distance_flag(P, T0, T1, T2);
+        PT_Es(i) = PT_barrier_energy(flag, kt2, d_hat, thickness, P, T0, T1, T2);
+    }
+    else if(idx < pe_offset)
+    {
+        int      i  = idx - ee_offset;
+        Vector4i EE = EEs(i);
+        Vector4i cids = {contact_ids(EE[0]), contact_ids(EE[1]),
+                         contact_ids(EE[2]), contact_ids(EE[3])};
+        Float kt2 = EE_kappa(table, cids) * dt * dt;
+        const auto& Ea0 = Ps(EE[0]);
+        const auto& Ea1 = Ps(EE[1]);
+        const auto& Eb0 = Ps(EE[2]);
+        const auto& Eb1 = Ps(EE[3]);
+        const auto& t0_Ea0 = rest_Ps(EE[0]);
+        const auto& t0_Ea1 = rest_Ps(EE[1]);
+        const auto& t0_Eb0 = rest_Ps(EE[2]);
+        const auto& t0_Eb1 = rest_Ps(EE[3]);
+        Float thickness = EE_thickness(thicknesses(EE(0)), thicknesses(EE(1)),
+                                       thicknesses(EE(2)), thicknesses(EE(3)));
+        Float d_hat = EE_d_hat(d_hats(EE(0)), d_hats(EE(1)),
+                               d_hats(EE(2)), d_hats(EE(3)));
+        Vector4i flag = distance::edge_edge_distance_flag(Ea0, Ea1, Eb0, Eb1);
+        EE_Es(i) = mollified_EE_barrier_energy(flag, kt2, d_hat, thickness,
+                                               t0_Ea0, t0_Ea1, t0_Eb0, t0_Eb1,
+                                               Ea0, Ea1, Eb0, Eb1);
+    }
+    else if(idx < pp_offset)
+    {
+        int      i  = idx - pe_offset;
+        Vector3i PE = PEs(i);
+        Vector3i cids = {contact_ids(PE[0]), contact_ids(PE[1]), contact_ids(PE[2])};
+        Float kt2 = PE_kappa(table, cids) * dt * dt;
+        const auto& P  = Ps(PE[0]);
+        const auto& E0 = Ps(PE[1]);
+        const auto& E1 = Ps(PE[2]);
+        Float thickness = PE_thickness(thicknesses(PE(0)), thicknesses(PE(1)),
+                                       thicknesses(PE(2)));
+        Float d_hat = PE_d_hat(d_hats(PE(0)), d_hats(PE(1)), d_hats(PE(2)));
+        Vector3i flag = distance::point_edge_distance_flag(P, E0, E1);
+        PE_Es(i) = PE_barrier_energy(flag, kt2, d_hat, thickness, P, E0, E1);
+    }
+    else
+    {
+        int      i  = idx - pp_offset;
+        Vector2i PP = PPs(i);
+        Vector2i cids = {contact_ids(PP[0]), contact_ids(PP[1])};
+        Float kt2 = PP_kappa(table, cids) * dt * dt;
+        const auto& P0 = Ps(PP[0]);
+        const auto& P1 = Ps(PP[1]);
+        Float thickness = PP_thickness(thicknesses(PP(0)), thicknesses(PP(1)));
+        Float d_hat = PP_d_hat(d_hats(PP(0)), d_hats(PP(1)));
+        Vector2i flag = distance::point_point_distance_flag(P0, P1);
+        PP_Es(i) = PP_barrier_energy(flag, kt2, d_hat, thickness, P0, P1);
+    }
+}
+
 class IPCSimplexNormalContact final : public SimplexNormalContact
 {
   public:
@@ -729,54 +1082,28 @@ class IPCSimplexNormalContact final : public SimplexNormalContact
         auto grid = [](int n) { return (n + kBlk - 1) / kBlk; };
 
         auto PT_count = (IndexT)info.PTs().size();
-        if(PT_count > 0)
-            kernel_PT_energy<<<grid(PT_count), kBlk>>>(
+        auto EE_count = (IndexT)info.EEs().size();
+        auto PE_count = (IndexT)info.PEs().size();
+        auto PP_count = (IndexT)info.PPs().size();
+        const IndexT total = PT_count + EE_count + PE_count + PP_count;
+        if(total > 0)
+            kernel_all_contact_energy<<<grid(total), kBlk>>>(
+                total,
                 PT_count,
+                EE_count,
+                PE_count,
                 info.contact_tabular().viewer(),
                 info.contact_element_ids().viewer(),
                 info.PTs().viewer(),
                 info.PT_energies().viewer(),
-                info.positions().viewer(),
-                info.thicknesses().viewer(),
-                info.d_hats().viewer(),
-                info.dt());
-
-        auto EE_count = (IndexT)info.EEs().size();
-        if(EE_count > 0)
-            kernel_EE_energy<<<grid(EE_count), kBlk>>>(
-                EE_count,
-                info.contact_tabular().viewer(),
-                info.contact_element_ids().viewer(),
                 info.EEs().viewer(),
                 info.EE_energies().viewer(),
-                info.positions().viewer(),
-                info.rest_positions().viewer(),
-                info.thicknesses().viewer(),
-                info.d_hats().viewer(),
-                info.dt());
-
-        auto PE_count = (IndexT)info.PEs().size();
-        if(PE_count > 0)
-            kernel_PE_energy<<<grid(PE_count), kBlk>>>(
-                PE_count,
-                info.contact_tabular().viewer(),
-                info.contact_element_ids().viewer(),
                 info.PEs().viewer(),
                 info.PE_energies().viewer(),
-                info.positions().viewer(),
-                info.thicknesses().viewer(),
-                info.d_hats().viewer(),
-                info.dt());
-
-        auto PP_count = (IndexT)info.PPs().size();
-        if(PP_count > 0)
-            kernel_PP_energy<<<grid(PP_count), kBlk>>>(
-                PP_count,
-                info.contact_tabular().viewer(),
-                info.contact_element_ids().viewer(),
                 info.PPs().viewer(),
                 info.PP_energies().viewer(),
                 info.positions().viewer(),
+                info.rest_positions().viewer(),
                 info.thicknesses().viewer(),
                 info.d_hats().viewer(),
                 info.dt());
@@ -874,73 +1201,40 @@ class IPCSimplexNormalContact final : public SimplexNormalContact
             }
         }
 
-        if(pp_count > 0)
-            kernel_PP_contact_assemble<<<grid(pp_count), kBlk>>>(
-                pp_count, info.gradient_only(),
-                info.contact_tabular().viewer(),
-                info.contact_element_ids().viewer(),
-                info.positions().viewer(),
-                info.thicknesses().viewer(),
-                info.d_hats().viewer(),
-                info.dt(),
-                info.PPs().viewer(),
-                info.PP_gradients().viewer(),
-                info.PP_hessians().viewer(),
-                spd_stats,
-                spd_ratio_trigger,
-                pp_diag_scale);
-
-        if(pe_count > 0)
-            kernel_PE_contact_assemble<<<grid(pe_count), kBlk>>>(
-                pe_count, info.gradient_only(),
-                info.contact_tabular().viewer(),
-                info.contact_element_ids().viewer(),
-                info.body_ids().viewer(),
-                info.positions().viewer(),
-                info.thicknesses().viewer(),
-                info.d_hats().viewer(),
-                info.dt(),
-                info.PEs().viewer(),
-                info.PE_gradients().viewer(),
-                info.PE_hessians().viewer(),
-                spd_stats,
-                pe_diag_reg,
-                pe_kappa_scale,
-                spd_ratio_trigger,
-                pe_cond_diag_scale);
-
-        if(ee_count > 0)
-            kernel_EE_contact_assemble<<<grid(ee_count), kBlk>>>(
-                ee_count, info.gradient_only(),
-                info.contact_tabular().viewer(),
-                info.contact_element_ids().viewer(),
-                info.positions().viewer(),
-                info.rest_positions().viewer(),
-                info.thicknesses().viewer(),
-                info.d_hats().viewer(),
-                info.dt(),
-                info.EEs().viewer(),
-                info.EE_gradients().viewer(),
-                info.EE_hessians().viewer(),
-                spd_stats,
-                spd_ratio_trigger,
-                ee_diag_scale);
-
-        if(pt_count > 0)
-            kernel_PT_contact_assemble<<<grid(pt_count), kBlk>>>(
-                pt_count, info.gradient_only(),
-                info.contact_tabular().viewer(),
-                info.contact_element_ids().viewer(),
-                info.positions().viewer(),
-                info.thicknesses().viewer(),
-                info.d_hats().viewer(),
-                info.dt(),
-                info.PTs().viewer(),
-                info.PT_gradients().viewer(),
-                info.PT_hessians().viewer(),
-                spd_stats,
-                spd_ratio_trigger,
-                pt_diag_scale);
+        kernel_all_contact_assemble<<<grid(total), kBlk>>>(
+            total,
+            pt_count,
+            ee_count,
+            pe_count,
+            info.gradient_only(),
+            info.contact_tabular().viewer(),
+            info.contact_element_ids().viewer(),
+            info.body_ids().viewer(),
+            info.positions().viewer(),
+            info.rest_positions().viewer(),
+            info.thicknesses().viewer(),
+            info.d_hats().viewer(),
+            info.dt(),
+            info.PTs().viewer(),
+            info.PT_gradients().viewer(),
+            info.PT_hessians().viewer(),
+            info.EEs().viewer(),
+            info.EE_gradients().viewer(),
+            info.EE_hessians().viewer(),
+            info.PEs().viewer(),
+            info.PE_gradients().viewer(),
+            info.PE_hessians().viewer(),
+            info.PPs().viewer(),
+            info.PP_gradients().viewer(),
+            info.PP_hessians().viewer(),
+            spd_stats,
+            pe_diag_reg,
+            pe_kappa_scale,
+            spd_ratio_trigger,
+            pe_cond_diag_scale,
+            pp_diag_scale,
+            ee_diag_scale,
+            pt_diag_scale);
 
         if(spd_diag_enabled || pe_outlier_diag_enabled)
         {

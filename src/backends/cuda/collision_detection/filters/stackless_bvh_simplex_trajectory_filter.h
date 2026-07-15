@@ -73,6 +73,18 @@ class StacklessBVHSimplexTrajectoryFilter final : public SimplexTrajectoryFilter
         int                           select_temp_PE_capacity = 0;
         int                           select_temp_PT_capacity = 0;
         int                           select_temp_EE_capacity = 0;
+        muda::DeviceBuffer<int>       compact_flags;
+        muda::DeviceBuffer<int>       compact_offsets;
+        muda::DeviceBuffer<int>       block_select_counts;
+        muda::DeviceBuffer<int>       block_select_offsets;
+        muda::DeviceBuffer<int>       block_select_counts_PP;
+        muda::DeviceBuffer<int>       block_select_offsets_PP;
+        muda::DeviceBuffer<int>       block_select_counts_PE;
+        muda::DeviceBuffer<int>       block_select_offsets_PE;
+        muda::DeviceBuffer<int>       block_select_counts_PT;
+        muda::DeviceBuffer<int>       block_select_offsets_PT;
+        muda::DeviceBuffer<int>       block_select_counts_EE;
+        muda::DeviceBuffer<int>       block_select_offsets_EE;
 
         muda::DeviceBuffer<Vector4i> PTs;
         muda::DeviceBuffer<Vector4i> EEs;
@@ -86,11 +98,13 @@ class StacklessBVHSimplexTrajectoryFilter final : public SimplexTrajectoryFilter
         int           cached_contact_mask_h = 0;
         int           cached_subscene_mask_w = 0;
         int           cached_subscene_mask_h = 0;
-        bool          contact_mask_all_enabled = false;
-        bool          subscene_mask_all_enabled = false;
+        int           contact_mask_fast_mode = 0;
+        int           subscene_mask_fast_mode = 0;
         bool          edge_tri_bvh_valid = false;
         SizeT         edge_bvh_size = 0;
         SizeT         tri_bvh_size = 0;
+        bool          direct_active_valid = false;
+        IndexT        direct_active_counts[4] = {0, 0, 0, 0};
 
         /****************************************************
         *                   CCD TOI

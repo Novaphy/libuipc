@@ -147,6 +147,42 @@ MUDA_HOST MUDA_DEVICE MUDA_INLINE float3 operator-(const float3& v0, const float
     return make_float3(v0.x - v1.x, v0.y - v1.y, v0.z - v1.z);
 }
 
+MUDA_DEVICE MUDA_INLINE Float corex_sqr(Float x)
+{
+    return x * x;
+}
+
+MUDA_DEVICE MUDA_INLINE Float point_box_distance2_lower_bound(const Vector3& p,
+                                                              const Vector3& bmin,
+                                                              const Vector3& bmax)
+{
+    Float d = 0;
+    for(int k = 0; k < 3; ++k)
+    {
+        if(p[k] < bmin[k])
+            d += corex_sqr(bmin[k] - p[k]);
+        else if(p[k] > bmax[k])
+            d += corex_sqr(p[k] - bmax[k]);
+    }
+    return d;
+}
+
+MUDA_DEVICE MUDA_INLINE Float box_box_distance2_lower_bound(const Vector3& amin,
+                                                            const Vector3& amax,
+                                                            const Vector3& bmin,
+                                                            const Vector3& bmax)
+{
+    Float d = 0;
+    for(int k = 0; k < 3; ++k)
+    {
+        if(amax[k] < bmin[k])
+            d += corex_sqr(bmin[k] - amax[k]);
+        else if(bmax[k] < amin[k])
+            d += corex_sqr(amin[k] - bmax[k]);
+    }
+    return d;
+}
+
 MUDA_HOST MUDA_DEVICE MUDA_INLINE void SafeCopyTo(int2* sharedRes,
                                                   int   totalResInBlock,
                                                   Vector2i* globalRes,
@@ -340,6 +376,36 @@ static __global__ void kernel_refitIntNodes(int             size,
 
 namespace uipc::backend::cuda
 {
+namespace
+{
+struct CorexVector2iLess
+{
+    MUDA_HOST MUDA_DEVICE bool operator()(const Vector2i& a, const Vector2i& b) const
+    {
+        return a(0) < b(0) || (a(0) == b(0) && a(1) < b(1));
+    }
+};
+
+bool corex_sort_nomask_pairs_enabled()
+{
+    static const bool enabled = []
+    {
+        const char* env = std::getenv("UIPC_COREX_SORT_NOMASK_PAIRS");
+        return env && env[0] != '\0' && env[0] != '0';
+    }();
+    return enabled;
+}
+
+inline void corex_sort_nomask_pairs(StacklessBVH::QueryBuffer& qbuffer, int pair_count)
+{
+    if(pair_count <= 1 || !corex_sort_nomask_pairs_enabled())
+        return;
+    corex_profile::ScopedPhase phase("bvh_query_detail", "nomask_sort_pairs");
+    auto begin = thrust::device_pointer_cast(qbuffer.m_pairs.data());
+    thrust::sort(thrust::device, begin, begin + pair_count, CorexVector2iLess{});
+}
+}  // namespace
+
 MUDA_INLINE void StacklessBVH::Impl::calcMaxBVFromBox(muda::CBufferView<AABB> aabbs,
                                                       muda::VarView<AABB> scene_box)
 {
@@ -1097,6 +1163,242 @@ inline void StacklessBVH::Impl::StacklessCDSharedSelfEdgesNoMask(
             });
 }
 
+inline void StacklessBVH::Impl::StacklessCDSharedSelfEdgesActiveNoMask(
+    muda::CBufferView<Vector2i> edges,
+    muda::CBufferView<Vector3>  positions,
+    muda::CBufferView<Vector3>  displacements,
+    muda::CBufferView<Vector3>  rest_positions,
+    muda::CBufferView<Float>    edge_thicknesses,
+    muda::CBufferView<Float>    edge_d_hats,
+    Float                       alpha,
+    muda::CBufferView<IndexT>   vertex_to_body,
+    muda::CBufferView<IndexT>   body_self_collision,
+    muda::BufferView<Vector2i>  out_PPs,
+    muda::BufferView<Vector3i>  out_PEs,
+    muda::BufferView<Vector4i>  out_EEs,
+    muda::BufferView<IndexT>    selected_counts)
+{
+    using namespace muda;
+    using namespace culbvh;
+
+    auto numQuery = static_cast<int>(ext_aabb.size());
+    auto numObjs  = numQuery;
+    auto BlockDim = K_THREADS;
+    auto GridDim  = (numQuery + BlockDim - 1) / BlockDim;
+    const int pp_cap = static_cast<int>(out_PPs.size());
+    const int pe_cap = static_cast<int>(out_PEs.size());
+    const int ee_cap = static_cast<int>(out_EEs.size());
+
+    Launch(GridDim, BlockDim)
+        .apply(
+            [Size       = numQuery,
+             _box       = objs.viewer().name("_box"),
+             intSize    = numObjs - 1,
+             numObjs    = numObjs,
+             _lvs_idx   = ext_idx.viewer().name("_lvs_idx"),
+             _nodes     = nodes.viewer().name("_nodes"),
+             _node_range_y = node_range_y.viewer().name("_node_range_y"),
+             edges      = edges.viewer().name("edges"),
+             Ps         = positions.viewer().name("positions"),
+             dxs        = displacements.viewer().name("displacements"),
+             rest_Ps    = rest_positions.viewer().name("rest_positions"),
+             edge_thicknesses = edge_thicknesses.viewer().name("edge_thicknesses"),
+             edge_d_hats = edge_d_hats.viewer().name("edge_d_hats"),
+             alpha,
+             v2b        = vertex_to_body.viewer().name("v2b"),
+             body_self_collision = body_self_collision.viewer().name("body_self_collision"),
+             out_PPs    = out_PPs.viewer().name("out_PPs"),
+             out_PEs    = out_PEs.viewer().name("out_PEs"),
+             out_EEs    = out_EEs.viewer().name("out_EEs"),
+             counts     = selected_counts.viewer().name("selected_counts"),
+             pp_cap,
+             pe_cap,
+             ee_cap] __device__()
+            {
+                int  tid    = blockIdx.x * blockDim.x + threadIdx.x;
+                bool active = tid < Size;
+                int  idx;
+                Vector2i E0;
+                IndexT body_i = -1;
+                AABB bv;
+                if(active)
+                {
+                    idx    = _lvs_idx(tid);
+                    bv     = _box(idx);
+                    E0     = edges(idx);
+                    body_i = v2b(E0[0]);
+                }
+
+                int  st = 0;
+                Node node;
+                const int MaxIter = numObjs * 2;
+
+                if(active)
+                {
+                    int inner_I = 0;
+                    for(; inner_I < MaxIter; inner_I++)
+                    {
+                        if(st == -1)
+                            break;
+
+                        node.lc     = _nodes(st).lc;
+                        node.escape = _nodes(st).escape;
+                        node.bound  = _nodes(st).bound;
+                        if(_node_range_y(st) <= tid)
+                        {
+                            st = node.escape;
+                            continue;
+                        }
+
+                        if(node.bound.intersects(bv))
+                        {
+                            if(node.lc == -1)
+                            {
+                                if(tid < st - intSize)
+                                {
+                                    const int j  = _lvs_idx(st - intSize);
+                                    const auto E1 = edges(j);
+
+                                    const bool shared_vertex =
+                                        E0[0] == E1[0] || E0[0] == E1[1]
+                                        || E0[1] == E1[0] || E0[1] == E1[1];
+                                    bool accept = !shared_vertex;
+                                    if(accept)
+                                    {
+                                        const auto body_j = v2b(E1[0]);
+                                        accept = !(body_i == body_j
+                                                   && !body_self_collision(body_i));
+                                    }
+                                    if(accept)
+                                    {
+                                        const Vector4i vIs = {E0[0], E0[1], E1[0], E1[1]};
+                                        Vector3 Ps_arr[] = {Ps(vIs(0)),
+                                                            Ps(vIs(1)),
+                                                            Ps(vIs(2)),
+                                                            Ps(vIs(3))};
+                                        Float thickness = edge_thicknesses(idx)
+                                                        + edge_thicknesses(j);
+                                        Float d_hat = (edge_d_hats(idx) + edge_d_hats(j))
+                                                    * Float{0.5};
+                                        Vector2 range = D_range(thickness, d_hat);
+                                        Vector3 e0_min = Ps_arr[0].cwiseMin(Ps_arr[1]);
+                                        Vector3 e0_max = Ps_arr[0].cwiseMax(Ps_arr[1]);
+                                        Vector3 e1_min = Ps_arr[2].cwiseMin(Ps_arr[3]);
+                                        Vector3 e1_max = Ps_arr[2].cwiseMax(Ps_arr[3]);
+                                        if(box_box_distance2_lower_bound(e0_min,
+                                                                         e0_max,
+                                                                         e1_min,
+                                                                         e1_max)
+                                           >= range.y())
+                                        {
+                                            st = node.escape;
+                                            continue;
+                                        }
+                                        if(alpha != static_cast<Float>(0))
+                                        {
+                                            Vector3 dE0_0 = alpha * dxs(E0[0]);
+                                            Vector3 dE0_1 = alpha * dxs(E0[1]);
+                                            Vector3 dE1_0 = alpha * dxs(E1[0]);
+                                            Vector3 dE1_1 = alpha * dxs(E1[1]);
+                                            if(!distance::edge_edge_ccd_broadphase(
+                                                   Ps_arr[0],
+                                                   Ps_arr[1],
+                                                   Ps_arr[2],
+                                                   Ps_arr[3],
+                                                   dE0_0,
+                                                   dE0_1,
+                                                   dE1_0,
+                                                   dE1_1,
+                                                   d_hat + thickness))
+                                            {
+                                                st = node.escape;
+                                                continue;
+                                            }
+                                        }
+                                        Vector4i flag = distance::edge_edge_distance_flag(
+                                            Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3]);
+                                        Float D;
+                                        distance::edge_edge_distance2(
+                                            flag, Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3], D);
+                                        if(D <= range.x())
+                                        {
+                                            IndexT dst = atomicAdd(&counts(3), IndexT{1});
+                                            if(dst < ee_cap)
+                                                out_EEs(dst) = vIs;
+                                        }
+                                        else if(is_active_D(range, D))
+                                        {
+                                            Vector4i offsets;
+                                            offsets.setConstant(-1);
+                                            auto dim = distance::degenerate_edge_edge(flag, offsets);
+                                            if(dim == 4)
+                                            {
+                                                Float eps_x;
+                                                distance::edge_edge_mollifier_threshold(
+                                                    rest_Ps(vIs(0)),
+                                                    rest_Ps(vIs(1)),
+                                                    rest_Ps(vIs(2)),
+                                                    rest_Ps(vIs(3)),
+                                                    static_cast<Float>(1e-3),
+                                                    eps_x);
+                                                if(distance::need_mollify(Ps_arr[0],
+                                                                          Ps_arr[1],
+                                                                          Ps_arr[2],
+                                                                          Ps_arr[3],
+                                                                          eps_x))
+                                                {
+                                                    IndexT dst = atomicAdd(&counts(3), IndexT{1});
+                                                    if(dst < ee_cap)
+                                                        out_EEs(dst) = vIs;
+                                                    st = node.escape;
+                                                    continue;
+                                                }
+                                            }
+                                            if(dim == 2)
+                                            {
+                                                IndexT dst = atomicAdd(&counts(0), IndexT{1});
+                                                if(dst < pp_cap)
+                                                    out_PPs(dst) = {vIs(offsets(0)), vIs(offsets(1))};
+                                            }
+                                            else if(dim == 3)
+                                            {
+                                                IndexT dst = atomicAdd(&counts(1), IndexT{1});
+                                                if(dst < pe_cap)
+                                                    out_PEs(dst) = {vIs(offsets(0)),
+                                                                    vIs(offsets(1)),
+                                                                    vIs(offsets(2))};
+                                            }
+                                            else if(dim == 4)
+                                            {
+                                                IndexT dst = atomicAdd(&counts(3), IndexT{1});
+                                                if(dst < ee_cap)
+                                                    out_EEs(dst) = vIs;
+                                            }
+                                        }
+                                    }
+                                }
+                                st = node.escape;
+                            }
+                            else
+                            {
+                                st = node.lc;
+                            }
+                        }
+                        else
+                        {
+                            st = node.escape;
+                        }
+                    }
+
+                    MUDA_ASSERT(inner_I < MaxIter,
+                                "Exceeded max iteration in stackless traversal, %d (Max=%d), numObj=(%d)",
+                                inner_I,
+                                MaxIter,
+                                numObjs);
+                }
+            });
+}
+
 inline void StacklessBVH::Impl::StacklessCDSharedOtherPointsTrianglesNoMask(
     muda::CBufferView<AABB>     point_aabbs,
     muda::CBufferView<IndexT>   surf_vertices,
@@ -1283,6 +1585,206 @@ inline void StacklessBVH::Impl::StacklessCDSharedOtherPointsTrianglesNoMask(
 
                     if(done)
                         break;
+                }
+            });
+}
+
+inline void StacklessBVH::Impl::StacklessCDSharedOtherPointsTrianglesActiveNoMask(
+    muda::CBufferView<AABB>     point_aabbs,
+    muda::CBufferView<IndexT>   surf_vertices,
+    muda::CBufferView<Vector3i> surf_triangles,
+    muda::CBufferView<Vector3>  positions,
+    muda::CBufferView<Vector3>  displacements,
+    muda::CBufferView<Float>    thicknesses,
+    muda::CBufferView<Float>    d_hats,
+    muda::CBufferView<Float>    triangle_thicknesses,
+    muda::CBufferView<Float>    triangle_d_hats,
+    Float                       alpha,
+    muda::CBufferView<IndexT>   vertex_to_body,
+    muda::CBufferView<IndexT>   body_self_collision,
+    muda::BufferView<Vector2i>  out_PPs,
+    muda::BufferView<Vector3i>  out_PEs,
+    muda::BufferView<Vector4i>  out_PTs,
+    muda::BufferView<IndexT>    selected_counts)
+{
+    using namespace muda;
+    using namespace culbvh;
+
+    auto numQuery = static_cast<int>(point_aabbs.size());
+    auto numObjs  = static_cast<int>(ext_aabb.size());
+    auto BlockDim = K_THREADS;
+    auto GridDim  = (numQuery + BlockDim - 1) / BlockDim;
+    const int pp_cap = static_cast<int>(out_PPs.size());
+    const int pe_cap = static_cast<int>(out_PEs.size());
+    const int pt_cap = static_cast<int>(out_PTs.size());
+
+    Launch(GridDim, BlockDim)
+        .apply(
+            [Size       = numQuery,
+             _box       = point_aabbs.viewer().name("_box"),
+             intSize    = numObjs - 1,
+             numObjs    = numObjs,
+             _lvs_idx   = ext_idx.viewer().name("_lvs_idx"),
+             _nodes     = nodes.viewer().name("_nodes"),
+             Vs         = surf_vertices.viewer().name("Vs"),
+             Fs         = surf_triangles.viewer().name("Fs"),
+             Ps         = positions.viewer().name("positions"),
+             dxs        = displacements.viewer().name("displacements"),
+             thicknesses = thicknesses.viewer().name("thicknesses"),
+             d_hats     = d_hats.viewer().name("d_hats"),
+             triangle_thicknesses = triangle_thicknesses.viewer().name("triangle_thicknesses"),
+             triangle_d_hats = triangle_d_hats.viewer().name("triangle_d_hats"),
+             alpha,
+             v2b        = vertex_to_body.viewer().name("v2b"),
+             body_self_collision = body_self_collision.viewer().name("body_self_collision"),
+             out_PPs    = out_PPs.viewer().name("out_PPs"),
+             out_PEs    = out_PEs.viewer().name("out_PEs"),
+             out_PTs    = out_PTs.viewer().name("out_PTs"),
+             counts     = selected_counts.viewer().name("selected_counts"),
+             pp_cap,
+             pe_cap,
+             pt_cap] __device__()
+            {
+                int  tid    = blockIdx.x * blockDim.x + threadIdx.x;
+                bool active = tid < Size;
+                int  idx;
+                AABB bv;
+                if(active)
+                {
+                    idx = tid;
+                    bv  = _box(idx);
+                }
+
+                int  st = 0;
+                Node node;
+                const int MaxIter = numObjs * 2;
+
+                if(active)
+                {
+                    int inner_I = 0;
+                    for(; inner_I < MaxIter; inner_I++)
+                    {
+                        if(st == -1)
+                            break;
+
+                        node.lc     = _nodes(st).lc;
+                        node.escape = _nodes(st).escape;
+                        node.bound  = _nodes(st).bound;
+
+                        if(node.bound.intersects(bv))
+                        {
+                            if(node.lc == -1)
+                            {
+                                const int j = _lvs_idx(st - intSize);
+
+                                const auto V = Vs(idx);
+                                const auto F = Fs(j);
+                                bool accept = !(F[0] == V || F[1] == V || F[2] == V);
+                                if(accept)
+                                {
+                                    const auto body_i = v2b(V);
+                                    const auto body_j = v2b(F[0]);
+                                    accept = !(body_i == body_j
+                                               && !body_self_collision(body_i));
+                                }
+                                if(accept)
+                                {
+                                    const Vector4i vIs = {V, F(0), F(1), F(2)};
+                                    Vector3 Ps_arr[] = {Ps(vIs(0)),
+                                                        Ps(vIs(1)),
+                                                        Ps(vIs(2)),
+                                                        Ps(vIs(3))};
+                                    Float thickness = thicknesses(V) + triangle_thicknesses(j);
+                                    Float d_hat =
+                                        (d_hats(V) + triangle_d_hats(j)) * Float{0.5};
+                                    Vector2 range = D_range(thickness, d_hat);
+                                    if(alpha != static_cast<Float>(0))
+                                    {
+                                        Vector3 dP  = alpha * dxs(V);
+                                        Vector3 dF0 = alpha * dxs(F[0]);
+                                        Vector3 dF1 = alpha * dxs(F[1]);
+                                        Vector3 dF2 = alpha * dxs(F[2]);
+                                        if(!distance::point_triangle_ccd_broadphase(
+                                               Ps_arr[0],
+                                               Ps_arr[1],
+                                               Ps_arr[2],
+                                               Ps_arr[3],
+                                               dP,
+                                               dF0,
+                                               dF1,
+                                               dF2,
+                                               d_hat + thickness))
+                                        {
+                                            st = node.escape;
+                                            continue;
+                                        }
+                                    }
+                                    Vector3 tri_min = Ps_arr[1].array()
+                                                          .min(Ps_arr[2].array())
+                                                          .min(Ps_arr[3].array())
+                                                          .matrix();
+                                    Vector3 tri_max = Ps_arr[1].array()
+                                                          .max(Ps_arr[2].array())
+                                                          .max(Ps_arr[3].array())
+                                                          .matrix();
+                                    if(point_box_distance2_lower_bound(Ps_arr[0],
+                                                                       tri_min,
+                                                                       tri_max)
+                                       < range.y())
+                                    {
+                                        Vector4i flag = distance::point_triangle_distance_flag(
+                                            Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3]);
+                                        Float D;
+                                        distance::point_triangle_distance2(
+                                            flag, Ps_arr[0], Ps_arr[1], Ps_arr[2], Ps_arr[3], D);
+                                        if(is_active_D(range, D))
+                                        {
+                                            Vector4i offsets;
+                                            offsets.setConstant(-1);
+                                            auto dim = distance::degenerate_point_triangle(
+                                                flag, offsets);
+                                            if(dim == 2)
+                                            {
+                                                IndexT dst = atomicAdd(&counts(0), IndexT{1});
+                                                if(dst < pp_cap)
+                                                    out_PPs(dst) = {vIs(offsets(0)), vIs(offsets(1))};
+                                            }
+                                            else if(dim == 3)
+                                            {
+                                                IndexT dst = atomicAdd(&counts(1), IndexT{1});
+                                                if(dst < pe_cap)
+                                                    out_PEs(dst) = {vIs(offsets(0)),
+                                                                    vIs(offsets(1)),
+                                                                    vIs(offsets(2))};
+                                            }
+                                            else if(dim == 4)
+                                            {
+                                                IndexT dst = atomicAdd(&counts(2), IndexT{1});
+                                                if(dst < pt_cap)
+                                                    out_PTs(dst) = vIs;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                st = node.escape;
+                            }
+                            else
+                            {
+                                st = node.lc;
+                            }
+                        }
+                        else
+                        {
+                            st = node.escape;
+                        }
+                    }
+
+                    MUDA_ASSERT(inner_I < MaxIter,
+                                "Exceeded max iteration in stackless traversal, %d (Max=%d), numObj=(%d)",
+                                inner_I,
+                                MaxIter,
+                                numObjs);
                 }
             });
 }
@@ -1475,6 +1977,7 @@ void StacklessBVH::detect(Pred callback, QueryBuffer& qbuffer)
 
     UIPC_ASSERT(h_cp_num >= 0, "fatal error");
     qbuffer.m_size = h_cp_num;
+    corex_sort_nomask_pairs(qbuffer, h_cp_num);
 }
 
 inline bool StacklessBVH::detect_edges_no_mask_launch(
@@ -1543,6 +2046,41 @@ inline void StacklessBVH::detect_edges_no_mask(
 
     UIPC_ASSERT(h_cp_num >= 0, "fatal error");
     qbuffer.m_size = h_cp_num;
+    corex_sort_nomask_pairs(qbuffer, h_cp_num);
+}
+
+inline void StacklessBVH::detect_edges_active_no_mask(
+    muda::CBufferView<Vector2i> edges,
+    muda::CBufferView<Vector3>  positions,
+    muda::CBufferView<Vector3>  displacements,
+    muda::CBufferView<Vector3>  rest_positions,
+    muda::CBufferView<Float>    edge_thicknesses,
+    muda::CBufferView<Float>    edge_d_hats,
+    Float                       alpha,
+    muda::CBufferView<IndexT>   vertex_to_body,
+    muda::CBufferView<IndexT>   body_self_collision,
+    muda::BufferView<Vector2i>  out_PPs,
+    muda::BufferView<Vector3i>  out_PEs,
+    muda::BufferView<Vector4i>  out_EEs,
+    muda::BufferView<IndexT>    selected_counts)
+{
+    if(m_impl.objs.size() == 0)
+        return;
+
+    corex_profile::ScopedPhase phase("bvh_query_detail", "edge_active_nomask_kernel");
+    m_impl.StacklessCDSharedSelfEdgesActiveNoMask(edges,
+                                                  positions,
+                                                  displacements,
+                                                  rest_positions,
+                                                  edge_thicknesses,
+                                                  edge_d_hats,
+                                                  alpha,
+                                                  vertex_to_body,
+                                                  body_self_collision,
+                                                  out_PPs,
+                                                  out_PEs,
+                                                  out_EEs,
+                                                  selected_counts);
 }
 
 inline void StacklessBVH::QueryBuffer::build(muda::CBufferView<AABB> aabbs)
@@ -1665,6 +2203,46 @@ inline void StacklessBVH::query_points_triangles_no_mask(
 
     UIPC_ASSERT(h_cp_num >= 0, "fatal error");
     qbuffer.m_size = h_cp_num;
+}
+
+inline void StacklessBVH::query_points_triangles_active_no_mask(
+    muda::CBufferView<AABB>     point_aabbs,
+    muda::CBufferView<IndexT>   surf_vertices,
+    muda::CBufferView<Vector3i> surf_triangles,
+    muda::CBufferView<Vector3>  positions,
+    muda::CBufferView<Vector3>  displacements,
+    muda::CBufferView<Float>    thicknesses,
+    muda::CBufferView<Float>    d_hats,
+    muda::CBufferView<Float>    triangle_thicknesses,
+    muda::CBufferView<Float>    triangle_d_hats,
+    Float                       alpha,
+    muda::CBufferView<IndexT>   vertex_to_body,
+    muda::CBufferView<IndexT>   body_self_collision,
+    muda::BufferView<Vector2i>  out_PPs,
+    muda::BufferView<Vector3i>  out_PEs,
+    muda::BufferView<Vector4i>  out_PTs,
+    muda::BufferView<IndexT>    selected_counts)
+{
+    if(point_aabbs.size() == 0 || m_impl.objs.size() == 0)
+        return;
+
+    corex_profile::ScopedPhase phase("bvh_query_detail", "pt_active_nomask_kernel");
+    m_impl.StacklessCDSharedOtherPointsTrianglesActiveNoMask(point_aabbs,
+                                                             surf_vertices,
+                                                             surf_triangles,
+                                                             positions,
+                                                             displacements,
+                                                             thicknesses,
+                                                             d_hats,
+                                                             triangle_thicknesses,
+                                                             triangle_d_hats,
+                                                             alpha,
+                                                             vertex_to_body,
+                                                             body_self_collision,
+                                                             out_PPs,
+                                                             out_PEs,
+                                                             out_PTs,
+                                                             selected_counts);
 }
 
 template <typename Pred>

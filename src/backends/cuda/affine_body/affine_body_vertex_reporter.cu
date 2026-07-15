@@ -231,7 +231,7 @@ void AffineBodyVertexReporter::Impl::report_displacements(VertexDisplacementInfo
                                                           abd().body_id_to_dq.data(),
                                                           info.displacements().data());
         checkCudaErrors(cudaGetLastError());
-        if(std::getenv("UIPC_COREX_ABD_VERTEX_REPORT_ASYNC") == nullptr)
+        if(std::getenv("UIPC_COREX_ABD_VERTEX_REPORT_SYNC") != nullptr)
             checkCudaErrors(cudaDeviceSynchronize());
     }
 }
