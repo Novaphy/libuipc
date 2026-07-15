@@ -58,6 +58,35 @@ inline int corex_compact_hash_sort_end_bit(SizeT rows, SizeT cols)
         return corex_hash_sort_end_bit(rows, cols);
     return std::min(64, corex_index_sort_end_bit(key_count));
 }
+
+inline int corex_readback_int(const muda::DeviceVar<int>& value)
+{
+    static const bool pinned_enabled = [] {
+        const char* env = std::getenv("UIPC_COREX_MATCONV_PINNED_COUNT");
+        if(env && env[0] != '\0')
+            return env[0] != '0';
+        return true;
+    }();
+
+    if(!pinned_enabled)
+        return value;
+
+    static int* pinned = nullptr;
+    if(!pinned)
+    {
+        int* tmp = nullptr;
+        if(cudaMallocHost(reinterpret_cast<void**>(&tmp), sizeof(int)) == cudaSuccess)
+            pinned = tmp;
+    }
+
+    if(!pinned)
+        return value;
+
+    checkCudaErrors(cudaMemcpyAsync(
+        pinned, value.data(), sizeof(int), cudaMemcpyDeviceToHost, 0));
+    checkCudaErrors(cudaStreamSynchronize(0));
+    return *pinned;
+}
 }  // namespace
 
 template <typename T, int N>
@@ -228,7 +257,7 @@ void MatrixConverter<T, N>::_make_unique_indices(const muda::DeviceTripletMatrix
                                        ij_pairs.size());
     }
 
-    int h_count = count;
+    int h_count = corex_readback_int(count);
 
     unique_ij_pairs.resize(h_count);
     unique_counts.resize(h_count);
@@ -342,7 +371,7 @@ void MatrixConverter<T, N>::_calculate_block_offsets(const muda::DeviceBCOOMatri
                                        count.data(),
                                        from.non_zeros());
     }
-    int h_count = count;
+    int h_count = corex_readback_int(count);
 
     unique_indices.resize(h_count);
     unique_counts.resize(h_count);
@@ -428,7 +457,7 @@ void MatrixConverter<T, N>::_make_unique_indices(const muda::DeviceDoubletVector
                                        indices_sorted.size());
     }
 
-    int h_count = count;
+    int h_count = corex_readback_int(count);
 
     unique_indices.resize(h_count);
     unique_counts.resize(h_count);
@@ -744,6 +773,14 @@ void MatrixConverter<T, N>::sym2ge(const muda::DeviceBCOOMatrix<T, N>& from,
 
 namespace uipc::backend::cuda
 {
+namespace
+{
+inline int corex_readback_int(const muda::DeviceVar<int>& value)
+{
+    return value;
+}
+}  // namespace
+
 template <typename T, int N>
 void MatrixConverter<T, N>::convert(const muda::DeviceTripletMatrix<T, N>& from,
                                     muda::DeviceBCOOMatrix<T, N>&          to)
@@ -929,7 +966,7 @@ void MatrixConverter<T, N>::_make_unique_indices(const muda::DeviceTripletMatrix
                                    count.data(),
                                    ij_pairs.size());
 
-    int h_count = count;
+    int h_count = corex_readback_int(count);
 
     unique_ij_pairs.resize(h_count);
     unique_counts.resize(h_count);
@@ -1034,7 +1071,7 @@ void MatrixConverter<T, N>::_calculate_block_offsets(const muda::DeviceBCOOMatri
                                    unique_counts.data(),
                                    count.data(),
                                    from.non_zeros());
-    int h_count = count;
+    int h_count = corex_readback_int(count);
 
     unique_indices.resize(h_count);
     unique_counts.resize(h_count);
@@ -1111,7 +1148,7 @@ void MatrixConverter<T, N>::_make_unique_indices(const muda::DeviceDoubletVector
                                    count.data(),
                                    indices_sorted.size());
 
-    int h_count = count;
+    int h_count = corex_readback_int(count);
 
     unique_indices.resize(h_count);
     unique_counts.resize(h_count);
