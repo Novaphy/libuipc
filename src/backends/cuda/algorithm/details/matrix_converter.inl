@@ -329,7 +329,7 @@ void MatrixConverter<T, N>::_make_unique_block_warp_reduction(
 {
     using namespace muda;
 
-    loose_resize_no_construct(sorted_partition_output, ij_pairs.size());
+    loose_resize_no_construct(sorted_partition_output, blocks_sorted.size());
 
     {
         corex_profile::ScopedPhase phase("matconv", "triplet_fill_segment_ids");
