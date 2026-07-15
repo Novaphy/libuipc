@@ -667,7 +667,7 @@ static __global__ void kernel_copy_sorted_blocks_with_ij_3x3(
     dst_col[i] = ij_pairs[i].y;
 }
 
-static constexpr int kBlock = 256;
+static constexpr int kBlock = 512;
 static inline int grid_for(int n) { return (n + kBlock - 1) / kBlock; }
 
 void launch_hash_ij(int N, const int* row_indices, const int* col_indices,
