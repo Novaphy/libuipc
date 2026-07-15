@@ -329,11 +329,10 @@ static __global__ void kernel_calcIntNodeOrders(int N, const int* int_lc, const 
     }
 }
 
-static __global__ void kernel_updateBvhExtNodeLinks(int N, const int* mapTable, int* lcas, uint32_t* pars)
+static __global__ void kernel_updateBvhExtNodeLinks(int N, const int* mapTable, int* lcas)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(idx >= N) return;
-    pars[idx] = mapTable[pars[idx]];
     int ori = lcas[idx];
     if(ori != -1)
         lcas[idx] = mapTable[ori] << 1;
@@ -810,7 +809,8 @@ MUDA_INLINE void StacklessBVH::Impl::updateBvhExtNodeLinks(int size)
     if(size == 0) return;
 
     int block = 256, grid = (size + block - 1) / block;
-    corex_bvh::kernel_updateBvhExtNodeLinks<<<grid, block>>>(size, RAW_PTR(tkMap), RAW_PTR(ext_lca), RAW_PTR(ext_par));
+    corex_bvh::kernel_updateBvhExtNodeLinks<<<grid, block>>>(
+        size, RAW_PTR(tkMap), RAW_PTR(ext_lca));
     checkCudaErrors(cudaGetLastError());
 }
 
