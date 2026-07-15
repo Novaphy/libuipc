@@ -764,6 +764,10 @@ void GlobalLinearSystem::Impl::_assemble_linear_system()
         const int n = std::max({n_values, triplet_count, rhs_count});
         if(n > 0)
         {
+#if !defined(__ILUVATAR__)
+            // Do not attribute an error left by an earlier NVIDIA launch to this clear.
+            (void)cudaGetLastError();
+#endif
             constexpr int block = 256;
             const int grid = std::min(1024, (n + block - 1) / block);
             kernel_corex_clear_linear_assembly<<<grid, block>>>(
