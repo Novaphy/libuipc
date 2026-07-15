@@ -384,7 +384,10 @@ SizeT LinearFusedPCG::fused_pcg(muda::DenseVectorView<Float>  x,
     Float rz_host = d_rz;
     Float norm_r_host =
         std::sqrt(std::max(static_cast<Float>(d_norm2), Float{0}));
-    Float norm_b = ctx().norm(b);
+    // x is explicitly initialized to zero before entering PCG, so r = b for
+    // the initial residual. Reuse the norm already produced by fused_dot_norm
+    // instead of launching a second global reduction for ||b||.
+    Float norm_b = norm_r_host;
     check_init_rz_nan_inf(rz_host);
     Float abs_rz0 = std::abs(rz_host);
     Float init_norm_r = norm_r_host;
