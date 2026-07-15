@@ -196,7 +196,9 @@ void ABDLineSearchReporter::Impl::compute_energy(LineSearcher::ComputeEnergyInfo
     Float E = 0.0;
     total_reporter_energy.view().copy_to(&E);
 
-    if(std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM"))
+    static const bool trace_linear_system =
+        std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+    if(trace_linear_system)
         logger::info("[corex_trace][energy] total={}", E);
 
     info.energy(E);
