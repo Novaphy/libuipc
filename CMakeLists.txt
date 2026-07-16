@@ -54,6 +54,8 @@ set(UIPC_COREX_CUDA_COMPILER "" CACHE FILEPATH "Path to Corex CUDA compiler (opt
 # instead of falling back to synchronous cudaMalloc + multi-step fallbacks.
 # Set to OFF to restore the legacy synchronous path used on Corex 3.x / pre-4.4.
 option(UIPC_COREX_USE_ASYNC_MEMORY "Use cudaMallocAsync/cudaFreeAsync on Corex (>= 4.4)" ON)
+option(UIPC_ENABLE_GIPC_NATIVE_CONTACT "Enable native GPU_IPC-style Gauss-Newton contact Hessian assembly in CUDA contact kernels" OFF)
+option(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE "Apply classified dytopo/contact diagonal Hessians through matrix-free SpMV instead of global BCOO assembly" OFF)
 
 if(UIPC_MUDA_USE_COREX)
     if(UIPC_COREX_CUDA_ARCHITECTURES)

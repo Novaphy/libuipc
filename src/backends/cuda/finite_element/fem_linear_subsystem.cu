@@ -137,7 +137,9 @@ void FEMLinearSubsystem::Impl::report_extent(GlobalLinearSystem::DiagExtentInfo&
     if(dytopo_effect_receiver)  // if dytopo_effect enabled
     {
         grad_offset += dytopo_effect_receiver->gradients().doublet_count();
+#if !(defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE)
         hess_offset += dytopo_effect_receiver->hessians().triplet_count();
+#endif
 
         UIPC_ASSERT(!(gradient_only
                       && !dytopo_effect_receiver->hessians().triplet_count() == 0),
@@ -330,6 +332,10 @@ void FEMLinearSubsystem::Impl::_assemble_dytopo_effect(IndexT& hess_offset,
     if(info.gradient_only())
         return;
 
+#if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
+    return;
+#endif
+
     // Need to update hess_offset, we are assembling to the global hessian buffer
     auto hess_count = dytopo_effect_receiver->hessians().triplet_count();
 
@@ -357,6 +363,53 @@ void FEMLinearSubsystem::Impl::_assemble_dytopo_effect(IndexT& hess_offset,
     }
 
     hess_offset += hess_count;
+}
+
+void FEMLinearSubsystem::Impl::matrix_free_spmv(GlobalLinearSystem::MatrixFreeSpMVInfo& info)
+{
+#if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
+    using namespace muda;
+
+    if(!dytopo_effect_receiver)
+        return;
+
+    auto hess_count = dytopo_effect_receiver->hessians().triplet_count();
+    if(!hess_count)
+        return;
+
+    ParallelFor()
+        .file_line(__FILE__, __LINE__)
+        .apply(hess_count,
+               [dytopo_effect_hessian =
+                    dytopo_effect_receiver->hessians().cviewer().name("dytopo_effect_hessian"),
+                x = info.x().cviewer().name("x"),
+                y = info.y().viewer().name("y"),
+                a = info.a(),
+                vertex_offset =
+                    finite_element_vertex_reporter->vertex_offset(),
+                is_fixed = fem().is_fixed.cviewer().name("is_fixed")] __device__(int I) mutable
+               {
+                   const auto& [g_i, g_j, H3] = dytopo_effect_hessian(I);
+                   auto i                     = g_i - vertex_offset;
+                   auto j                     = g_j - vertex_offset;
+
+                   if(is_fixed(i) || is_fixed(j))
+                       return;
+
+                   const Vector3 x_i = x.segment<3>(i * 3).as_eigen();
+                   const Vector3 x_j = x.segment<3>(j * 3).as_eigen();
+
+                   const Vector3 Hx_j = a * (H3 * x_j);
+                   y.segment<3>(i * 3).atomic_add(Hx_j);
+                   if(i != j)
+                   {
+                       const Vector3 Ht_x_i = a * (H3.transpose() * x_i);
+                       y.segment<3>(j * 3).atomic_add(Ht_x_i);
+                   }
+               });
+#else
+    (void)info;
+#endif
 }
 
 void FEMLinearSubsystem::Impl::accuracy_check(GlobalLinearSystem::AccuracyInfo& info)
@@ -451,6 +504,11 @@ void FEMLinearSubsystem::do_report_extent(GlobalLinearSystem::DiagExtentInfo& in
 void FEMLinearSubsystem::do_assemble(GlobalLinearSystem::DiagInfo& info)
 {
     m_impl.assemble(info);
+}
+
+void FEMLinearSubsystem::do_matrix_free_spmv(GlobalLinearSystem::MatrixFreeSpMVInfo& info)
+{
+    m_impl.matrix_free_spmv(info);
 }
 
 void FEMLinearSubsystem::do_accuracy_check(GlobalLinearSystem::AccuracyInfo& info)

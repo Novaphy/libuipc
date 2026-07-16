@@ -99,6 +99,7 @@ class ABDLinearSubsystem final : public DiagLinearSubsystem
         void _assemble_kinetic_shape(IndexT& offset, GlobalLinearSystem::DiagInfo& info);
         void _assemble_reporters(IndexT& offset, GlobalLinearSystem::DiagInfo& info);
         void _assemble_dytopo_effect(IndexT& offset, GlobalLinearSystem::DiagInfo& info);
+        void matrix_free_spmv(GlobalLinearSystem::MatrixFreeSpMVInfo& info);
 
         void accuracy_check(GlobalLinearSystem::AccuracyInfo& info);
         void retrieve_solution(GlobalLinearSystem::SolutionInfo& info);
@@ -142,6 +143,7 @@ class ABDLinearSubsystem final : public DiagLinearSubsystem
 
     virtual void do_report_extent(GlobalLinearSystem::DiagExtentInfo& info) override;
     virtual void do_assemble(GlobalLinearSystem::DiagInfo& info) override;
+    virtual void do_matrix_free_spmv(GlobalLinearSystem::MatrixFreeSpMVInfo& info) override;
     virtual void do_accuracy_check(GlobalLinearSystem::AccuracyInfo& info) override;
     virtual void do_retrieve_solution(GlobalLinearSystem::SolutionInfo& info) override;
     virtual Float do_diag_norm(GlobalLinearSystem::DiagNormInfo& info) override;
@@ -256,6 +258,7 @@ class ABDLinearSubsystem final : public DiagLinearSubsystem
         void _assemble_kinetic_shape(IndexT& offset, GlobalLinearSystem::DiagInfo& info);
         void _assemble_reporters(IndexT& offset, GlobalLinearSystem::DiagInfo& info);
         void _assemble_dytopo_effect(IndexT& offset, GlobalLinearSystem::DiagInfo& info);
+        void matrix_free_spmv(GlobalLinearSystem::MatrixFreeSpMVInfo& info);
 
         void accuracy_check(GlobalLinearSystem::AccuracyInfo& info);
         void retrieve_solution(GlobalLinearSystem::SolutionInfo& info);
@@ -299,6 +302,7 @@ class ABDLinearSubsystem final : public DiagLinearSubsystem
 
     virtual void do_report_extent(GlobalLinearSystem::DiagExtentInfo& info) override;
     virtual void do_assemble(GlobalLinearSystem::DiagInfo& info) override;
+    virtual void do_matrix_free_spmv(GlobalLinearSystem::MatrixFreeSpMVInfo& info) override;
     virtual void do_accuracy_check(GlobalLinearSystem::AccuracyInfo& info) override;
     virtual void do_retrieve_solution(GlobalLinearSystem::SolutionInfo& info) override;
     virtual Float do_diag_norm(GlobalLinearSystem::DiagNormInfo& info) override;

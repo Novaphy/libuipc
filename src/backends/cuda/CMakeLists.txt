@@ -42,6 +42,12 @@ endif()
 
 target_compile_features(cuda PUBLIC cxx_std_${_uipc_cuda_standard})
 target_include_directories(cuda PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+if(UIPC_ENABLE_GIPC_NATIVE_CONTACT)
+    target_compile_definitions(cuda PUBLIC UIPC_ENABLE_GIPC_NATIVE_CONTACT=1)
+endif()
+if(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE)
+    target_compile_definitions(cuda PUBLIC UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE=1)
+endif()
 set_target_properties(cuda PROPERTIES
     # Default to non-RDC. Corex/clang-CUDA does not accept nvcc's -rdc=true,
     # and most of our kernels do not require separable compilation.

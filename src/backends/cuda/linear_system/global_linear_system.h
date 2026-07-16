@@ -37,6 +37,24 @@ class GlobalLinearSystem : public SimSystem
 
     class Impl;
 
+    class MatrixFreeSpMVInfo
+    {
+      public:
+        Float            a() const noexcept { return m_a; }
+        CDenseVectorView x() const noexcept { return m_x; }
+        DenseVectorView  y() const noexcept { return m_y; }
+        IndexT           dof_offset() const noexcept { return m_dof_offset; }
+        IndexT           dof_count() const noexcept { return m_dof_count; }
+
+      private:
+        friend class Impl;
+        Float            m_a          = 1.0;
+        CDenseVectorView m_x;
+        DenseVectorView  m_y;
+        IndexT           m_dof_offset = 0;
+        IndexT           m_dof_count  = 0;
+    };
+
     class InitDofExtentInfo
     {
       public:

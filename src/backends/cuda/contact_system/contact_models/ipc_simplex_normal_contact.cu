@@ -382,10 +382,17 @@ __global__ void kernel_PP_contact_assemble(
     {
         Matrix6x6 H;
         corex_record_contact_inputs(spd_stats, CorexSpdPP, kt2, d_hat, thickness);
+        Matrix6x6 H_before;
+#if UIPC_ENABLE_GIPC_NATIVE_CONTACT
+        PP_barrier_gradient_gipc_native_hessian(
+            G, H, flag, kt2, d_hat, thickness, P0, P1);
+        H_before = H;
+#else
         PP_barrier_gradient_hessian(G, H, flag, kt2, d_hat, thickness, P0, P1);
-        Matrix6x6 H_before = H;
+        H_before = H;
         make_spd(H);
         corex_apply_spd_conditioning(H_before, H, spd_ratio_trigger, pp_diag_scale);
+#endif
         corex_record_spd_projection(spd_stats, CorexSpdPP, H_before, H);
         DoubletVectorAssembler DVA{PP_Gs};
         DVA.segment<2>(i * 2).write(PP, G);
@@ -442,13 +449,23 @@ __global__ void kernel_PE_contact_assemble(
     {
         Matrix9x9 H;
         corex_record_contact_inputs(spd_stats, CorexSpdPE, kt2, d_hat, thickness);
+        Matrix9x9 H_before;
+#if UIPC_ENABLE_GIPC_NATIVE_CONTACT
+        PE_barrier_gradient_gipc_native_hessian(
+            G, H, flag, kt2, d_hat, thickness, P, E0, E1);
+        if(pe_diag_reg > static_cast<Float>(0))
+            for(int d = 0; d < 9; ++d)
+                H(d, d) += pe_diag_reg;
+        H_before = H;
+#else
         PE_barrier_gradient_hessian(G, H, flag, kt2, d_hat, thickness, P, E0, E1);
         if(pe_diag_reg > static_cast<Float>(0))
             for(int d = 0; d < 9; ++d)
                 H(d, d) += pe_diag_reg;
-        Matrix9x9 H_before = H;
+        H_before = H;
         make_spd(H);
         corex_apply_spd_conditioning(H_before, H, spd_ratio_trigger, pe_diag_scale);
+#endif
         corex_record_spd_projection(spd_stats, CorexSpdPE, H_before, H);
         corex_record_pe_outlier(spd_stats, i, PE, bids, H_before, H);
         DoubletVectorAssembler DVA{PE_Gs};
@@ -513,12 +530,21 @@ __global__ void kernel_EE_contact_assemble(
     {
         Matrix12x12 H;
         corex_record_contact_inputs(spd_stats, CorexSpdEE, kt2, d_hat, thickness);
+        Matrix12x12 H_before;
+#if UIPC_ENABLE_GIPC_NATIVE_CONTACT
+        mollified_EE_barrier_gradient_gipc_native_hessian(
+            G, H, flag, kt2, d_hat, thickness,
+            t0_Ea0, t0_Ea1, t0_Eb0, t0_Eb1,
+            Ea0, Ea1, Eb0, Eb1);
+        H_before = H;
+#else
         mollified_EE_barrier_gradient_hessian(G, H, flag, kt2, d_hat, thickness,
                                                t0_Ea0, t0_Ea1, t0_Eb0, t0_Eb1,
                                                Ea0, Ea1, Eb0, Eb1);
-        Matrix12x12 H_before = H;
+        H_before = H;
         make_spd(H);
         corex_apply_spd_conditioning(H_before, H, spd_ratio_trigger, ee_diag_scale);
+#endif
         corex_record_spd_projection(spd_stats, CorexSpdEE, H_before, H);
         DoubletVectorAssembler DVA{EE_Gs};
         DVA.segment<4>(i * 4).write(EE, G);
@@ -574,11 +600,18 @@ __global__ void kernel_PT_contact_assemble(
     {
         Matrix12x12 H;
         corex_record_contact_inputs(spd_stats, CorexSpdPT, kt2, d_hat, thickness);
+        Matrix12x12 H_before;
+#if UIPC_ENABLE_GIPC_NATIVE_CONTACT
+        PT_barrier_gradient_gipc_native_hessian(
+            G, H, flag, kt2, d_hat, thickness, P, T0, T1, T2);
+        H_before = H;
+#else
         PT_barrier_gradient_hessian(G, H, flag, kt2, d_hat, thickness,
                                     P, T0, T1, T2);
-        Matrix12x12 H_before = H;
+        H_before = H;
         make_spd(H);
         corex_apply_spd_conditioning(H_before, H, spd_ratio_trigger, pt_diag_scale);
+#endif
         corex_record_spd_projection(spd_stats, CorexSpdPT, H_before, H);
         DoubletVectorAssembler DVA{PT_Gs};
         DVA.segment<4>(i * 4).write(PT, G);

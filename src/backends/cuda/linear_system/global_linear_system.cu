@@ -948,13 +948,36 @@ void GlobalLinearSystem::Impl::spmv(Float                         a,
                                     muda::DenseVectorView<Float>  y)
 {
     spmver.rbk_sym_spmv(a, bcoo_A.cview(), x, b, y);
+
+#if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
+    auto diag_dof_counts  = diag_dof_offsets_counts.counts();
+    auto diag_dof_offsets = diag_dof_offsets_counts.offsets();
+
+    for(auto&& [i, diag_subsystem] : enumerate(diag_subsystems.view()))
+    {
+        MatrixFreeSpMVInfo info;
+        auto               offset = diag_dof_offsets[i];
+        auto               count  = diag_dof_counts[i];
+        info.m_a                  = a;
+        info.m_x                  = x.subview(offset, count);
+        info.m_y                  = y.subview(offset, count);
+        info.m_dof_offset         = offset;
+        info.m_dof_count          = count;
+        diag_subsystem->matrix_free_spmv(info);
+    }
+#endif
 }
 
 void GlobalLinearSystem::Impl::spmv_dot(muda::CDenseVectorView<Float> x,
                                         muda::DenseVectorView<Float>  y,
                                         muda::VarView<Float>          d_dot)
 {
+#if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
+    spmv(1.0, x, 0.0, y);
+    ctx.dot(x, y.as_const(), d_dot);
+#else
     spmver.rbk_sym_spmv_dot(1.0, bcoo_A.cview(), x, 0.0, y, d_dot);
+#endif
 }
 
 bool GlobalLinearSystem::Impl::accuracy_statisfied(muda::DenseVectorView<Float> r)
@@ -1614,6 +1637,24 @@ void GlobalLinearSystem::Impl::spmv(Float                         a,
 {
     spmver.rbk_sym_spmv(a, bcoo_A.cview(), x, b, y);
 
+#if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
+    auto diag_dof_counts  = diag_dof_offsets_counts.counts();
+    auto diag_dof_offsets = diag_dof_offsets_counts.offsets();
+
+    for(auto&& [i, diag_subsystem] : enumerate(diag_subsystems.view()))
+    {
+        MatrixFreeSpMVInfo info;
+        auto               offset = diag_dof_offsets[i];
+        auto               count  = diag_dof_counts[i];
+        info.m_a                  = a;
+        info.m_x                  = x.subview(offset, count);
+        info.m_y                  = y.subview(offset, count);
+        info.m_dof_offset         = offset;
+        info.m_dof_count          = count;
+        diag_subsystem->matrix_free_spmv(info);
+    }
+#endif
+
     // Just some debug options
     //  * spmver.sym_spmv(a, bcoo_A.cview(), x, b, y);      // Slightly slower
     //  * spmver.cpu_sym_spmv(a, bcoo_A.cview(), x, b, y);  // Much slower
@@ -1623,7 +1664,12 @@ void GlobalLinearSystem::Impl::spmv_dot(muda::CDenseVectorView<Float> x,
                                         muda::DenseVectorView<Float>  y,
                                         muda::VarView<Float>          d_dot)
 {
+#if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
+    spmv(1.0, x, 0.0, y);
+    ctx.dot(x, y.as_const(), d_dot);
+#else
     spmver.rbk_sym_spmv_dot(1.0, bcoo_A.cview(), x, 0.0, y, d_dot);
+#endif
 }
 
 bool GlobalLinearSystem::Impl::accuracy_statisfied(muda::DenseVectorView<Float> r)

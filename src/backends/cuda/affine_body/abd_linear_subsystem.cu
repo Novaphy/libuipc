@@ -525,19 +525,25 @@ static __global__ void kernel_abd_dytopo_hessians_serial(int hess_count,
             for(int k = 0; k < 12 * 12; ++k)
                 diag_ptr[k] += src[k];
 
-            // Match upstream semantics: same-body terms write upper-triangle blocks only.
-            zero_out_lower(H12x12);
         }
 
-        int base_triplet = I * 16;
-        for(int ii = 0; ii < 4; ++ii)
+        // Match upstream BCOO semantics: same-body terms write upper-triangle blocks only.
+        if(body_i == body_j)
+            zero_out_lower(H12x12);
+
+        if(dst_rows && dst_cols && dst_vals)
         {
-            for(int jj = 0; jj < 4; ++jj)
+            int base_triplet = I * 16;
+            for(int ii = 0; ii < 4; ++ii)
             {
-                int idx     = base_triplet + ii * 4 + jj;
-                dst_rows[idx] = L * 4 + ii;
-                dst_cols[idx] = R * 4 + jj;
-                dst_vals[idx] = H12x12.template block<BLK, BLK>(ii * BLK, jj * BLK);
+                for(int jj = 0; jj < 4; ++jj)
+                {
+                    int idx       = base_triplet + ii * 4 + jj;
+                    dst_rows[idx] = L * 4 + ii;
+                    dst_cols[idx] = R * 4 + jj;
+                    dst_vals[idx] =
+                        H12x12.template block<BLK, BLK>(ii * BLK, jj * BLK);
+                }
             }
         }
     }
@@ -610,21 +616,88 @@ static __global__ void kernel_abd_dytopo_hessians_parallel(int hess_count,
         for(int k = 0; k < 12 * 12; ++k)
             atomicAdd(&diag_ptr[k], src[k]);
 
-        // Match upstream semantics: same-body terms write upper-triangle blocks only.
-        zero_out_lower(H12x12);
     }
 
-    int base_triplet = I * 16;
-    for(int ii = 0; ii < 4; ++ii)
+    // Match upstream BCOO semantics: same-body terms write upper-triangle blocks only.
+    if(body_i == body_j)
+        zero_out_lower(H12x12);
+
+    if(dst_rows && dst_cols && dst_vals)
     {
-        for(int jj = 0; jj < 4; ++jj)
+        int base_triplet = I * 16;
+        for(int ii = 0; ii < 4; ++ii)
         {
-            int idx       = base_triplet + ii * 4 + jj;
-            dst_rows[idx] = L * 4 + ii;
-            dst_cols[idx] = R * 4 + jj;
-            dst_vals[idx] = H12x12.template block<BLK, BLK>(ii * BLK, jj * BLK);
+            for(int jj = 0; jj < 4; ++jj)
+            {
+                int idx       = base_triplet + ii * 4 + jj;
+                dst_rows[idx] = L * 4 + ii;
+                dst_cols[idx] = R * 4 + jj;
+                dst_vals[idx] =
+                    H12x12.template block<BLK, BLK>(ii * BLK, jj * BLK);
+            }
         }
     }
+}
+
+static __device__ Vector12 corex_abd_load_vector12(const Float* x, int body)
+{
+    Vector12 ret;
+    int      base = body * 12;
+    for(int k = 0; k < 12; ++k)
+        ret(k) = x[base + k];
+    return ret;
+}
+
+static __device__ void corex_abd_atomic_add_vector12(Float* y,
+                                                     int    body,
+                                                     const Vector12& value,
+                                                     Float  a)
+{
+    int base = body * 12;
+    for(int k = 0; k < 12; ++k)
+        atomicAdd(&y[base + k], a * value(k));
+}
+
+static __global__ void kernel_abd_dytopo_matrix_free_spmv(int hess_count,
+                                                          int vertex_offset,
+                                                          const int* row_indices,
+                                                          const int* col_indices,
+                                                          const Matrix3x3* values,
+                                                          const IndexT* v2b,
+                                                          const ABDJacobi* Js,
+                                                          const IndexT* is_fixed,
+                                                          const Float* x,
+                                                          Float* y,
+                                                          Float a)
+{
+    int I = blockIdx.x * blockDim.x + threadIdx.x;
+    if(I >= hess_count) return;
+
+    int g_i = row_indices[I];
+    int g_j = col_indices[I];
+    int i   = g_i - vertex_offset;
+    int j   = g_j - vertex_offset;
+
+    int body_i = v2b[i];
+    int body_j = v2b[j];
+
+    if(is_fixed[body_i] || is_fixed[body_j])
+        return;
+
+    const auto& J_i  = Js[i];
+    const auto& J_j  = Js[j];
+    const auto& H3x3 = values[I];
+
+    const Vector12 x_body_i = corex_abd_load_vector12(x, body_i);
+    const Vector12 x_body_j =
+        body_i == body_j ? x_body_i : corex_abd_load_vector12(x, body_j);
+
+    const Vector3 x_i = J_i * x_body_i;
+    const Vector3 x_j = J_j * x_body_j;
+
+    corex_abd_atomic_add_vector12(y, body_i, J_i.T() * (H3x3 * x_j), a);
+    if(i != j)
+        corex_abd_atomic_add_vector12(y, body_j, J_j.T() * (H3x3.transpose() * x_i), a);
 }
 
 void ABDLinearSubsystem::do_build(DiagLinearSubsystem::BuildInfo& info)
@@ -734,7 +807,9 @@ void ABDLinearSubsystem::Impl::report_extent(GlobalLinearSystem::DiagExtentInfo&
 
     if(dytopo_effect_receiver && !info.gradient_only())
     {
+#if !(defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE)
         H12x12_count += dytopo_effect_receiver->hessians().triplet_count();
+#endif
     }
 
 
@@ -1178,14 +1253,27 @@ void ABDLinearSubsystem::Impl::_assemble_dytopo_effect(IndexT& offset,
     if(dytopo_effect_receiver)
         dytopo_effect_hessian_count = dytopo_effect_receiver->hessians().triplet_count();
 
+#if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
+    auto H3x3_count = SizeT{0};
+#else
     auto H3x3_count         = dytopo_effect_hessian_count * (4 * 4);
     auto dytopo_effect_H3x3 = info.hessians().subview(offset, H3x3_count);
+#endif
 
     if(dytopo_effect_hessian_count)
     {
         // Half Contact Hessian
         // ref: https://github.com/spiriMirror/libuipc/issues/272
         auto src_hess = dytopo_effect_receiver->hessians();
+#if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
+        int*      dst_rows = nullptr;
+        int*      dst_cols = nullptr;
+        Matrix3x3* dst_vals = nullptr;
+#else
+        auto      dst_rows = dytopo_effect_H3x3.row_indices().data();
+        auto      dst_cols = dytopo_effect_H3x3.col_indices().data();
+        auto      dst_vals = dytopo_effect_H3x3.values().data();
+#endif
         if(corex_abd_dytopo_parallel_enabled())
         {
             constexpr int kBlk = 256;
@@ -1200,9 +1288,9 @@ void ABDLinearSubsystem::Impl::_assemble_dytopo_effect(IndexT& offset,
                 abd().vertex_id_to_J.data(),
                 abd().body_id_to_is_fixed.data(),
                 this->diag_hessian.data(),
-                dytopo_effect_H3x3.row_indices().data(),
-                dytopo_effect_H3x3.col_indices().data(),
-                dytopo_effect_H3x3.values().data());
+                dst_rows,
+                dst_cols,
+                dst_vals);
         }
         else
         {
@@ -1216,9 +1304,9 @@ void ABDLinearSubsystem::Impl::_assemble_dytopo_effect(IndexT& offset,
                 abd().vertex_id_to_J.data(),
                 abd().body_id_to_is_fixed.data(),
                 this->diag_hessian.data(),
-                dytopo_effect_H3x3.row_indices().data(),
-                dytopo_effect_H3x3.col_indices().data(),
-                dytopo_effect_H3x3.values().data());
+                dst_rows,
+                dst_cols,
+                dst_vals);
         }
         checkCudaErrors(cudaGetLastError());
         corex_abd_assemble_sync_if_requested("after dytopo hessians");
@@ -1226,6 +1314,38 @@ void ABDLinearSubsystem::Impl::_assemble_dytopo_effect(IndexT& offset,
     }
 
     offset += H3x3_count;
+}
+
+void ABDLinearSubsystem::Impl::matrix_free_spmv(GlobalLinearSystem::MatrixFreeSpMVInfo& info)
+{
+#if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
+    if(!dytopo_effect_receiver)
+        return;
+
+    auto hess_count = dytopo_effect_receiver->hessians().triplet_count();
+    if(!hess_count)
+        return;
+
+    auto          vertex_offset = affine_body_vertex_reporter->vertex_offset();
+    auto          src_hess      = dytopo_effect_receiver->hessians();
+    constexpr int kBlk          = 256;
+    int           n             = static_cast<int>(hess_count);
+    kernel_abd_dytopo_matrix_free_spmv<<<(n + kBlk - 1) / kBlk, kBlk>>>(
+        n,
+        static_cast<int>(vertex_offset),
+        src_hess.row_indices().data(),
+        src_hess.col_indices().data(),
+        src_hess.values().data(),
+        abd().vertex_id_to_body_id.data(),
+        abd().vertex_id_to_J.data(),
+        abd().body_id_to_is_fixed.data(),
+        info.x().data(),
+        info.y().data(),
+        info.a());
+    checkCudaErrors(cudaGetLastError());
+#else
+    (void)info;
+#endif
 }
 
 void ABDLinearSubsystem::Impl::accuracy_check(GlobalLinearSystem::AccuracyInfo& info)
@@ -1314,6 +1434,11 @@ void ABDLinearSubsystem::do_report_extent(GlobalLinearSystem::DiagExtentInfo& in
 void ABDLinearSubsystem::do_assemble(GlobalLinearSystem::DiagInfo& info)
 {
     m_impl.assemble(info);
+}
+
+void ABDLinearSubsystem::do_matrix_free_spmv(GlobalLinearSystem::MatrixFreeSpMVInfo& info)
+{
+    m_impl.matrix_free_spmv(info);
 }
 
 void ABDLinearSubsystem::do_accuracy_check(GlobalLinearSystem::AccuracyInfo& info)
@@ -1545,7 +1670,9 @@ void ABDLinearSubsystem::Impl::report_extent(GlobalLinearSystem::DiagExtentInfo&
 
     if(dytopo_effect_receiver && !info.gradient_only())
     {
+#if !(defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE)
         H12x12_count += dytopo_effect_receiver->hessians().triplet_count();
+#endif
     }
 
 
@@ -1854,13 +1981,57 @@ void ABDLinearSubsystem::Impl::_assemble_dytopo_effect(IndexT& offset,
     if(dytopo_effect_receiver)
         dytopo_effect_hessian_count = dytopo_effect_receiver->hessians().triplet_count();
 
-    auto H3x3_count         = dytopo_effect_hessian_count * (4 * 4);
+    auto H3x3_count = dytopo_effect_hessian_count * (4 * 4);
+#if !(defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE)
     auto dytopo_effect_H3x3 = info.hessians().subview(offset, H3x3_count);
+#else
+    H3x3_count = 0;
+#endif
 
     if(dytopo_effect_hessian_count)
     {
         // Half Contact Hessian
         // ref: https://github.com/spiriMirror/libuipc/issues/272
+#if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
+        ParallelFor()
+            .file_line(__FILE__, __LINE__)
+            .apply(dytopo_effect_hessian_count,
+                   [dytopo_effect_hessian =
+                        dytopo_effect_receiver->hessians().cviewer().name("dytopo_effect_hessian"),
+                    v2b = abd().vertex_id_to_body_id.cviewer().name("v2b"),
+                    Js  = abd().vertex_id_to_J.cviewer().name("Js"),
+                    is_fixed = abd().body_id_to_is_fixed.cviewer().name("is_fixed"),
+                    diag_hessian = this->diag_hessian.viewer().name("diag_hessian"),
+                    vertex_offset = vertex_offset] __device__(int I) mutable
+                   {
+                       const auto& [g_i, g_j, H3x3] = dytopo_effect_hessian(I);
+
+                       auto i = g_i - vertex_offset;
+                       auto j = g_j - vertex_offset;
+
+                       auto body_i = v2b(i);
+                       auto body_j = v2b(j);
+
+                       if(is_fixed(body_i) || is_fixed(body_j) || body_i != body_j)
+                           return;
+
+                       auto& J_i = Js(i);
+                       auto& J_j = Js(j);
+
+                       Matrix12x12 H12x12;
+                       if(i != j)
+                       {
+                           H12x12 = ABDJacobi::JT_H_J(J_i.T(), H3x3, J_j)
+                                    + ABDJacobi::JT_H_J(J_j.T(), H3x3.transpose(), J_i);
+                       }
+                       else
+                       {
+                           H12x12 = ABDJacobi::JT_H_J(J_i.T(), H3x3, J_j);
+                       }
+
+                       eigen::atomic_add(diag_hessian(body_i), H12x12);
+                   });
+#else
         ParallelFor()
             .file_line(__FILE__, __LINE__)
             .apply(dytopo_effect_hessian_count,
@@ -1938,9 +2109,70 @@ void ABDLinearSubsystem::Impl::_assemble_dytopo_effect(IndexT& offset,
                                   R * 4,          // begin col
                                   H12x12);
                    });
+#endif
     }
 
     offset += H3x3_count;
+}
+
+void ABDLinearSubsystem::Impl::matrix_free_spmv(GlobalLinearSystem::MatrixFreeSpMVInfo& info)
+{
+#if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
+    using namespace muda;
+
+    if(!dytopo_effect_receiver)
+        return;
+
+    auto hess_count = dytopo_effect_receiver->hessians().triplet_count();
+    if(!hess_count)
+        return;
+
+    auto vertex_offset = affine_body_vertex_reporter->vertex_offset();
+    ParallelFor()
+        .file_line(__FILE__, __LINE__)
+        .apply(hess_count,
+               [dytopo_effect_hessian =
+                    dytopo_effect_receiver->hessians().cviewer().name("dytopo_effect_hessian"),
+                x = info.x().cviewer().name("x"),
+                y = info.y().viewer().name("y"),
+                a = info.a(),
+                v2b = abd().vertex_id_to_body_id.cviewer().name("v2b"),
+                Js  = abd().vertex_id_to_J.cviewer().name("Js"),
+                is_fixed = abd().body_id_to_is_fixed.cviewer().name("is_fixed"),
+                vertex_offset = vertex_offset] __device__(int I) mutable
+               {
+                   const auto& [g_i, g_j, H3x3] = dytopo_effect_hessian(I);
+
+                   auto i = g_i - vertex_offset;
+                   auto j = g_j - vertex_offset;
+
+                   auto body_i = v2b(i);
+                   auto body_j = v2b(j);
+
+                   if(is_fixed(body_i) || is_fixed(body_j))
+                       return;
+
+                   auto& J_i = Js(i);
+                   auto& J_j = Js(j);
+
+                   const Vector12 x_body_i = x.segment<12>(body_i * 12).as_eigen();
+                   const Vector12 x_body_j =
+                       body_i == body_j ? x_body_i : x.segment<12>(body_j * 12).as_eigen();
+                   const Vector3 x_i = J_i * x_body_i;
+                   const Vector3 x_j = J_j * x_body_j;
+
+                   const Vector12 Hx_j = a * (J_i.T() * (H3x3 * x_j));
+                   y.segment<12>(body_i * 12).atomic_add(Hx_j);
+                   if(i != j)
+                   {
+                       const Vector12 Ht_x_i =
+                           a * (J_j.T() * (H3x3.transpose() * x_i));
+                       y.segment<12>(body_j * 12).atomic_add(Ht_x_i);
+                   }
+               });
+#else
+    (void)info;
+#endif
 }
 
 void ABDLinearSubsystem::Impl::accuracy_check(GlobalLinearSystem::AccuracyInfo& info)
@@ -2018,6 +2250,11 @@ void ABDLinearSubsystem::do_report_extent(GlobalLinearSystem::DiagExtentInfo& in
 void ABDLinearSubsystem::do_assemble(GlobalLinearSystem::DiagInfo& info)
 {
     m_impl.assemble(info);
+}
+
+void ABDLinearSubsystem::do_matrix_free_spmv(GlobalLinearSystem::MatrixFreeSpMVInfo& info)
+{
+    m_impl.matrix_free_spmv(info);
 }
 
 void ABDLinearSubsystem::do_accuracy_check(GlobalLinearSystem::AccuracyInfo& info)

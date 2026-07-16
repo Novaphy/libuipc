@@ -1,8 +1,16 @@
+#ifndef UIPC_ENABLE_GIPC_NATIVE_CONTACT
+#define UIPC_ENABLE_GIPC_NATIVE_CONTACT 0
+#endif
+
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
 #pragma once
 #include <type_define.h>
 #include <contact_system/contact_coeff.h>
 #include <contact_system/contact_models/codim_ipc_contact_function.h>
+#if UIPC_ENABLE_GIPC_NATIVE_CONTACT
+#include <contact_system/contact_models/analytical_barrier_pFpx/analytical_barrier_contact.h>
+#include <utils/distance/distance_flagged.h>
+#endif
 
 namespace uipc::backend::cuda
 {
@@ -781,6 +789,354 @@ namespace sym::codim_ipc_simplex_contact
         H = ddBddD * GradD * GradD.transpose() + dBdD * HessD;
 #endif
     }
+
+#if UIPC_ENABLE_GIPC_NATIVE_CONTACT
+    namespace gipc_native_detail
+    {
+        inline __device__ Float abs(Float v)
+        {
+            return v < Float(0) ? -v : v;
+        }
+
+        inline __device__ bool finite(Float v)
+        {
+            return v == v && abs(v) < Float(1e30);
+        }
+
+        template <int N>
+        inline __device__ void zero_matrix(Matrix<Float, N, N>& H)
+        {
+            for(int r = 0; r < N; ++r)
+                for(int c = 0; c < N; ++c)
+                    H(r, c) = Float(0);
+        }
+
+        inline __device__ Float clamp01(Float v)
+        {
+            if(v < Float(0))
+                return Float(0);
+            if(v > Float(1))
+                return Float(1);
+            return v;
+        }
+
+        inline __device__ bool contact_measure(Float& I,
+                                               Float& d_hat_sqrt,
+                                               Float  D,
+                                               Float  d_hat,
+                                               Float  thickness)
+        {
+            if(!finite(D) || !finite(d_hat) || d_hat <= Float(0))
+                return false;
+
+            Float xi2    = thickness * thickness;
+            Float domain = d_hat * d_hat + Float(2) * d_hat * thickness;
+            if(!finite(domain) || domain <= Float(1e-20))
+                return false;
+
+            Float gap = D - xi2;
+            I = gap / domain;
+            if(!finite(I))
+                return false;
+            if(I < Float(1e-4))
+                I = Float(1e-4);
+            if(I > Float(0.999999))
+                I = Float(0.999999);
+            d_hat_sqrt = sqrt(domain);
+            return finite(d_hat_sqrt) && d_hat_sqrt > Float(0);
+        }
+
+        inline __device__ Float lambda_barrier_gn(Float kappa, Float I, Float domain)
+        {
+            Float logI = log(I);
+            Float I2   = I * I;
+            Float poly = Float(6) * I + Float(2) * I * logI
+                       - Float(7) * I2 - Float(6) * I2 * logI + Float(1);
+            Float lambda = (Float(2) * kappa * domain * domain * poly) / I;
+            if(!finite(lambda) || lambda < Float(0))
+                return Float(0);
+            return lambda;
+        }
+
+        inline __device__ bool native_coeff(Float& coeff,
+                                            Float& d_hat_sqrt,
+                                            Float  kappa,
+                                            Float  D,
+                                            Float  d_hat,
+                                            Float  thickness)
+        {
+            Float I;
+            if(!contact_measure(I, d_hat_sqrt, D, d_hat, thickness))
+                return false;
+
+            Float domain = d_hat_sqrt * d_hat_sqrt;
+            coeff = lambda_barrier_gn(kappa, I, domain);
+            return finite(coeff) && coeff >= Float(0);
+        }
+
+        template <int N>
+        inline __device__ void rank1_hessian(Matrix<Float, N, N>& H,
+                                             Float                coeff,
+                                             const Float (&pFpx)[N])
+        {
+            zero_matrix(H);
+            for(int r = 0; r < N; ++r)
+                if(!finite(pFpx[r]))
+                    return;
+
+            for(int r = 0; r < N; ++r)
+                for(int c = 0; c < N; ++c)
+                    H(r, c) = coeff * pFpx[r] * pFpx[c];
+        }
+
+        template <int N, int M>
+        inline __device__ void rank1_hessian(Matrix<Float, N, N>& H,
+                                             Float                coeff,
+                                             const Float (&pFpx)[N][M],
+                                             int                  col)
+        {
+            zero_matrix(H);
+            for(int r = 0; r < N; ++r)
+                if(!finite(pFpx[r][col]))
+                    return;
+
+            for(int r = 0; r < N; ++r)
+                for(int c = 0; c < N; ++c)
+                    H(r, c) = coeff * pFpx[r][col] * pFpx[c][col];
+        }
+
+        template <int SrcVerts, int DstVerts>
+        inline __device__ void scatter_matrix(Matrix<Float, DstVerts * 3, DstVerts * 3>& H,
+                                              const Matrix<Float, SrcVerts * 3, SrcVerts * 3>& src,
+                                              const Vector<IndexT, DstVerts>& offsets,
+                                              Float scale = Float(1))
+        {
+            zero_matrix(H);
+            for(int sv0 = 0; sv0 < SrcVerts; ++sv0)
+            {
+                int dv0 = static_cast<int>(offsets[sv0]);
+                for(int sv1 = 0; sv1 < SrcVerts; ++sv1)
+                {
+                    int dv1 = static_cast<int>(offsets[sv1]);
+                    for(int a = 0; a < 3; ++a)
+                        for(int b = 0; b < 3; ++b)
+                            H(dv0 * 3 + a, dv1 * 3 + b) =
+                                scale * src(sv0 * 3 + a, sv1 * 3 + b);
+                }
+            }
+        }
+
+    }  // namespace gipc_native_detail
+
+    inline __device__ void PP_barrier_gradient_gipc_native_hessian(Vector6&        G,
+                                                                   Matrix6x6&     H,
+                                                                   const Vector2i& flag,
+                                                                   Float          kappa,
+                                                                   Float          d_hat,
+                                                                   Float          thickness,
+                                                                   const Vector3& P0,
+                                                                   const Vector3& P1)
+    {
+        using namespace distance;
+
+        PP_barrier_gradient(G, flag, kappa, d_hat, thickness, P0, P1);
+
+        Float D = Float(0);
+        point_point_distance2(flag, P0, P1, D);
+
+        Float coeff;
+        Float d_hat_sqrt;
+        if(!gipc_native_detail::native_coeff(
+               coeff, d_hat_sqrt, kappa, D, d_hat, thickness))
+        {
+            gipc_native_detail::zero_matrix(H);
+            return;
+        }
+
+        Float pFpx[6];
+        ::uipc::backend::cuda::analyticalBarrier::analytical_point_point_pFpx(
+            P0, P1, d_hat_sqrt, pFpx);
+        gipc_native_detail::rank1_hessian(H, coeff, pFpx);
+    }
+
+    inline __device__ void PE_barrier_gradient_gipc_native_hessian(Vector9&       G,
+                                                                  Matrix9x9&    H,
+                                                                  const Vector3i& flag,
+                                                                  Float         kappa,
+                                                                  Float         d_hat,
+                                                                  Float         thickness,
+                                                                  const Vector3& P,
+                                                                  const Vector3& E0,
+                                                                  const Vector3& E1)
+    {
+        using namespace distance;
+
+        PE_barrier_gradient(G, flag, kappa, d_hat, thickness, P, E0, E1);
+
+        Vector3i offsets = {0, 0, 0};
+        IndexT dim = distance::degenerate_point_edge(flag, offsets);
+        if(dim == 2)
+        {
+            const Vector3 verts[3] = {P, E0, E1};
+            Vector6 G2;
+            Matrix6x6 H2;
+            PP_barrier_gradient_gipc_native_hessian(
+                G2, H2, Vector2i{1, 1}, kappa, d_hat, thickness,
+                verts[offsets[0]], verts[offsets[1]]);
+            gipc_native_detail::scatter_matrix<2, 3>(H, H2, offsets);
+            return;
+        }
+
+        Float D = Float(0);
+        point_edge_distance2(flag, P, E0, E1, D);
+
+        Float coeff;
+        Float d_hat_sqrt;
+        if(!gipc_native_detail::native_coeff(
+               coeff, d_hat_sqrt, kappa, D, d_hat, thickness))
+        {
+            gipc_native_detail::zero_matrix(H);
+            return;
+        }
+
+        Float pFpx[9][4];
+        ::uipc::backend::cuda::analyticalBarrier::analytical_point_edge_pFpx(
+            P, E0, E1, d_hat_sqrt, pFpx);
+        gipc_native_detail::rank1_hessian(H, coeff, pFpx, 3);
+    }
+
+    inline __device__ void PT_barrier_gradient_gipc_native_hessian(Vector12&      G,
+                                                                  Matrix12x12&   H,
+                                                                  const Vector4i& flag,
+                                                                  Float          kappa,
+                                                                  Float          d_hat,
+                                                                  Float          thickness,
+                                                                  const Vector3& P,
+                                                                  const Vector3& T0,
+                                                                  const Vector3& T1,
+                                                                  const Vector3& T2)
+    {
+        using namespace distance;
+
+        PT_barrier_gradient(G, flag, kappa, d_hat, thickness, P, T0, T1, T2);
+
+        Vector4i offsets = {0, 0, 0, 0};
+        IndexT dim = distance::degenerate_point_triangle(flag, offsets);
+        const Vector3 verts[4] = {P, T0, T1, T2};
+        if(dim == 2)
+        {
+            Vector6 G2;
+            Matrix6x6 H2;
+            PP_barrier_gradient_gipc_native_hessian(
+                G2, H2, Vector2i{1, 1}, kappa, d_hat, thickness,
+                verts[offsets[0]], verts[offsets[1]]);
+            gipc_native_detail::scatter_matrix<2, 4>(H, H2, offsets);
+            return;
+        }
+        if(dim == 3)
+        {
+            Vector9 G3;
+            Matrix9x9 H3;
+            PE_barrier_gradient_gipc_native_hessian(
+                G3, H3, Vector3i{1, 1, 1}, kappa, d_hat, thickness,
+                verts[offsets[0]], verts[offsets[1]], verts[offsets[2]]);
+            gipc_native_detail::scatter_matrix<3, 4>(H, H3, offsets);
+            return;
+        }
+
+        Float D = Float(0);
+        point_triangle_distance2(flag, P, T0, T1, T2, D);
+
+        Float coeff;
+        Float d_hat_sqrt;
+        if(!gipc_native_detail::native_coeff(
+               coeff, d_hat_sqrt, kappa, D, d_hat, thickness))
+        {
+            gipc_native_detail::zero_matrix(H);
+            return;
+        }
+
+        Float pFpx[12][9];
+        ::uipc::backend::cuda::analyticalBarrier::analytical_point_triangle_pFpx(
+            P, T0, T1, T2, d_hat_sqrt, pFpx);
+        gipc_native_detail::rank1_hessian(H, coeff, pFpx, 8);
+    }
+
+    inline __device__ void mollified_EE_barrier_gradient_gipc_native_hessian(
+        Vector12&       G,
+        Matrix12x12&    H,
+        const Vector4i& flag,
+        Float           kappa,
+        Float           d_hat,
+        Float           thickness,
+        const Vector3&  t0_Ea0,
+        const Vector3&  t0_Ea1,
+        const Vector3&  t0_Eb0,
+        const Vector3&  t0_Eb1,
+        const Vector3&  Ea0,
+        const Vector3&  Ea1,
+        const Vector3&  Eb0,
+        const Vector3&  Eb1)
+    {
+        using namespace distance;
+
+        mollified_EE_barrier_gradient(G, flag, kappa, d_hat, thickness,
+                                      t0_Ea0, t0_Ea1, t0_Eb0, t0_Eb1,
+                                      Ea0, Ea1, Eb0, Eb1);
+
+        Float eps_x;
+        edge_edge_mollifier_threshold(
+            t0_Ea0, t0_Ea1, t0_Eb0, t0_Eb1, static_cast<Float>(1e-3), eps_x);
+
+        Float ek;
+        edge_edge_mollifier(Ea0, Ea1, Eb0, Eb1, eps_x, ek);
+        if(!gipc_native_detail::finite(ek))
+            ek = Float(0);
+        ek = gipc_native_detail::clamp01(ek);
+
+        Vector4i offsets = {0, 0, 0, 0};
+        IndexT dim = distance::degenerate_edge_edge(flag, offsets);
+        const Vector3 verts[4] = {Ea0, Ea1, Eb0, Eb1};
+        if(dim == 2)
+        {
+            Vector6 G2;
+            Matrix6x6 H2;
+            PP_barrier_gradient_gipc_native_hessian(
+                G2, H2, Vector2i{1, 1}, kappa, d_hat, thickness,
+                verts[offsets[0]], verts[offsets[1]]);
+            gipc_native_detail::scatter_matrix<2, 4>(H, H2, offsets, ek);
+            return;
+        }
+        if(dim == 3)
+        {
+            Vector9 G3;
+            Matrix9x9 H3;
+            PE_barrier_gradient_gipc_native_hessian(
+                G3, H3, Vector3i{1, 1, 1}, kappa, d_hat, thickness,
+                verts[offsets[0]], verts[offsets[1]], verts[offsets[2]]);
+            gipc_native_detail::scatter_matrix<3, 4>(H, H3, offsets, ek);
+            return;
+        }
+
+        Float D = Float(0);
+        edge_edge_distance2(flag, Ea0, Ea1, Eb0, Eb1, D);
+
+        Float coeff;
+        Float d_hat_sqrt;
+        if(!gipc_native_detail::native_coeff(
+               coeff, d_hat_sqrt, kappa, D, d_hat, thickness))
+        {
+            gipc_native_detail::zero_matrix(H);
+            return;
+        }
+        coeff *= ek;
+
+        Float pFpx[12][9];
+        ::uipc::backend::cuda::analyticalBarrier::analytical_edge_edge_pFpx(
+            Ea0, Ea1, Eb0, Eb1, d_hat_sqrt, pFpx);
+        gipc_native_detail::rank1_hessian(H, coeff, pFpx, 8);
+    }
+#endif
 }  // namespace sym::codim_ipc_simplex_contact
 }  // namespace uipc::backend::cuda
 #else
