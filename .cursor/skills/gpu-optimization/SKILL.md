@@ -112,7 +112,7 @@ The `Timer` is scoped — it starts on construction and stops on destruction. Ne
 
 The timer tree is **dynamic** — it varies per run depending on which simulation features are active (contact, friction, animation, etc.). The actual tree for any run is stored in `timer_frames.json` (written by `run`). Always read that file for the real hierarchy.
 
-Below is a **representative example** with all features enabled, showing the typical nesting from [sim_engine_do_advance.cu](mdc:src/backends/cuda/engine/sim_engine_do_advance.cu), [global_linear_system.cu](mdc:src/backends/cuda/linear_system/global_linear_system.cu), and [linear_pcg.cu](mdc:src/backends/cuda/linear_system/linear_pcg.cu):
+Below is a **representative example** with all features enabled, showing the typical nesting from [sim_engine_do_advance.cu](mdc:src/backends/cuda/engine/sim_engine_do_advance.cu), [global_linear_system.cu](mdc:src/backends/cuda/linear_system/global_linear_system.cu), and [linear_fused_pcg.cu](mdc:src/backends/cuda/linear_system/linear_fused_pcg.cu):
 
 ```
 Pipeline                                    engine/

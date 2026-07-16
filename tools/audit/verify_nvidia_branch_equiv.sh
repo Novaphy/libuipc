@@ -142,8 +142,6 @@ FILES=(
     src/backends/cuda/linear_system/global_linear_system.cu
     src/backends/cuda/linear_system/linear_fused_pcg.cu
     src/backends/cuda/linear_system/linear_fused_pcg.h
-    src/backends/cuda/linear_system/linear_pcg.cu
-    src/backends/cuda/linear_system/linear_pcg.h
     src/backends/cuda/linear_system/spmv.cu
     src/backends/cuda/linear_system/spmv.h
     src/backends/cuda/line_search/line_searcher.cu

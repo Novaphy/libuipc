@@ -384,7 +384,6 @@ class SceneGUI:
             'newton/semi_implicit/enable',
             'newton/semi_implicit/beta_tol',
             'linear_system/tol_rate',
-            'linear_system/solver',
             'linear_system/precond/mas/contact_aware',
             'line_search/max_iter',
             'line_search/report_energy',
@@ -402,7 +401,6 @@ class SceneGUI:
             'diff_sim/enable',
             'extras/debug/dump_surface',
             'extras/debug/dump_linear_system',
-            'extras/debug/dump_linear_pcg',
             'extras/strict_mode/enable',
         ]
         order_map = {k: i for i, k in enumerate(preferred_order)}

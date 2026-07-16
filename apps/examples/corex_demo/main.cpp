@@ -229,23 +229,7 @@ int main(int argc, char** argv)
         return Engine{backend, output, engine_config};
     };
 
-    Engine engine = [&]() -> Engine
-    {
-        try
-        {
-            return make_engine(requested);
-        }
-        catch(const EngineException& e)
-        {
-            if(requested != "none")
-            {
-                fmt::println("Failed to start backend '{}': {}", requested, e.what());
-                fmt::println("Falling back to backend 'none' for a smoke-test.");
-                return make_engine("none");
-            }
-            throw;
-        }
-    }();
+    Engine engine = make_engine(requested);
 
     fmt::println("Using backend: {}", engine.backend_name());
     World world{engine};
@@ -258,9 +242,6 @@ int main(int argc, char** argv)
     config["contact"]["d_hat"]              = 0.01;
     config["line_search"]["max_iter"]       = 64;
     config["newton"]["max_iter"]           = 100;
-    // GIPC full mode is performance-oriented: keep the linear solve on the fused
-    // device path so SpMV, dot, updates, and convergence checks avoid extra launches.
-    config["linear_system"]["solver"]        = "fused_pcg";
     config["linear_system"]["tol_rate"]      = 1e-3;
     config["linear_system"]["check_interval"] = 2;
     config["sanity_check"]["enable"]       = 1;

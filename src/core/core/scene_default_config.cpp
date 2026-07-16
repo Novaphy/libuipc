@@ -26,12 +26,6 @@ geometry::AttributeCollection default_scene_config() noexcept
 
     config.create("linear_system/tol_rate", Float{1e-3});
 
-    // default:
-    //  - fused_pcg
-    // or:
-    //  - linear_pcg (30% slower)
-    config.create("linear_system/solver", std::string{"fused_pcg"});
-
     config.create("line_search/max_iter", IndexT{8});
     config.create("line_search/report_energy", IndexT{0});
 
@@ -59,9 +53,6 @@ geometry::AttributeCollection default_scene_config() noexcept
     config.create("contact/adaptive/min_kappa", Float{100.0_MPa});
     config.create("contact/adaptive/init_kappa", Float{1.0_GPa});
     config.create("contact/adaptive/max_kappa", Float{100.0_GPa});
-
-    
-
     // default:
     //  - info_stackless_bvh
     // or:
@@ -76,7 +67,6 @@ geometry::AttributeCollection default_scene_config() noexcept
 
     config.create("extras/debug/dump_surface", IndexT{0});
     config.create("extras/debug/dump_linear_system", IndexT{0});
-    config.create("extras/debug/dump_linear_pcg", IndexT{0});
     config.create("extras/debug/dump_mas_matrices", IndexT{0});
     config.create("extras/strict_mode/enable", IndexT{0});
 

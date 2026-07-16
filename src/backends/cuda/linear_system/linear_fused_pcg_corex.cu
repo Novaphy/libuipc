@@ -70,14 +70,6 @@ void LinearFusedPCG::do_build(BuildInfo& info)
 {
     auto& config = world().scene().config();
 
-    auto        solver_attr = config.find<std::string>("linear_system/solver");
-    std::string solver_name =
-        solver_attr ? solver_attr->view()[0] : std::string{"fused_pcg"};
-    if(solver_name != "fused_pcg")
-    {
-        throw SimSystemException("LinearFusedPCG unused");
-    }
-
     auto& global_linear_system = require<GlobalLinearSystem>();
 
     max_iter_ratio = 2;
@@ -95,13 +87,6 @@ void LinearFusedPCG::do_build(BuildInfo& info)
     auto check_attr = config.find<IndexT>("linear_system/check_interval");
     if(check_attr)
         check_interval = check_attr->view()[0];
-
-    auto dump_attr = config.find<IndexT>("extras/debug/dump_linear_pcg");
-    if(dump_attr && dump_attr->view()[0] != 0)
-        logger::warn(
-            "LinearFusedPCG: extras/debug/dump_linear_pcg is enabled but "
-            "fused_pcg does not support PCG vector dumps. "
-            "Set linear_system/solver to \"linear_pcg\" to use this feature.");
 
     logger::info("LinearFusedPCG: max_iter_ratio = {}, tol_rate = {}, check_interval = {}",
                  max_iter_ratio,
@@ -317,7 +302,8 @@ void fused_dot_block(muda::CDenseVectorView<Float> x,
             });
 }
 
-// Same as linear_pcg update_xr: alpha = rz/pAp, x += alpha*p, r -= alpha*Ap. Alpha computed on device from d_rz, d_pAp.
+// Fused PCG update_xr: alpha = rz/pAp, x += alpha*p, r -= alpha*Ap.
+// Alpha is computed on the device from d_rz and d_pAp.
 void fused_update_xr(muda::CVarView<Float>         d_rz,
                      muda::CVarView<Float>         d_pAp,
                      muda::CVarView<IndexT>        d_converged,
@@ -399,7 +385,7 @@ void fused_update_xr_norm(muda::CVarView<Float>         d_rz,
             });
 }
 
-// Same as linear_pcg update_p: beta = rz_new/rz, p = z + beta*p.
+// Fused PCG update_p: beta = rz_new/rz, p = z + beta*p.
 // Convergence is guarded by d_converged.
 void fused_update_p(muda::CVarView<Float>         d_rz_new,
                     muda::CVarView<Float>         d_rz,

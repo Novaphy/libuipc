@@ -16,118 +16,16 @@ namespace uipc::backend::cuda
 {
 namespace
 {
-// Jacobi (diagonal-only) preconditioner for CoreX: z_k = r_k / H_{kk}.
-// Full block-inverse suffers catastrophic cancellation at CoreX's float-level
-// double precision when off-diagonal values are close to diagonal values.
-bool parse_precond_diag_clamp(Float& min_abs_diag, Float& max_abs_diag)
-{
-    struct ClampConfig
-    {
-        bool  enabled;
-        Float min_abs_diag;
-        Float max_abs_diag;
-    };
-
-    static const ClampConfig config = [] {
-        ClampConfig cfg{false, Float{0}, std::numeric_limits<Float>::max()};
-        const char* env = std::getenv("UIPC_COREX_ABD_PRECOND_DIAG_CLAMP");
-        if(!env || env[0] == '\0')
-            return cfg;
-
-        char*  end   = nullptr;
-        double min_v = std::strtod(env, &end);
-        if(end == env || min_v < 0)
-            return cfg;
-
-        double max_v = 0.0;
-        if(*end == ',')
-        {
-            const char* max_start = end + 1;
-            max_v = std::strtod(max_start, &end);
-            if(end == max_start || max_v <= 0)
-                max_v = 0.0;
-        }
-
-        cfg.enabled      = true;
-        cfg.min_abs_diag = static_cast<Float>(min_v);
-        cfg.max_abs_diag = max_v > 0.0 ? static_cast<Float>(max_v) :
-                                         std::numeric_limits<Float>::max();
-        return cfg;
-    }();
-
-    if(!config.enabled)
-        return false;
-
-    min_abs_diag = config.min_abs_diag;
-    max_abs_diag = config.max_abs_diag;
-    return true;
-}
-
-// Default-on switch for the numerically-stable 12x12 LDLT block-inverse
-// preconditioner that mirrors the NVIDIA path semantically. When enabled,
-// the diagonal Jacobi reciprocal is still computed as a per-DoF safety
-// fallback, which is selected only for bodies whose 12x12 block fails the
-// LDLT SPD pivot test.
-//
-// Rollback knobs:
-// - `UIPC_COREX_ABD_PRECOND_BLOCK_INVERSE=0` disables the block-inverse
-//   path and keeps the legacy Jacobi extract.
-// - `UIPC_COREX_ABD_PRECOND_DIAG_JACOBI=1` is a hard rollback that forces
-//   the legacy Jacobi extract regardless of the block-inverse flag.
-bool block_inverse_precond_enabled()
-{
-    static const bool force_jacobi =
-        std::getenv("UIPC_COREX_ABD_PRECOND_DIAG_JACOBI") != nullptr;
-    if(force_jacobi)
-        return false;
-    static const int env_enabled = [] {
-        const char* env = std::getenv("UIPC_COREX_ABD_PRECOND_BLOCK_INVERSE");
-        if(!env)
-            return -1;
-        return (env[0] != '\0' && env[0] != '0') ? 1 : 0;
-    }();
-    if(env_enabled >= 0)
-        return env_enabled != 0;
-
-#if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
-    // The matrix-free contact path removes the same contact Hessian blocks from
-    // explicit BCOO assembly but still contributes their diagonal estimate. A
-    // pure 12x12 LDLT block inverse is too aggressive on dense CoreX ABD contact
-    // frames; a damped block/Jacobi blend keeps the stronger cross-DoF
-    // preconditioning while preserving the long-run stability of Jacobi.
-    return true;
-#else
-    return true;
-#endif
-}
-
+// A damped block/Jacobi blend keeps cross-DoF preconditioning while remaining
+// stable on dense single-precision ABD contact frames.
 bool block_inverse_precond_stats_enabled()
 {
-    static const bool enabled = [] {
-        const char* env = std::getenv("UIPC_COREX_ABD_PRECOND_BLOCK_INVERSE_STATS");
+    static const bool enabled = []
+    {
+        const char* env = std::getenv("UIPC_COREX_ABD_PRECOND_STATS");
         return env && env[0] != '\0' && env[0] != '0';
     }();
     return enabled;
-}
-
-Float block_inverse_precond_mix()
-{
-    static const Float mix = [] {
-        const char* env = std::getenv("UIPC_COREX_ABD_PRECOND_BLOCK_MIX");
-        if(!env || env[0] == '\0')
-            return Float{0.99};
-
-        char*  end = nullptr;
-        double v   = std::strtod(env, &end);
-        if(end == env)
-            return Float{1};
-        if(v < 0.0)
-            v = 0.0;
-        if(v > 1.0)
-            v = 1.0;
-        return static_cast<Float>(v);
-    }();
-    return mix;
 }
 
 bool corex_abd_precond_sync_enabled()
@@ -140,8 +38,7 @@ bool corex_abd_precond_sync_enabled()
 
 bool corex_abd_trace_linear_system_enabled()
 {
-    static const bool enabled =
-        std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+    static const bool enabled = std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
     return enabled;
 }
 
@@ -151,11 +48,6 @@ bool corex_abd_precond_diag_stats_enabled()
         std::getenv("UIPC_COREX_ABD_PRECOND_DIAG_STATS") != nullptr
         || std::getenv("UIPC_COREX_PCG_DIAG") != nullptr;
     return enabled;
-}
-
-__device__ inline Float corex_abs(Float v)
-{
-    return v < 0 ? -v : v;
 }
 
 // In-place LDLT factorization for an SPD matrix stored column-major in `A`.
@@ -179,11 +71,13 @@ __device__ bool corex_ldlt_factorize_inplace(Float* A)
     {
         Float d  = A[k * N + k];
         Float ad = d < static_cast<Float>(0) ? -d : d;
-        if(ad > max_diag_abs) max_diag_abs = ad;
+        if(ad > max_diag_abs)
+            max_diag_abs = ad;
     }
 
     Float eps = max_diag_abs * static_cast<Float>(1e-10);
-    if(eps < static_cast<Float>(1e-30)) eps = static_cast<Float>(1e-30);
+    if(eps < static_cast<Float>(1e-30))
+        eps = static_cast<Float>(1e-30);
 
     for(int k = 0; k < N; ++k)
     {
@@ -194,7 +88,8 @@ __device__ bool corex_ldlt_factorize_inplace(Float* A)
             Float Dj  = A[j * N + j];
             Dk -= Lkj * Lkj * Dj;
         }
-        if(Dk < eps) return false;
+        if(Dk < eps)
+            return false;
         A[k * N + k] = Dk;
 
         for(int i = k + 1; i < N; ++i)
@@ -273,16 +168,11 @@ __device__ void corex_ldlt_explicit_inverse(const Float* A, Float* invA)
 // fallback, so the host can log accepted/rejected ratios in a diagnostic
 // pass without re-reading the Hessian.
 __global__ void kernel_abd_precond_extract_block_inverse(
-    int n,
-    const Float* diag_hessian,
-    Float*       diag_inv,
-    Float*       diag_recip,
-    int*         block_status,
-    Float        min_abs_diag,
-    Float        max_abs_diag)
+    int n, const Float* diag_hessian, Float* diag_inv, Float* diag_recip, int* block_status)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if(i >= n) return;
+    if(i >= n)
+        return;
 
     constexpr int N = 12;
     Float A[N * N];
@@ -300,14 +190,9 @@ __global__ void kernel_abd_precond_extract_block_inverse(
     for(int k = 0; k < N; ++k)
     {
         Float d     = A[k * N + k];
-        Float abs_d = d < 0 ? -d : d;
-        if(min_abs_diag > 0 && abs_d > 0 && abs_d < min_abs_diag)
-            d = d < 0 ? -min_abs_diag : min_abs_diag;
-        if(max_abs_diag > 0 && abs_d > max_abs_diag)
-            d = d < 0 ? -max_abs_diag : max_abs_diag;
-        diag_recip[i * N + k] = (d != static_cast<Float>(0))
-                                    ? (static_cast<Float>(1) / d)
-                                    : static_cast<Float>(0);
+        diag_recip[i * N + k] = (d != static_cast<Float>(0)) ?
+                                    (static_cast<Float>(1) / d) :
+                                    static_cast<Float>(0);
     }
 
     bool ok = corex_ldlt_factorize_inplace<N>(A);
@@ -318,7 +203,8 @@ __global__ void kernel_abd_precond_extract_block_inverse(
         corex_ldlt_explicit_inverse<N>(A, invA);
         for(int idx = 0; idx < N * N; ++idx)
             diag_inv[i * 144 + idx] = invA[idx];
-        if(block_status) block_status[i] = 1;
+        if(block_status)
+            block_status[i] = 1;
     }
     else
     {
@@ -326,7 +212,8 @@ __global__ void kernel_abd_precond_extract_block_inverse(
             diag_inv[i * 144 + idx] = static_cast<Float>(0);
         for(int k = 0; k < N; ++k)
             diag_inv[i * 144 + k * N + k] = diag_recip[i * N + k];
-        if(block_status) block_status[i] = 0;
+        if(block_status)
+            block_status[i] = 0;
     }
 }
 
@@ -337,13 +224,13 @@ __global__ void kernel_abd_precond_extract_block_inverse(
 __global__ void kernel_abd_block_inverse_apply(int           n,
                                                const Float*  diag_inv,
                                                const Float*  diag_recip,
-                                               Float         block_mix,
                                                const Float*  r,
                                                Float*        z,
                                                const IndexT* converged,
                                                Float*        dot)
 {
-    if(*converged != 0) return;
+    if(*converged != 0)
+        return;
     constexpr int N = 12;
     constexpr int LanesPerBody = 16;
     constexpr int BodiesPerBlock = 4;
@@ -365,11 +252,9 @@ __global__ void kernel_abd_block_inverse_apply(int           n,
             Float r_col = __shfl_sync(0xffffffffu, r_lane, col, LanesPerBody);
             s += diag_inv[i * 144 + col * N + row] * r_col;
         }
-        if(block_mix < static_cast<Float>(1))
-        {
-            const Float j = diag_recip[i * N + row] * r_lane;
-            s = block_mix * s + (static_cast<Float>(1) - block_mix) * j;
-        }
+        constexpr Float block_mix = Float{0.99};
+        const Float     j = diag_recip[i * N + row] * r_lane;
+        s = block_mix * s + (static_cast<Float>(1) - block_mix) * j;
         z[i * N + row] = s;
         dot_term = r_lane * s;
     }
@@ -377,57 +262,6 @@ __global__ void kernel_abd_block_inverse_apply(int           n,
     if(dot)
     {
         using BlockReduce = cub::BlockReduce<Float, ThreadsPerBlock>;
-        __shared__ typename BlockReduce::TempStorage storage;
-        Float block_dot = BlockReduce(storage).Sum(dot_term);
-        if(threadIdx.x == 0)
-            muda::atomic_add(dot, block_dot);
-    }
-}
-
-__global__ void kernel_abd_precond_extract(int          n,
-                                           const Float* diag_hessian,
-                                           Float*       diag_recip,
-                                           Float        min_abs_diag,
-                                           Float        max_abs_diag)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if(i >= n) return;
-    for(int k = 0; k < 12; ++k)
-    {
-        Float d = diag_hessian[i * 144 + k * 12 + k]; // column-major: element (k,k)
-        Float abs_d = d < 0 ? -d : d;
-        if(min_abs_diag > 0 && abs_d > 0 && abs_d < min_abs_diag)
-            d = d < 0 ? -min_abs_diag : min_abs_diag;
-        if(max_abs_diag > 0 && abs_d > max_abs_diag)
-            d = d < 0 ? -max_abs_diag : max_abs_diag;
-        diag_recip[i * 12 + k] = (d != 0.0) ? (1.0 / d) : 0.0;
-    }
-}
-
-__global__ void kernel_abd_jacobi_apply(int           n,
-                                        const Float*  diag_recip,
-                                        const Float*  r,
-                                        Float*        z,
-                                        const IndexT* converged,
-                                        Float*        dot)
-{
-    if(*converged != 0) return;
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    Float dot_term = 0;
-    if(i < n)
-    {
-        for(int k = 0; k < 12; ++k)
-        {
-            const int j = i * 12 + k;
-            const Float value = diag_recip[j] * r[j];
-            z[j] = value;
-            dot_term += r[j] * value;
-        }
-    }
-
-    if(dot)
-    {
-        using BlockReduce = cub::BlockReduce<Float, 256>;
         __shared__ typename BlockReduce::TempStorage storage;
         Float block_dot = BlockReduce(storage).Sum(dot_term);
         if(threadIdx.x == 0)
@@ -445,10 +279,8 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
     ABDLinearSubsystem* abd_linear_subsystem = nullptr;
 
     muda::DeviceBuffer<Matrix12x12> diag_inv;
-    muda::DeviceBuffer<Float> jacobi_recip; // 12 reciprocals per body
-    muda::DeviceBuffer<int> block_inv_status; // 1 = LDLT accepted, 0 = Jacobi fallback
-    bool block_inverse_enabled = false;
-    Float block_inverse_mix = Float{1};
+    muda::DeviceBuffer<Float>       jacobi_recip;  // 12 reciprocals per body
+    muda::DeviceBuffer<int>         block_inv_status;
 
     virtual void do_build(BuildInfo& info) override
     {
@@ -473,118 +305,88 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
 
         if(corex_abd_trace_linear_system_enabled())
             logger::info("[corex_trace][precond] do_assemble: diag_hessian.size()={}, data()={}",
-                         diag_hessian.size(), (void*)diag_hessian.data());
+                         diag_hessian.size(),
+                         (void*)diag_hessian.data());
 
-        diag_inv.resize(diag_hessian.size());
+        auto n = static_cast<int>(diag_hessian.size());
+        diag_inv.resize(n);
+        jacobi_recip.resize(n * 12);
+        block_inv_status.resize(n);
 
         if(corex_abd_trace_linear_system_enabled())
-            logger::info("[corex_trace][precond] do_assemble: diag_inv resized to {}", diag_inv.size());
+            logger::info("[corex_trace][precond] do_assemble: diag_inv resized to {}",
+                         diag_inv.size());
 
+        if(n > 0)
         {
-            auto n = static_cast<int>(diag_hessian.size());
-            if(n > 0)
+            // Each thread holds a 12x12 working matrix plus LDLT temporaries.
+            // Four warps per block limit local-memory pressure on CoreX.
+            constexpr int kBlk        = 64;
+            int           ldlt_blocks = (n + kBlk - 1) / kBlk;
+            kernel_abd_precond_extract_block_inverse<<<ldlt_blocks, kBlk>>>(
+                n,
+                (const Float*)diag_hessian.data(),
+                (Float*)diag_inv.data(),
+                (Float*)jacobi_recip.data(),
+                (int*)block_inv_status.data());
+            checkCudaErrors(cudaGetLastError());
+            if(corex_abd_precond_sync_enabled())
+                checkCudaErrors(cudaDeviceSynchronize());
+
+            if(block_inverse_precond_stats_enabled()
+               || corex_abd_trace_linear_system_enabled())
             {
-                jacobi_recip.resize(n * 12);
-                Float min_abs_diag = 0;
-                Float max_abs_diag = std::numeric_limits<Float>::max();
-                bool  clamp_enabled = parse_precond_diag_clamp(min_abs_diag, max_abs_diag);
-                block_inverse_enabled = block_inverse_precond_enabled();
-                block_inverse_mix = block_inverse_precond_mix();
-                int blocks = (n + 255) / 256;
-                if(block_inverse_enabled)
+                std::vector<int> h_status(n);
+                cudaMemcpy(h_status.data(),
+                           block_inv_status.data(),
+                           sizeof(int) * h_status.size(),
+                           cudaMemcpyDeviceToHost);
+                SizeT accepted = 0;
+                for(int v : h_status)
+                    accepted += v ? 1 : 0;
+                SizeT rejected = static_cast<SizeT>(n) - accepted;
+                logger::info("[corex_abd_precond_block_inv] bodies={} accepted={} rejected={}",
+                             n,
+                             accepted,
+                             rejected);
+            }
+            if(corex_abd_precond_diag_stats_enabled())
+            {
+                std::vector<Matrix12x12> h_diag(n);
+                cudaMemcpy(h_diag.data(),
+                           diag_hessian.data(),
+                           sizeof(Matrix12x12) * n,
+                           cudaMemcpyDeviceToHost);
+                Float min_nonzero_abs = std::numeric_limits<Float>::max();
+                Float max_abs         = 0;
+                SizeT zero_count      = 0;
+                SizeT tiny_count      = 0;
+                for(const auto& H : h_diag)
                 {
-                    diag_inv.resize(n);
-                    block_inv_status.resize(n);
-                    // Smaller block size: each thread holds a 12x12 working matrix
-                    // plus LDLT temporaries. Keeping the block at
-                    // 64 threads avoids excessive local-memory spilling versus the
-                    // 256-thread Jacobi extract above.
-                    constexpr int kBlk = 64;
-                    int  ldlt_blocks   = (n + kBlk - 1) / kBlk;
-                    kernel_abd_precond_extract_block_inverse<<<ldlt_blocks, kBlk>>>(
-                        n,
-                        (const Float*)diag_hessian.data(),
-                        (Float*)diag_inv.data(),
-                        (Float*)jacobi_recip.data(),
-                        (int*)block_inv_status.data(),
-                        min_abs_diag,
-                        max_abs_diag);
-                }
-                else
-                {
-                    block_inv_status.resize(0);
-                    kernel_abd_precond_extract<<<blocks, 256>>>(
-                        n,
-                        (const Float*)diag_hessian.data(),
-                        (Float*)jacobi_recip.data(),
-                        min_abs_diag,
-                        max_abs_diag);
-                }
-                checkCudaErrors(cudaGetLastError());
-                if(corex_abd_precond_sync_enabled())
-                    checkCudaErrors(cudaDeviceSynchronize());
-                if(block_inverse_enabled
-                   && (block_inverse_precond_stats_enabled()
-                       || corex_abd_trace_linear_system_enabled()))
-                {
-                    std::vector<int> h_status(n);
-                    cudaMemcpy(h_status.data(),
-                               block_inv_status.data(),
-                               sizeof(int) * h_status.size(),
-                               cudaMemcpyDeviceToHost);
-                    SizeT accepted = 0;
-                    for(int v : h_status)
-                        accepted += v ? 1 : 0;
-                    SizeT rejected = static_cast<SizeT>(n) - accepted;
-                    logger::info("[corex_abd_precond_block_inv] bodies={} accepted={} rejected={}",
-                                 n,
-                                 accepted,
-                                 rejected);
-                }
-                if(clamp_enabled || corex_abd_trace_linear_system_enabled())
-                    logger::info("[corex_precond_diag] bodies={} clamp={} min_abs_diag={} max_abs_diag={}",
-                                 n,
-                                 clamp_enabled ? 1 : 0,
-                                 min_abs_diag,
-                                 max_abs_diag);
-                if(corex_abd_precond_diag_stats_enabled())
-                {
-                    std::vector<Matrix12x12> h_diag(n);
-                    cudaMemcpy(h_diag.data(),
-                               diag_hessian.data(),
-                               sizeof(Matrix12x12) * n,
-                               cudaMemcpyDeviceToHost);
-                    Float min_nonzero_abs = std::numeric_limits<Float>::max();
-                    Float max_abs = 0;
-                    SizeT zero_count = 0;
-                    SizeT tiny_count = 0;
-                    for(const auto& H : h_diag)
+                    for(int k = 0; k < 12; ++k)
                     {
-                        for(int k = 0; k < 12; ++k)
+                        Float d = H(k, k);
+                        Float a = d < 0 ? -d : d;
+                        if(a == 0)
                         {
-                            Float d = H(k, k);
-                            Float a = d < 0 ? -d : d;
-                            if(a == 0)
-                            {
-                                ++zero_count;
-                                continue;
-                            }
-                            if(a < static_cast<Float>(1e-6))
-                                ++tiny_count;
-                            min_nonzero_abs = std::min(min_nonzero_abs, a);
-                            max_abs = std::max(max_abs, a);
+                            ++zero_count;
+                            continue;
                         }
+                        if(a < static_cast<Float>(1e-6))
+                            ++tiny_count;
+                        min_nonzero_abs = std::min(min_nonzero_abs, a);
+                        max_abs         = std::max(max_abs, a);
                     }
-                    if(min_nonzero_abs == std::numeric_limits<Float>::max())
-                        min_nonzero_abs = 0;
-                    logger::info("[corex_precond_diag_stats] bodies={} diag_entries={} min_nonzero_abs={} max_abs={} zero_count={} tiny_count={}",
-                                 n,
-                                 n * 12,
-                                 min_nonzero_abs,
-                                 max_abs,
-                                 zero_count,
-                                 tiny_count);
                 }
+                if(min_nonzero_abs == std::numeric_limits<Float>::max())
+                    min_nonzero_abs = 0;
+                logger::info("[corex_precond_diag_stats] bodies={} diag_entries={} min_nonzero_abs={} max_abs={} zero_count={} tiny_count={}",
+                             n,
+                             n * 12,
+                             min_nonzero_abs,
+                             max_abs,
+                             zero_count,
+                             tiny_count);
             }
         }
     }
@@ -595,41 +397,24 @@ class ABDDiagPreconditioner final : public LocalPreconditioner
         auto converged = info.converged();
         Float* dot = info.compute_dot() ? info.dot().data() : nullptr;
 
-        {
-            auto n = static_cast<int>(jacobi_recip.size() / 12);
-            if(n > 0)
-            {
-                if(block_inverse_enabled && diag_inv.size() > 0)
-                {
-                    constexpr int kBodiesPerBlock = 4;
-                    constexpr int kThreads = kBodiesPerBlock * 16;
-                    int blocks = (n + kBodiesPerBlock - 1) / kBodiesPerBlock;
-                    kernel_abd_block_inverse_apply<<<blocks, kThreads>>>(
-                        n,
-                        (const Float*)diag_inv.data(),
-                        (const Float*)jacobi_recip.data(),
-                        block_inverse_mix,
-                        (const Float*)info.r().data(),
-                        (Float*)info.z().data(),
-                        (const IndexT*)converged.data(),
-                        dot);
-                }
-                else
-                {
-                    int blocks = (n + 255) / 256;
-                    kernel_abd_jacobi_apply<<<blocks, 256>>>(
-                        n,
-                        (const Float*)jacobi_recip.data(),
-                        (const Float*)info.r().data(),
-                        (Float*)info.z().data(),
-                        (const IndexT*)converged.data(),
-                        dot);
-                }
-                checkCudaErrors(cudaGetLastError());
-                if(corex_abd_precond_sync_enabled())
-                    checkCudaErrors(cudaDeviceSynchronize());
-            }
-        }
+        auto n = static_cast<int>(jacobi_recip.size() / 12);
+        if(n == 0)
+            return;
+
+        constexpr int kBodiesPerBlock = 4;
+        constexpr int kThreads        = kBodiesPerBlock * 16;
+        int blocks = (n + kBodiesPerBlock - 1) / kBodiesPerBlock;
+        kernel_abd_block_inverse_apply<<<blocks, kThreads>>>(
+            n,
+            (const Float*)diag_inv.data(),
+            (const Float*)jacobi_recip.data(),
+            (const Float*)info.r().data(),
+            (Float*)info.z().data(),
+            (const IndexT*)converged.data(),
+            dot);
+        checkCudaErrors(cudaGetLastError());
+        if(corex_abd_precond_sync_enabled())
+            checkCudaErrors(cudaDeviceSynchronize());
     }
 };
 

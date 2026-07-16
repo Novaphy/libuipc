@@ -11,7 +11,6 @@
 #include <cuda_device/builtin.h>
 #include <Eigen/Sparse>
 #include <vector>
-#include <cstdlib>
 
 // Iluvatar llc may crash on CUB HeadSegmentedReduce / shuffle paths in rbk_* kernels.
 #define UIPC_SPMV_ILUVATAR_RBK_WORKAROUND 1
@@ -32,52 +31,6 @@ __global__ void kernel_scale_y(int n, Float b, Float* y)
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if(i < n)
         y[i] = b * y[i];
-}
-
-// Simplified per-row kernel: no __restrict__, scalar accumulators, unrolled
-// inner products, no Float a parameter (caller handles scaling separately).
-// The original kernel_sym_spmv_by_row with array accumulators + __restrict__
-// produces corrupt results on CoreX (suspected compiler codegen / vectorization bug).
-__global__ void kernel_sym_spmv_v2(int          n_block_rows,
-                                   int          n_triplets,
-                                   const int*   rows,
-                                   const int*   cols,
-                                   const Float* blocks,
-                                   const Float* x,
-                                   Float*       y)
-{
-    int br = blockIdx.x * blockDim.x + threadIdx.x;
-    if(br >= n_block_rows)
-        return;
-
-    Float a0 = 0.0, a1 = 0.0, a2 = 0.0;
-
-    for(int t = 0; t < n_triplets; ++t)
-    {
-        int bi = rows[t];
-        int bj = cols[t];
-        const Float* B = blocks + t * 9;
-
-        if(bi == br)
-        {
-            Float x0 = x[bj * 3], x1 = x[bj * 3 + 1], x2 = x[bj * 3 + 2];
-            a0 += B[0] * x0 + B[3] * x1 + B[6] * x2;
-            a1 += B[1] * x0 + B[4] * x1 + B[7] * x2;
-            a2 += B[2] * x0 + B[5] * x1 + B[8] * x2;
-        }
-
-        if(bj == br && bi != bj)
-        {
-            Float x0 = x[bi * 3], x1 = x[bi * 3 + 1], x2 = x[bi * 3 + 2];
-            a0 += B[0] * x0 + B[1] * x1 + B[2] * x2;
-            a1 += B[3] * x0 + B[4] * x1 + B[5] * x2;
-            a2 += B[6] * x0 + B[7] * x1 + B[8] * x2;
-        }
-    }
-
-    y[br * 3 + 0] = a0;
-    y[br * 3 + 1] = a1;
-    y[br * 3 + 2] = a2;
 }
 
 __global__ void kernel_sym_spmv_triplet_atomic(int          n_triplets,
@@ -210,38 +163,15 @@ void Spmv::sym_spmv(Float                           a,
     }
     if(nt > 0)
     {
-        static const bool force_row_scan =
-            std::getenv("UIPC_COREX_SPMV_ROW_SCAN") != nullptr;
-        if(force_row_scan)
-        {
-            int n_block_rows = ny / 3;
-            int grid = (n_block_rows + kBlk - 1) / kBlk;
-            kernel_sym_spmv_v2<<<grid, kBlk>>>(
-                n_block_rows,
-                nt,
-                A.row_indices().data(),
-                A.col_indices().data(),
-                reinterpret_cast<const Float*>(A.values().data()),
-                x.data(),
-                y.buffer_view().data());
-            if(a != 1.0)
-            {
-                int sgrid = (ny + kBlk - 1) / kBlk;
-                kernel_scale_y<<<sgrid, kBlk>>>(ny, a, y.buffer_view().data());
-            }
-        }
-        else
-        {
-            int grid = (nt + kBlk - 1) / kBlk;
-            kernel_sym_spmv_triplet_atomic<<<grid, kBlk>>>(
-                nt,
-                A.row_indices().data(),
-                A.col_indices().data(),
-                reinterpret_cast<const Float*>(A.values().data()),
-                x.data(),
-                a,
-                y.buffer_view().data());
-        }
+        int grid = (nt + kBlk - 1) / kBlk;
+        kernel_sym_spmv_triplet_atomic<<<grid, kBlk>>>(
+            nt,
+            A.row_indices().data(),
+            A.col_indices().data(),
+            reinterpret_cast<const Float*>(A.values().data()),
+            x.data(),
+            a,
+            y.buffer_view().data());
     }
 }
 

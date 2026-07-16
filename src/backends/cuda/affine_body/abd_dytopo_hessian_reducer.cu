@@ -16,16 +16,6 @@ namespace uipc::backend::cuda
 {
 namespace
 {
-bool corex_abd_dytopo_direct_body_enabled()
-{
-    static const bool enabled = []
-    {
-        const char* env = std::getenv("UIPC_COREX_ABD_DYTOPO_DIRECT_BODY");
-        return env && env[0] != '\0' && env[0] != '0';
-    }();
-    return enabled;
-}
-
 inline int corex_abd_hash_sort_end_bit(SizeT rows, SizeT cols)
 {
     auto bits_needed = [](SizeT n) -> int
@@ -172,71 +162,6 @@ __global__ void kernel_map_node_to_body_triplets_compact(int               n,
             H12 = make_abd_contact_block(Ji, H3, Jj)
                   + make_abd_contact_block(Jj, H3.transpose(), Ji);
         }
-
-        muda::eigen::atomic_add(diag_hessian[body_i], H12);
-        row = body_i;
-        col = body_i;
-    }
-    else if(body_i < body_j)
-    {
-        H12 = make_abd_contact_block(Ji, H3, Jj);
-        row = body_i;
-        col = body_j;
-    }
-    else
-    {
-        H12 = make_abd_contact_block(Jj, H3.transpose(), Ji);
-        row = body_j;
-        col = body_i;
-    }
-
-    int out = atomicAdd(valid_count, 1);
-    body_rows[out] = row;
-    body_cols[out] = col;
-    body_vals[out] = H12;
-}
-
-__global__ void kernel_map_raw_to_body_triplets_compact(int               n,
-                                                        int               vertex_offset,
-                                                        const int*        raw_rows,
-                                                        const int*        raw_cols,
-                                                        const Matrix3x3*  raw_vals,
-                                                        const IndexT*     vertex_to_body,
-                                                        const ABDJacobi*  vertex_to_jacobi,
-                                                        const IndexT*     body_is_fixed,
-                                                        int*              valid_count,
-                                                        int*              body_rows,
-                                                        int*              body_cols,
-                                                        Matrix12x12*      body_vals,
-                                                        Matrix12x12*      diag_hessian)
-{
-    int I = blockIdx.x * blockDim.x + threadIdx.x;
-    if(I >= n) return;
-
-    int i = raw_rows[I] - vertex_offset;
-    int j = raw_cols[I] - vertex_offset;
-
-    IndexT body_i = vertex_to_body[i];
-    IndexT body_j = vertex_to_body[j];
-
-    if(body_is_fixed[body_i] || body_is_fixed[body_j])
-        return;
-
-    const auto& Ji = vertex_to_jacobi[i];
-    const auto& Jj = vertex_to_jacobi[j];
-    const auto& H3 = raw_vals[I];
-
-    Matrix12x12 H12;
-    int         row;
-    int         col;
-
-    if(body_i == body_j)
-    {
-        if(i == j)
-            H12 = make_abd_contact_block(Ji, H3, Jj);
-        else
-            H12 = make_abd_contact_block(Ji, H3, Jj)
-                  + make_abd_contact_block(Jj, H3.transpose(), Ji);
 
         muda::eigen::atomic_add(diag_hessian[body_i], H12);
         row = body_i;
@@ -497,49 +422,6 @@ void ABDDyTopoHessianReducer::build(muda::CTripletMatrixView<Float, 3> raw_hessi
 
     if(raw_count == 0)
         return;
-
-    if(corex_abd_dytopo_direct_body_enabled())
-    {
-        m_body_triplets.reshape(body_count, body_count);
-        m_body_triplets.unsafe_resize_triplets_no_construct(raw_count);
-
-        {
-            corex_profile::ScopedPhase phase("abd_dytopo_reducer", "map_raw_to_body_pairs");
-            checkCudaErrors(cudaMemsetAsync(m_body_triplet_count_var.data(), 0, sizeof(int)));
-            constexpr int kBlk = 256;
-            kernel_map_raw_to_body_triplets_compact<<<(raw_count + kBlk - 1) / kBlk, kBlk>>>(
-                raw_count,
-                static_cast<int>(vertex_offset),
-                raw_hessians.row_indices().data(),
-                raw_hessians.col_indices().data(),
-                raw_hessians.values().data(),
-                vertex_to_body.data(),
-                vertex_to_jacobi.data(),
-                body_is_fixed.data(),
-                m_body_triplet_count_var.data(),
-                m_body_triplets.row_indices().data(),
-                m_body_triplets.col_indices().data(),
-                m_body_triplets.values().data(),
-                diag_hessian.data());
-            checkCudaErrors(cudaGetLastError());
-        }
-
-        const int body_triplet_count = corex_abd_readback_int(m_body_triplet_count_var);
-        if(body_triplet_count == 0)
-        {
-            m_body_triplets.resize(body_count, body_count, 0);
-            return;
-        }
-
-        m_body_triplets.reshape(body_count, body_count);
-        m_body_triplets.unsafe_resize_triplets_no_construct(body_triplet_count);
-
-        {
-            corex_profile::ScopedPhase phase("abd_dytopo_reducer", "reduce_body_pairs");
-            reduce_body_triplets(body_count);
-        }
-        return;
-    }
 
     {
         corex_profile::ScopedPhase phase("abd_dytopo_reducer", "pack_node_pairs");

@@ -53,13 +53,6 @@ bool corex_linear_trace_enabled()
     return enabled;
 }
 
-bool corex_force_host_ge2sym_enabled()
-{
-    static const bool enabled =
-        std::getenv("UIPC_COREX_FORCE_HOST_GE2SYM") != nullptr;
-    return enabled;
-}
-
 cudaEvent_t corex_preconditioner_ready_event()
 {
     static cudaEvent_t event = [] {
@@ -345,118 +338,26 @@ void GlobalLinearSystem::Impl::build_linear_system()
                              corex_profile::now_ms() - profile_t0);
     trace("assemble_linear_system: end");
 
-    // Default CoreX path now prefers device conversion to avoid host fallback.
-    // Set UIPC_COREX_FORCE_HOST_GE2SYM=1 to force the legacy host path.
-    const bool force_host_ge2sym = corex_force_host_ge2sym_enabled();
-    if(!force_host_ge2sym)
-    {
-        trace("converter.ge2sym: begin");
-        profile_t0 = corex_profile::now_ms();
-        converter.ge2sym(triplet_A);
-        corex_profile::log_phase("linear",
-                                 "converter_ge2sym",
-                                 -1,
-                                 -1,
-                                 -1,
-                                 corex_profile::now_ms() - profile_t0);
-        trace("converter.ge2sym: end");
-        trace("converter.convert: begin");
-        profile_t0 = corex_profile::now_ms();
-        converter.convert(triplet_A, bcoo_A);
-        corex_profile::log_phase("linear",
-                                 "converter_convert",
-                                 -1,
-                                 -1,
-                                 -1,
-                                 corex_profile::now_ms() - profile_t0);
-        trace("converter.convert: end");
-    }
-    else
-    {
-        trace("host ge2sym+convert: begin");
-        int tc    = static_cast<int>(triplet_A.triplet_count());
-        int nrows = triplet_A.rows();
-        int ncols = triplet_A.cols();
-
-        std::vector<int>       h_rows(tc), h_cols(tc);
-        std::vector<Matrix3x3> h_vals(tc);
-
-        checkCudaErrors(cudaMemcpy(h_rows.data(),
-                                   triplet_A.row_indices().data(),
-                                   sizeof(int) * tc,
-                                   cudaMemcpyDeviceToHost));
-        checkCudaErrors(cudaMemcpy(h_cols.data(),
-                                   triplet_A.col_indices().data(),
-                                   sizeof(int) * tc,
-                                   cudaMemcpyDeviceToHost));
-        checkCudaErrors(cudaMemcpy(h_vals.data(),
-                                   triplet_A.values().data(),
-                                   sizeof(Matrix3x3) * tc,
-                                   cudaMemcpyDeviceToHost));
-
-        std::vector<int>       sym_rows, sym_cols;
-        std::vector<Matrix3x3> sym_vals;
-        sym_rows.reserve(tc);
-        sym_cols.reserve(tc);
-        sym_vals.reserve(tc);
-        for(int i = 0; i < tc; ++i)
-        {
-            if(h_rows[i] <= h_cols[i])
-            {
-                sym_rows.push_back(h_rows[i]);
-                sym_cols.push_back(h_cols[i]);
-                sym_vals.push_back(h_vals[i]);
-            }
-        }
-
-        int sym_count = static_cast<int>(sym_rows.size());
-        std::vector<int> order(sym_count);
-        std::iota(order.begin(), order.end(), 0);
-        std::sort(order.begin(), order.end(), [&](int a, int b)
-        {
-            if(sym_rows[a] != sym_rows[b]) return sym_rows[a] < sym_rows[b];
-            return sym_cols[a] < sym_cols[b];
-        });
-
-        std::vector<int>       out_rows, out_cols;
-        std::vector<Matrix3x3> out_vals;
-        out_rows.reserve(sym_count);
-        out_cols.reserve(sym_count);
-        out_vals.reserve(sym_count);
-
-        for(int k = 0; k < sym_count; ++k)
-        {
-            int idx = order[k];
-            if(!out_rows.empty() && out_rows.back() == sym_rows[idx]
-               && out_cols.back() == sym_cols[idx])
-            {
-                out_vals.back() += sym_vals[idx];
-            }
-            else
-            {
-                out_rows.push_back(sym_rows[idx]);
-                out_cols.push_back(sym_cols[idx]);
-                out_vals.push_back(sym_vals[idx]);
-            }
-        }
-
-        int nnz = static_cast<int>(out_rows.size());
-        bcoo_A.resize(nrows, ncols, nnz);
-
-        checkCudaErrors(cudaMemcpy(bcoo_A.row_indices().data(),
-                                   out_rows.data(),
-                                   sizeof(int) * nnz,
-                                   cudaMemcpyHostToDevice));
-        checkCudaErrors(cudaMemcpy(bcoo_A.col_indices().data(),
-                                   out_cols.data(),
-                                   sizeof(int) * nnz,
-                                   cudaMemcpyHostToDevice));
-        checkCudaErrors(cudaMemcpy(bcoo_A.values().data(),
-                                   out_vals.data(),
-                                   sizeof(Matrix3x3) * nnz,
-                                   cudaMemcpyHostToDevice));
-        trace("host ge2sym+convert: end");
-    }
+    trace("converter.ge2sym: begin");
+    profile_t0 = corex_profile::now_ms();
+    converter.ge2sym(triplet_A);
+    corex_profile::log_phase("linear",
+                             "converter_ge2sym",
+                             -1,
+                             -1,
+                             -1,
+                             corex_profile::now_ms() - profile_t0);
+    trace("converter.ge2sym: end");
+    trace("converter.convert: begin");
+    profile_t0 = corex_profile::now_ms();
+    converter.convert(triplet_A, bcoo_A);
+    corex_profile::log_phase("linear",
+                             "converter_convert",
+                             -1,
+                             -1,
+                             -1,
+                             corex_profile::now_ms() - profile_t0);
+    trace("converter.convert: end");
 
     if(corex_matrix_quality_diag_enabled())
     {
