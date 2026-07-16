@@ -28,6 +28,69 @@ __global__ void kernel_gvm_step_forward(int N, Vector3* pos, const Vector3* safe
     pos[i] = safe_pos[i] + alpha * disp[i];
 }
 
+__global__ void kernel_gvm_axis_max_stage1(int N, const Vector3* disp, Float* block_max)
+{
+    __shared__ Float s_max[256];
+    const int tid = threadIdx.x;
+    Float local = 0;
+
+    for(int i = blockIdx.x * blockDim.x + tid; i < N; i += blockDim.x * gridDim.x)
+    {
+        const Vector3 d = disp[i];
+        Float m = d.x() >= Float{0} ? d.x() : -d.x();
+        const Float ay = d.y() >= Float{0} ? d.y() : -d.y();
+        const Float az = d.z() >= Float{0} ? d.z() : -d.z();
+        m = ay > m ? ay : m;
+        m = az > m ? az : m;
+        local = m > local ? m : local;
+    }
+
+    s_max[tid] = local;
+    __syncthreads();
+
+    for(int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+    {
+        if(tid < stride)
+        {
+            const Float other = s_max[tid + stride];
+            s_max[tid] = other > s_max[tid] ? other : s_max[tid];
+        }
+        __syncthreads();
+    }
+
+    if(tid == 0)
+        block_max[blockIdx.x] = s_max[0];
+}
+
+__global__ void kernel_gvm_axis_max_stage2(int N, const Float* block_max, Float* out)
+{
+    __shared__ Float s_max[256];
+    const int tid = threadIdx.x;
+    Float local = 0;
+
+    for(int i = tid; i < N; i += blockDim.x)
+    {
+        const Float v = block_max[i];
+        local = v > local ? v : local;
+    }
+
+    s_max[tid] = local;
+    __syncthreads();
+
+    for(int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+    {
+        if(tid < stride)
+        {
+            const Float other = s_max[tid + stride];
+            s_max[tid] = other > s_max[tid] ? other : s_max[tid];
+        }
+        __syncthreads();
+    }
+
+    if(tid == 0)
+        *out = s_max[0];
+}
+
 __global__ void kernel_gvm_setup_ccd(int N, Vector3* pos, Vector3* tmp, Vector3* disp,
                                      const Vector3* base_pos)
 {
@@ -140,10 +203,10 @@ void GlobalVertexManager::Impl::init()
 
     // 5) Initialize previous positions and safe positions
     prev_positions.resize(total_count);
-    checkCudaErrors(cudaMemcpy(prev_positions.data(), positions.data(),
-                               sizeof(Vector3) * total_count, cudaMemcpyDeviceToDevice));
-    checkCudaErrors(cudaMemcpy(safe_positions.data(), positions.data(),
-                               sizeof(Vector3) * total_count, cudaMemcpyDeviceToDevice));
+    checkCudaErrors(cudaMemcpyAsync(prev_positions.data(), positions.data(),
+                                    sizeof(Vector3) * total_count, cudaMemcpyDeviceToDevice));
+    checkCudaErrors(cudaMemcpyAsync(safe_positions.data(), positions.data(),
+                                    sizeof(Vector3) * total_count, cudaMemcpyDeviceToDevice));
 
     // 6) Other initializations
     axis_max_disp = 0.0;
@@ -207,15 +270,15 @@ void GlobalVertexManager::Impl::setup_ccd(muda::CBufferView<Vector3> base_positi
 
 void GlobalVertexManager::Impl::restore_ccd()
 {
-    checkCudaErrors(cudaMemcpy(positions.data(), safe_positions.data(),
-                               sizeof(Vector3) * positions.size(), cudaMemcpyDeviceToDevice));
+    checkCudaErrors(cudaMemcpyAsync(positions.data(), safe_positions.data(),
+                                    sizeof(Vector3) * positions.size(), cudaMemcpyDeviceToDevice));
 }
 
 void GlobalVertexManager::Impl::overwrite_positions(muda::CBufferView<Vector3> src)
 {
     UIPC_ASSERT(src.size() == positions.size(), "Source size not equal to vertex count");
-    checkCudaErrors(cudaMemcpy(positions.data(), src.data(),
-                               sizeof(Vector3) * positions.size(), cudaMemcpyDeviceToDevice));
+    checkCudaErrors(cudaMemcpyAsync(positions.data(), src.data(),
+                                    sizeof(Vector3) * positions.size(), cudaMemcpyDeviceToDevice));
 }
 
 void GlobalVertexManager::VertexAttributeInfo::require_discard_friction() const noexcept
@@ -234,31 +297,33 @@ void GlobalVertexManager::VertexAttributeInfo::require_discard_friction() const 
 void GlobalVertexManager::Impl::record_prev_positions()
 {
     using namespace muda;
-    checkCudaErrors(cudaMemcpy(prev_positions.data(), positions.data(),
-                               sizeof(Vector3) * positions.size(), cudaMemcpyDeviceToDevice));
+    checkCudaErrors(cudaMemcpyAsync(prev_positions.data(), positions.data(),
+                                    sizeof(Vector3) * positions.size(), cudaMemcpyDeviceToDevice));
 }
 
 void GlobalVertexManager::Impl::record_start_point()
 {
     using namespace muda;
-    checkCudaErrors(cudaMemcpy(safe_positions.data(),
-                               positions.data(),
-                               sizeof(Vector3) * positions.size(),
-                               cudaMemcpyDeviceToDevice));
+    checkCudaErrors(cudaMemcpyAsync(safe_positions.data(),
+                                    positions.data(),
+                                    sizeof(Vector3) * positions.size(),
+                                    cudaMemcpyDeviceToDevice));
 }
 
 Float GlobalVertexManager::Impl::compute_axis_max_displacement()
 {
-    muda::DeviceReduce().Reduce((Float*)displacements.data(),
-                                axis_max_disp.data(),
-                                displacements.size() * 3,
-                                [] CUB_RUNTIME_FUNCTION(const Float& L, const Float& R)
-                                {
-                                    auto absL = std::abs(L);
-                                    auto absR = std::abs(R);
-                                    return absL > absR ? absL : absR;
-                                },
-                                0.0);
+    const int n = static_cast<int>(displacements.size());
+    if(n == 0)
+        return 0.0;
+
+    constexpr int block = 256;
+    const int grid = std::min((n + block - 1) / block, 1024);
+    kernel_gvm_axis_max_stage1<<<grid, block>>>(
+        n, displacements.data(), displacement_norms.data());
+    checkCudaErrors(cudaGetLastError());
+    kernel_gvm_axis_max_stage2<<<1, block>>>(
+        grid, displacement_norms.data(), axis_max_disp.data());
+    checkCudaErrors(cudaGetLastError());
     return axis_max_disp;
 }
 
@@ -272,47 +337,24 @@ AABB GlobalVertexManager::Impl::compute_vertex_bounding_box()
     }
 
     Float max_float = std::numeric_limits<Float>::max();
-    Vector3 min_pos_host;
-    Vector3 max_pos_host;
+    muda::DeviceReduce()
+        .Reduce(
+            positions.data(),
+            min_pos.data(),
+            positions.size(),
+            [] CUB_RUNTIME_FUNCTION(const Vector3& L, const Vector3& R) -> Vector3
+            { return L.cwiseMin(R); },
+            Vector3{max_float, max_float, max_float})
+        .Reduce(
+            positions.data(),
+            max_pos.data(),
+            positions.size(),
+            [] CUB_RUNTIME_FUNCTION(const Vector3& L, const Vector3& R) -> Vector3
+            { return L.cwiseMax(R); },
+            Vector3{-max_float, -max_float, -max_float});
 
-    if(std::getenv("UIPC_COREX_BBOX_HOST_FALLBACK") != nullptr)
-    {
-        std::vector<Vector3> h_positions(n);
-        positions.copy_to(h_positions);
-
-        min_pos_host = Vector3{max_float, max_float, max_float};
-        max_pos_host = Vector3{-max_float, -max_float, -max_float};
-        for(const auto& p : h_positions)
-        {
-            min_pos_host[0] = std::min(min_pos_host[0], p[0]);
-            min_pos_host[1] = std::min(min_pos_host[1], p[1]);
-            min_pos_host[2] = std::min(min_pos_host[2], p[2]);
-            max_pos_host[0] = std::max(max_pos_host[0], p[0]);
-            max_pos_host[1] = std::max(max_pos_host[1], p[1]);
-            max_pos_host[2] = std::max(max_pos_host[2], p[2]);
-        }
-    }
-    else
-    {
-        muda::DeviceReduce()
-            .Reduce(
-                positions.data(),
-                min_pos.data(),
-                positions.size(),
-                [] CUB_RUNTIME_FUNCTION(const Vector3& L, const Vector3& R) -> Vector3
-                { return L.cwiseMin(R); },
-                Vector3{max_float, max_float, max_float})
-            .Reduce(
-                positions.data(),
-                max_pos.data(),
-                positions.size(),
-                [] CUB_RUNTIME_FUNCTION(const Vector3& L, const Vector3& R) -> Vector3
-                { return L.cwiseMax(R); },
-                Vector3{-max_float, -max_float, -max_float});
-
-        min_pos_host = min_pos;
-        max_pos_host = max_pos;
-    }
+    Vector3 min_pos_host = min_pos;
+    Vector3 max_pos_host = max_pos;
 
     vertex_bounding_box = AABB{min_pos_host.cast<float>(), max_pos_host.cast<float>()};
     return vertex_bounding_box;

@@ -162,7 +162,8 @@ void GlobalDyTopoEffectManager::Impl::_assemble(ComputeDyTopoEffectInfo& info)
     }
 
     // collect
-    auto profile_collect_t0 = corex_profile::now_ms();
+    const bool profile_enabled = corex_profile::enabled();
+    auto profile_collect_t0 = profile_enabled ? corex_profile::now_ms() : 0.0;
     for(auto&& [i, reporter] : enumerate(dytopo_effect_reporters.view()))
     {
         if(!has_flags(info.m_component_flags, reporter->component_flags()))
@@ -180,19 +181,84 @@ void GlobalDyTopoEffectManager::Impl::_assemble(ComputeDyTopoEffectInfo& info)
 
         reporter->assemble(info);
     }
-    corex_profile::log_phase("dytopo",
-                             "reporter_assemble",
-                             -1,
-                             -1,
-                             -1,
-                             corex_profile::now_ms() - profile_collect_t0);
+    if(profile_enabled)
+        corex_profile::log_phase("dytopo",
+                                 "reporter_assemble",
+                                 -1,
+                                 -1,
+                                 -1,
+                                 corex_profile::now_ms() - profile_collect_t0);
 }
 
 void GlobalDyTopoEffectManager::Impl::_convert_matrix()
 {
     Timer timer{"Convert Dytopo Matrix"};
-    matrix_converter.convert(collected_dytopo_effect_hessian, sorted_dytopo_effect_hessian);
-    matrix_converter.convert(collected_dytopo_effect_gradient, sorted_dytopo_effect_gradient);
+    use_raw_full_gradient_distribution =
+        !collected_dytopo_effect_gradient.doublet_count() ? false :
+        _can_distribute_raw_full_gradient();
+    use_raw_full_hessian_distribution =
+        !collected_dytopo_effect_hessian.triplet_count() ? false :
+        _can_distribute_raw_full_hessian();
+
+    if(use_raw_full_hessian_distribution)
+    {
+        sorted_dytopo_effect_hessian.reshape(collected_dytopo_effect_hessian.rows(),
+                                             collected_dytopo_effect_hessian.cols());
+        sorted_dytopo_effect_hessian.resize_triplets(0);
+    }
+    else
+    {
+        matrix_converter.convert(collected_dytopo_effect_hessian, sorted_dytopo_effect_hessian);
+    }
+
+    if(use_raw_full_gradient_distribution)
+    {
+        sorted_dytopo_effect_gradient.reshape(collected_dytopo_effect_gradient.count());
+        sorted_dytopo_effect_gradient.resize_doublets(0);
+    }
+    else
+    {
+        matrix_converter.convert(collected_dytopo_effect_gradient, sorted_dytopo_effect_gradient);
+    }
+}
+
+bool GlobalDyTopoEffectManager::Impl::_can_distribute_raw_full_gradient()
+{
+    auto receivers = dytopo_effect_receivers.view();
+    if(receivers.size() != 1)
+        return false;
+
+    auto* receiver = receivers[0];
+    if(!receiver || !receiver->accept_raw_full_gradient())
+        return false;
+
+    DyTopoClassifyInfo classify_info;
+    receiver->report(classify_info);
+    if(!classify_info.is_diag())
+        return false;
+
+    auto vertex_count = static_cast<IndexT>(global_vertex_manager->positions().size());
+    return classify_info.gradient_i_range() == Vector2i{0, vertex_count};
+}
+
+bool GlobalDyTopoEffectManager::Impl::_can_distribute_raw_full_hessian()
+{
+    auto receivers = dytopo_effect_receivers.view();
+    if(receivers.size() != 1)
+        return false;
+
+    auto* receiver = receivers[0];
+    if(!receiver || !receiver->accept_raw_full_hessian())
+        return false;
+
+    DyTopoClassifyInfo classify_info;
+    receiver->report(classify_info);
+    if(!classify_info.is_diag())
+        return false;
+
+    auto vertex_count = static_cast<IndexT>(global_vertex_manager->positions().size());
+    return classify_info.hessian_i_range() == Vector2i{0, vertex_count}
+           && classify_info.hessian_j_range() == Vector2i{0, vertex_count};
 }
 
 void GlobalDyTopoEffectManager::Impl::_distribute(ComputeDyTopoEffectInfo& info)
@@ -208,7 +274,6 @@ void GlobalDyTopoEffectManager::Impl::_distribute(ComputeDyTopoEffectInfo& info)
         DyTopoClassifyInfo classify_info;
         receiver->report(classify_info);
 
-
         ClassifiedDyTopoEffectInfo classified_info;
         auto& classified_gradients = classified_dytopo_effect_gradients[i];
         classified_gradients.reshape(vertex_count);
@@ -216,7 +281,11 @@ void GlobalDyTopoEffectManager::Impl::_distribute(ComputeDyTopoEffectInfo& info)
         classified_hessians.reshape(vertex_count, vertex_count);
 
         // 1) report gradient
-        if(classify_info.is_diag())
+        if(use_raw_full_gradient_distribution && receiver->accept_raw_full_gradient())
+        {
+            classified_info.m_gradients = collected_dytopo_effect_gradient.view();
+        }
+        else if(classify_info.is_diag())
         {
             const auto N = sorted_dytopo_effect_gradient.doublet_count();
 
@@ -298,7 +367,20 @@ void GlobalDyTopoEffectManager::Impl::_distribute(ComputeDyTopoEffectInfo& info)
         // 2) report hessian
         if(!info.m_gradient_only && !classify_info.is_empty())
         {
+            if(use_raw_full_hessian_distribution && receiver->accept_raw_full_hessian())
+            {
+                classified_info.m_hessians = collected_dytopo_effect_hessian.view();
+                receiver->receive(classified_info);
+                continue;
+            }
+
             const auto N = sorted_dytopo_effect_hessian.triplet_count();
+            if(N == 0)
+            {
+                classified_info.m_hessians = classified_hessians.view();
+                receiver->receive(classified_info);
+                continue;
+            }
 
             // +1 for calculate the total count
             loose_resize(selected_hessian, N + 1);
@@ -459,11 +541,15 @@ namespace
 {
 inline bool corex_matconv_trace()
 {
-    return std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+    static const bool enabled = std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+    return enabled;
 }
 
 inline void corex_matconv_sync_if_needed(const char* name)
 {
+    if(!corex_matconv_trace())
+        return;
+
     auto start = corex_profile::now_ms();
     cudaDeviceSynchronize();
     corex_profile::log_phase(
@@ -475,18 +561,21 @@ class MatconvPhase
   public:
     explicit MatconvPhase(const char* name)
         : m_name(name)
-        , m_start(corex_profile::now_ms())
+        , m_enabled(corex_profile::enabled())
+        , m_start(m_enabled ? corex_profile::now_ms() : 0.0)
     {
     }
 
     ~MatconvPhase()
     {
-        corex_profile::log_phase(
-            "matconv_kernel", m_name, -1, -1, -1, corex_profile::now_ms() - m_start);
+        if(m_enabled)
+            corex_profile::log_phase(
+                "matconv_kernel", m_name, -1, -1, -1, corex_profile::now_ms() - m_start);
     }
 
   private:
     const char* m_name;
+    bool        m_enabled;
     double      m_start;
 };
 }  // namespace
@@ -501,6 +590,17 @@ static __global__ void kernel_hash_ij(int N, const int* row_indices, const int* 
     sort_index[i] = i;
 }
 
+static __global__ void kernel_hash_ij_compact(int N, const int* row_indices,
+                                              const int* col_indices, int col_count,
+                                              uint64_t* ij_hash, int* sort_index)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    ij_hash[i] = static_cast<uint64_t>(row_indices[i]) * static_cast<uint64_t>(col_count)
+                 + static_cast<uint64_t>(col_indices[i]);
+    sort_index[i] = i;
+}
+
 static __global__ void kernel_decode_hash(int N, const uint64_t* ij_hash, int2* ij_pairs)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -509,13 +609,36 @@ static __global__ void kernel_decode_hash(int N, const uint64_t* ij_hash, int2* 
     ij_pairs[i].y = static_cast<int>(ij_hash[i] & 0xFFFFFFFF);
 }
 
+static __global__ void kernel_decode_hash_compact(int N, const uint64_t* ij_hash,
+                                                  int col_count, int2* ij_pairs)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    const uint64_t hash = ij_hash[i];
+    ij_pairs[i].x = static_cast<int>(hash / static_cast<uint64_t>(col_count));
+    ij_pairs[i].y = static_cast<int>(hash % static_cast<uint64_t>(col_count));
+}
+
 static __global__ void kernel_write_unique_ij(int N, const int2* unique_ij_pairs,
-                                              int* row_indices, int* col_indices)
+                                               int* row_indices, int* col_indices)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if(i >= N) return;
     row_indices[i] = unique_ij_pairs[i].x;
     col_indices[i] = unique_ij_pairs[i].y;
+}
+
+static __global__ void kernel_write_unique_ij_compact(int N,
+                                                      const uint64_t* unique_hashes,
+                                                      int col_count,
+                                                      int* row_indices,
+                                                      int* col_indices)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    const uint64_t hash = unique_hashes[i];
+    row_indices[i] = static_cast<int>(hash / static_cast<uint64_t>(col_count));
+    col_indices[i] = static_cast<int>(hash % static_cast<uint64_t>(col_count));
 }
 
 static __global__ void kernel_mark_partition(int N, const int* unique_counts,
@@ -524,6 +647,20 @@ static __global__ void kernel_mark_partition(int N, const int* unique_counts,
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if(i >= N) return;
     sorted_partition[offsets[i] + unique_counts[i] - 1] = 1;
+}
+
+static __global__ void kernel_fill_segment_ids_from_offsets(int N,
+                                                            const int* unique_counts,
+                                                            const int* offsets,
+                                                            int* segment_ids)
+{
+    int seg = blockIdx.x;
+    if(seg >= N) return;
+
+    const int begin = offsets[seg];
+    const int count = unique_counts[seg];
+    for(int j = threadIdx.x; j < count; j += blockDim.x)
+        segment_ids[begin + j] = seg;
 }
 
 static __global__ void kernel_write_unique_indices(int N, const int* unique_indices,
@@ -561,7 +698,46 @@ static __global__ void kernel_copy_sorted_blocks_with_ij_3x3(
     dst_col[i] = ij_pairs[i].y;
 }
 
-static constexpr int kBlock = 256;
+static __global__ void kernel_ge2sym_mark_copy_3x3(
+    int N, const int* row_indices, const int* col_indices,
+    const BlockT3* blocks, int* counts, int2* ij_pairs, BlockT3* block_temp)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N) return;
+    int row = row_indices[i];
+    int col = col_indices[i];
+    counts[i] = row <= col ? 1 : 0;
+    ij_pairs[i].x = row;
+    ij_pairs[i].y = col;
+    block_temp[i] = blocks[i];
+}
+
+static __global__ void kernel_ge2sym_compact_3x3(
+    int N, const int* counts, const int* offsets, const int2* ij_pairs,
+    const BlockT3* block_temp, int* row_indices, int* col_indices, BlockT3* blocks)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N || counts[i] == 0) return;
+    int offset = offsets[i];
+    blocks[offset] = block_temp[i];
+    row_indices[offset] = ij_pairs[i].x;
+    col_indices[offset] = ij_pairs[i].y;
+}
+
+static __global__ void kernel_ge2sym_total_count(
+    int N, const int* counts, const int* offsets, int* total_count)
+{
+    if(threadIdx.x != 0 || blockIdx.x != 0) return;
+    if(N <= 0)
+    {
+        *total_count = 0;
+        return;
+    }
+    int last = N - 1;
+    *total_count = offsets[last] + counts[last];
+}
+
+static constexpr int kBlock = 512;
 static inline int grid_for(int n) { return (n + kBlock - 1) / kBlock; }
 
 void launch_hash_ij(int N, const int* row_indices, const int* col_indices,
@@ -604,6 +780,25 @@ void launch_decode_hash(int N, const uint64_t* ij_hash, int* ij_pairs_xy)
     corex_matconv_sync_if_needed("decode_hash");
 }
 
+void launch_hash_ij_compact(int N, const int* row_indices, const int* col_indices,
+                            int col_count, uint64_t* ij_hash, int* sort_index)
+{
+    corex_matconv_sync_if_needed("hash_ij_compact_pre");
+    MatconvPhase phase("hash_ij_compact");
+    kernel_hash_ij_compact<<<grid_for(N), kBlock>>>(
+        N, row_indices, col_indices, col_count, ij_hash, sort_index);
+    corex_matconv_sync_if_needed("hash_ij_compact_post");
+}
+
+void launch_decode_hash_compact(int N, const uint64_t* ij_hash, int col_count,
+                                int* ij_pairs_xy)
+{
+    MatconvPhase phase("decode_hash_compact");
+    kernel_decode_hash_compact<<<grid_for(N), kBlock>>>(
+        N, ij_hash, col_count, reinterpret_cast<int2*>(ij_pairs_xy));
+    corex_matconv_sync_if_needed("decode_hash_compact");
+}
+
 void launch_write_unique_ij(int N, const int* unique_ij_pairs_xy,
                             int* row_indices, int* col_indices)
 {
@@ -613,12 +808,33 @@ void launch_write_unique_ij(int N, const int* unique_ij_pairs_xy,
     corex_matconv_sync_if_needed("write_unique_ij");
 }
 
+void launch_write_unique_ij_compact(int N, const uint64_t* unique_hashes,
+                                    int col_count, int* row_indices,
+                                    int* col_indices)
+{
+    MatconvPhase phase("write_unique_ij_compact");
+    kernel_write_unique_ij_compact<<<grid_for(N), kBlock>>>(
+        N, unique_hashes, col_count, row_indices, col_indices);
+    corex_matconv_sync_if_needed("write_unique_ij_compact");
+}
+
 void launch_mark_partition(int N, const int* unique_counts,
                            const int* offsets, int* sorted_partition)
 {
     MatconvPhase phase("mark_partition");
     kernel_mark_partition<<<grid_for(N), kBlock>>>(N, unique_counts, offsets, sorted_partition);
     corex_matconv_sync_if_needed("mark_partition");
+}
+
+void launch_fill_segment_ids_from_offsets(int N, const int* unique_counts,
+                                          const int* offsets, int* segment_ids)
+{
+    if(N <= 0)
+        return;
+    MatconvPhase phase("fill_segment_ids_from_offsets");
+    kernel_fill_segment_ids_from_offsets<<<N, kBlock>>>(
+        N, unique_counts, offsets, segment_ids);
+    corex_matconv_sync_if_needed("fill_segment_ids_from_offsets");
 }
 
 void launch_write_unique_indices(int N, const int* unique_indices, int* dst_indices)
@@ -656,6 +872,54 @@ void launch_copy_sorted_blocks_with_ij_3x3(int N, const BlockT3* src_blocks,
         reinterpret_cast<const int2*>(ij_pairs_xy),
         dst_blocks, dst_row, dst_col);
     corex_matconv_sync_if_needed("copy_sorted_blocks_with_ij_3x3");
+}
+
+void launch_ge2sym_mark_copy_3x3(int N, const int* row_indices,
+                                 const int* col_indices,
+                                 const BlockT3* blocks,
+                                 int* counts,
+                                 int* ij_pairs_xy,
+                                 BlockT3* block_temp)
+{
+    MatconvPhase phase("ge2sym_mark_copy_3x3");
+    kernel_ge2sym_mark_copy_3x3<<<grid_for(N), kBlock>>>(
+        N,
+        row_indices,
+        col_indices,
+        blocks,
+        counts,
+        reinterpret_cast<int2*>(ij_pairs_xy),
+        block_temp);
+    corex_matconv_sync_if_needed("ge2sym_mark_copy_3x3");
+}
+
+void launch_ge2sym_compact_3x3(int N, const int* counts,
+                               const int* offsets,
+                               const int* ij_pairs_xy,
+                               const BlockT3* block_temp,
+                               int* row_indices,
+                               int* col_indices,
+                               BlockT3* blocks)
+{
+    MatconvPhase phase("ge2sym_compact_3x3");
+    kernel_ge2sym_compact_3x3<<<grid_for(N), kBlock>>>(
+        N,
+        counts,
+        offsets,
+        reinterpret_cast<const int2*>(ij_pairs_xy),
+        block_temp,
+        row_indices,
+        col_indices,
+        blocks);
+    corex_matconv_sync_if_needed("ge2sym_compact_3x3");
+}
+
+void launch_ge2sym_total_count(int N, const int* counts,
+                               const int* offsets, int* total_count)
+{
+    MatconvPhase phase("ge2sym_total_count");
+    kernel_ge2sym_total_count<<<1, 1>>>(N, counts, offsets, total_count);
+    corex_matconv_sync_if_needed("ge2sym_total_count");
 }
 
 __device__ __forceinline__ void corex_atomic_add_double(double* address, double val)
@@ -821,14 +1085,16 @@ void launch_segmental_reduce_3x3(int N, const int* segment_ids,
         fmt::println(stderr, "[corex_seg3x3] enter N={} out_count={}", N, out_count);
         std::fflush(stderr);
     }
-    auto memset_start = corex_profile::now_ms();
+    const bool profile_enabled = corex_profile::enabled();
+    auto memset_start = profile_enabled ? corex_profile::now_ms() : 0.0;
     cudaMemsetAsync(out_blocks, 0, out_count * sizeof(BlockT3));
-    corex_profile::log_phase("matconv_kernel",
-                             "segmental_reduce_3x3_memset",
-                             -1,
-                             -1,
-                             -1,
-                             corex_profile::now_ms() - memset_start);
+    if(profile_enabled)
+        corex_profile::log_phase("matconv_kernel",
+                                 "segmental_reduce_3x3_memset",
+                                 -1,
+                                 -1,
+                                 -1,
+                                 corex_profile::now_ms() - memset_start);
     corex_matconv_sync_if_needed("segmental_reduce_3x3_memset");
     if(corex_matconv_trace())
     {
@@ -1014,14 +1280,16 @@ void launch_segmental_reduce_3x1(int N, const int* segment_ids,
         fmt::println(stderr, "[corex_seg3x1] enter N={} out_count={}", N, out_count);
         std::fflush(stderr);
     }
-    auto memset_start = corex_profile::now_ms();
+    const bool profile_enabled = corex_profile::enabled();
+    auto memset_start = profile_enabled ? corex_profile::now_ms() : 0.0;
     cudaMemsetAsync(out_vecs, 0, out_count * sizeof(VecT3));
-    corex_profile::log_phase("matconv_kernel",
-                             "segmental_reduce_3x1_memset",
-                             -1,
-                             -1,
-                             -1,
-                             corex_profile::now_ms() - memset_start);
+    if(profile_enabled)
+        corex_profile::log_phase("matconv_kernel",
+                                 "segmental_reduce_3x1_memset",
+                                 -1,
+                                 -1,
+                                 -1,
+                                 corex_profile::now_ms() - memset_start);
     corex_matconv_sync_if_needed("segmental_reduce_3x1_memset");
     if(corex_matconv_trace())
     {
@@ -1225,9 +1493,22 @@ void GlobalDyTopoEffectManager::Impl::_assemble(ComputeDyTopoEffectInfo& info)
 void GlobalDyTopoEffectManager::Impl::_convert_matrix()
 {
     Timer timer{"Convert Dytopo Matrix"};
+    use_raw_full_gradient_distribution = false;
+    use_raw_full_hessian_distribution = false;
 
     matrix_converter.convert(collected_dytopo_effect_hessian, sorted_dytopo_effect_hessian);
+
     matrix_converter.convert(collected_dytopo_effect_gradient, sorted_dytopo_effect_gradient);
+}
+
+bool GlobalDyTopoEffectManager::Impl::_can_distribute_raw_full_gradient()
+{
+    return false;
+}
+
+bool GlobalDyTopoEffectManager::Impl::_can_distribute_raw_full_hessian()
+{
+    return false;
 }
 
 void GlobalDyTopoEffectManager::Impl::_distribute(ComputeDyTopoEffectInfo& info)
@@ -1242,7 +1523,6 @@ void GlobalDyTopoEffectManager::Impl::_distribute(ComputeDyTopoEffectInfo& info)
     {
         DyTopoClassifyInfo classify_info;
         receiver->report(classify_info);
-
 
         ClassifiedDyTopoEffectInfo classified_info;
         auto& classified_gradients = classified_dytopo_effect_gradients[i];
@@ -1334,6 +1614,12 @@ void GlobalDyTopoEffectManager::Impl::_distribute(ComputeDyTopoEffectInfo& info)
         if(!info.m_gradient_only && !classify_info.is_empty())
         {
             const auto N = sorted_dytopo_effect_hessian.triplet_count();
+            if(N == 0)
+            {
+                classified_info.m_hessians = classified_hessians.view();
+                receiver->receive(classified_info);
+                continue;
+            }
 
             // +1 for calculate the total count
             loose_resize(selected_hessian, N + 1);

@@ -18,7 +18,7 @@ class StacklessBVHSimplexTrajectoryFilter final : public SimplexTrajectoryFilter
     class Impl
     {
       public:
-        void detect(DetectInfo& info);
+        void detect(DetectInfo& info, SizeT frame, SizeT newton_iter);
         void filter_active(FilterActiveInfo& info, int frame, int newton_iter);
         void filter_toi(FilterTOIInfo& info);
 
@@ -30,6 +30,13 @@ class StacklessBVHSimplexTrajectoryFilter final : public SimplexTrajectoryFilter
         muda::DeviceBuffer<AABB> point_aabbs;
         muda::DeviceBuffer<AABB> edge_aabbs;
         muda::DeviceBuffer<AABB> triangle_aabbs;
+        muda::DeviceBuffer<IndexT> point_body_ids;
+        muda::DeviceBuffer<IndexT> edge_body_ids;
+        muda::DeviceBuffer<IndexT> triangle_body_ids;
+        muda::DeviceBuffer<Float> edge_thicknesses;
+        muda::DeviceBuffer<Float> edge_d_hats;
+        muda::DeviceBuffer<Float> triangle_thicknesses;
+        muda::DeviceBuffer<Float> triangle_d_hats;
 
         using ThisBVH = StacklessBVH;
 
@@ -50,23 +57,57 @@ class StacklessBVHSimplexTrajectoryFilter final : public SimplexTrajectoryFilter
         muda::DeviceVar<IndexT> selected_EE_count;
         muda::DeviceVar<IndexT> selected_PE_count;
         muda::DeviceVar<IndexT> selected_PP_count;
+        muda::DeviceBuffer<IndexT> selected_counts;
 
         muda::DeviceBuffer<Vector4i> temp_PTs;
         muda::DeviceBuffer<Vector4i> temp_EEs;
         muda::DeviceBuffer<Vector3i> temp_PEs;
         muda::DeviceBuffer<Vector2i> temp_PPs;
+        muda::DeviceBuffer<std::byte> select_temp_storage;
+        muda::DeviceBuffer<std::byte> select_temp_storage_pe;
+        muda::DeviceBuffer<std::byte> select_temp_storage_pt;
+        muda::DeviceBuffer<std::byte> select_temp_storage_ee;
+        size_t select_temp_storage_bytes = 0;
+        size_t select_temp_storage_pe_bytes = 0;
+        size_t select_temp_storage_pt_bytes = 0;
+        size_t select_temp_storage_ee_bytes = 0;
+        size_t select_cached_pp_items = 0;
+        size_t select_cached_pe_items = 0;
+        size_t select_cached_pt_items = 0;
+        size_t select_cached_ee_items = 0;
+        size_t select_cached_pp_bytes = 0;
+        size_t select_cached_pe_bytes = 0;
+        size_t select_cached_pt_bytes = 0;
+        size_t select_cached_ee_bytes = 0;
+
+        muda::DeviceBuffer<int>       compact_flags;
+        muda::DeviceBuffer<int>       compact_offsets;
 
         muda::DeviceBuffer<Vector4i> PTs;
         muda::DeviceBuffer<Vector4i> EEs;
         muda::DeviceBuffer<Vector3i> PEs;
         muda::DeviceBuffer<Vector2i> PPs;
 
-
-        /****************************************************
-        *                   CCD TOI
-        ****************************************************/
+        bool          mask_cache_valid = false;
+        const IndexT* cached_contact_mask_ptr = nullptr;
+        const IndexT* cached_subscene_mask_ptr = nullptr;
+        int           cached_contact_mask_w = 0;
+        int           cached_contact_mask_h = 0;
+        int           cached_subscene_mask_w = 0;
+        int           cached_subscene_mask_h = 0;
+        int           contact_mask_fast_mode = 0;
+        int           subscene_mask_fast_mode = 0;
+	        bool          edge_tri_bvh_valid = false;
+		        SizeT         edge_bvh_size = 0;
+		        SizeT         tri_bvh_size = 0;
+		        SizeT         edge_tri_bvh_frame = 0;
+		        SizeT         edge_tri_bvh_newton = 0;
+		        /****************************************************
+		        *                   CCD TOI
+		        ****************************************************/
 
         muda::DeviceBuffer<Float> tois;  // PP, PE, PT, EE
+        muda::DeviceBuffer<Float> toi_block_mins;
     };
 
     virtual muda::CBufferView<Vector2i> candidate_PTs() const noexcept override;
@@ -135,6 +176,9 @@ class StacklessBVHSimplexTrajectoryFilter final : public SimplexTrajectoryFilter
         muda::DeviceVar<IndexT> selected_EE_count;
         muda::DeviceVar<IndexT> selected_PE_count;
         muda::DeviceVar<IndexT> selected_PP_count;
+        muda::DeviceBuffer<IndexT> selected_counts;
+        muda::DeviceBuffer<int>    compact_flags;
+        muda::DeviceBuffer<int>    compact_offsets;
 
         muda::DeviceBuffer<Vector4i> temp_PTs;
         muda::DeviceBuffer<Vector4i> temp_EEs;

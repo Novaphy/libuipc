@@ -33,6 +33,10 @@ IndexT DiagLinearSubsystem::dof_count() const noexcept
 
 void DiagLinearSubsystem::do_build(BuildInfo& info) {}
 
+void DiagLinearSubsystem::do_matrix_free_spmv(GlobalLinearSystem::MatrixFreeSpMVInfo&)
+{
+}
+
 void DiagLinearSubsystem::do_build()
 {
     m_global_linear_system = require<GlobalLinearSystem>();
@@ -72,6 +76,11 @@ void DiagLinearSubsystem::assemble(GlobalLinearSystem::DiagInfo& info)
                 enum_flags_name(info.component_flags()));
 
     do_assemble(info);
+}
+
+void DiagLinearSubsystem::matrix_free_spmv(GlobalLinearSystem::MatrixFreeSpMVInfo& info)
+{
+    do_matrix_free_spmv(info);
 }
 
 void DiagLinearSubsystem::accuracy_check(GlobalLinearSystem::AccuracyInfo& info)

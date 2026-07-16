@@ -1030,7 +1030,7 @@ _KERNEL_SOURCE_MAP = {
     'FiniteElement':       'finite_element/',
     'FEM':                 'finite_element/',
     'NeoHookean':          'finite_element/constitutions/',
-    'LinearPCG':           'linear_system/linear_pcg.cu',
+    'LinearFusedPCG':      'linear_system/linear_fused_pcg.cu',
     'SPMV':                'linear_system/spmv.cu',
     'GlobalLinearSystem':  'linear_system/global_linear_system.cu',
     'Preconditioner':      'linear_system/',

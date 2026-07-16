@@ -9,34 +9,51 @@ namespace uipc::backend::cuda
 {
 namespace
 {
-bool corex_abd_tolerance_gpu_enabled()
+IndexT* pinned_abd_tolerance_failure_buffer()
 {
-    return std::getenv("UIPC_COREX_ABD_TOLERANCE_GPU") != nullptr
-           || std::getenv("UIPC_COREX_ABD_GPU") != nullptr;
+    static IndexT* buffer = [] {
+        IndexT* ptr = nullptr;
+        checkCudaErrors(cudaHostAlloc(&ptr, sizeof(IndexT), cudaHostAllocDefault));
+        return ptr;
+    }();
+    return buffer;
 }
 }  // namespace
 
 __global__ void kernel_abd_tolerance_check(int n,
-                                            const Vector12* __restrict__ dqs,
-                                            Float abs_tol,
-                                            IndexT* __restrict__ success_flag)
+                                           const Vector12* dqs,
+                                           Float abs_tol,
+                                           IndexT* failure)
 {
     int I = blockIdx.x * blockDim.x + threadIdx.x;
-    if(I >= n)
-        return;
-    if(*success_flag == 0)
-        return;
-
-    const Vector12& dq = dqs[I];
-#pragma unroll
-    for(IndexT i = 3; i < 12; ++i)
+    int local_failure = 0;
+    if(I < n)
     {
-        if(abs(dq(i)) > abs_tol)
+        const Vector12& dq = dqs[I];
+        for(IndexT i = 3; i < 12; ++i)
         {
-            muda::atomic_exch(success_flag, IndexT(0));
-            break;
+            const Float abs_dq = dq[i] >= Float{0} ? dq[i] : -dq[i];
+            if(abs_dq > abs_tol)
+            {
+                local_failure = 1;
+                break;
+            }
         }
     }
+
+    __shared__ int block_failure[256];
+    block_failure[threadIdx.x] = local_failure;
+    __syncthreads();
+
+    for(int stride = blockDim.x >> 1; stride > 0; stride >>= 1)
+    {
+        if(threadIdx.x < stride)
+            block_failure[threadIdx.x] |= block_failure[threadIdx.x + stride];
+        __syncthreads();
+    }
+
+    if(threadIdx.x == 0 && block_failure[0])
+        atomicExch(failure, 1);
 }
 
 class ABDToleranceChecker final : public NewtonToleranceChecker
@@ -46,8 +63,8 @@ class ABDToleranceChecker final : public NewtonToleranceChecker
 
     SimSystemSlot<AffineBodyDynamics> affine_body_dynamics;
     Float                             abs_tol = 0.0;
-    // DeviceBuffer: avoid DeviceVar ctor cudaMalloc during SimEngine::build_systems (Corex/Iluvatar).
-    muda::DeviceBuffer<IndexT>        success;
+    // DeviceBuffer avoids DeviceVar allocation during CoreX SimEngine construction.
+    muda::DeviceBuffer<IndexT>        failure;
     IndexT h_success = 1;  // 1 means success, 0 means failure
 
     // Inherited via NewtonToleranceChecker
@@ -60,7 +77,7 @@ class ABDToleranceChecker final : public NewtonToleranceChecker
         auto  transrate_tol_attr = config.find<Float>("newton/transrate_tol");
         Float transrate_tol      = transrate_tol_attr->view()[0];
         abs_tol                  = transrate_tol * dt;
-        success.resize(1);
+        failure.resize(1);
     }
 
     void do_init(InitInfo& info) override {}
@@ -70,46 +87,28 @@ class ABDToleranceChecker final : public NewtonToleranceChecker
     void do_check(CheckResultInfo& info) override
     {
         auto dqs = affine_body_dynamics->dqs();
-        using namespace muda;
-
         int n = static_cast<int>(dqs.size());
 
-        if(std::getenv("UIPC_COREX_ABD_TOLERANCE_HOST_FALLBACK")
-           || !corex_abd_tolerance_gpu_enabled())
-        {
-            std::vector<Vector12> h_dq(n);
-            cudaMemcpy(h_dq.data(), dqs.data(), n * sizeof(Vector12), cudaMemcpyDeviceToHost);
-            bool converged = true;
-            for(int I = 0; I < n && converged; ++I)
-            {
-                for(int i = 3; i < 12; ++i)
-                {
-                    if(std::abs(h_dq[I](i)) > abs_tol)
-                    {
-                        converged = false;
-                        break;
-                    }
-                }
-            }
-            h_success = converged ? 1 : 0;
-            info.converged(converged);
-            return;
-        }
-
-        success.fill(IndexT(1));
-
+        h_success = 1;
         if(n > 0)
         {
+            checkCudaErrors(cudaMemsetAsync(failure.data(), 0, sizeof(IndexT)));
             constexpr int block = 256;
             int           grid  = (n + block - 1) / block;
             kernel_abd_tolerance_check<<<grid, block>>>(
-                n, dqs.data(), abs_tol, success.data());
+                n, dqs.data(), abs_tol, failure.data());
             checkCudaErrors(cudaGetLastError());
+
+            IndexT* pinned_failure = pinned_abd_tolerance_failure_buffer();
+            checkCudaErrors(cudaMemcpyAsync(pinned_failure,
+                                            failure.data(),
+                                            sizeof(IndexT),
+                                            cudaMemcpyDeviceToHost));
+            checkCudaErrors(cudaStreamSynchronize(nullptr));
+            h_success = *pinned_failure == 0 ? 1 : 0;
         }
 
-        checkCudaErrors(cudaMemcpy(&h_success, success.data(), sizeof(IndexT), cudaMemcpyDeviceToHost));
-        bool converged = h_success != 0;
-        info.converged(converged);
+        info.converged(h_success != 0);
     }
 
     std::string do_report() override

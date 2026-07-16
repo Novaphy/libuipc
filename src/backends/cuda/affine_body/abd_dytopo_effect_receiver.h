@@ -30,6 +30,8 @@ class ABDDyTopoEffectReceiver final : public DyTopoEffectReceiver
     auto hessians() const noexcept { return m_impl.hessians; }
     virtual void do_report(GlobalDyTopoEffectManager::ClassifyInfo& info) override;
     virtual void do_receive(GlobalDyTopoEffectManager::ClassifiedDyTopoEffectInfo& info) override;
+    virtual bool do_accept_raw_full_gradient() const override;
+    virtual bool do_accept_raw_full_hessian() const override;
     Impl m_impl;
 };
 }  // namespace uipc::backend::cuda

@@ -20,7 +20,9 @@ std::atomic<unsigned long long>& corex_bdf1_gh_call_count()
 
 void corex_trace_bdf1_gh_call(int n, bool gradient_only, bool gpu_path)
 {
-    if(std::getenv("UIPC_COREX_ABD_BDF1_TRACE_GH") == nullptr)
+    static const bool trace_bdf1_gh =
+        std::getenv("UIPC_COREX_ABD_BDF1_TRACE_GH") != nullptr;
+    if(!trace_bdf1_gh)
         return;
     auto call = corex_bdf1_gh_call_count().fetch_add(1, std::memory_order_relaxed) + 1;
     std::fprintf(stderr,
@@ -156,6 +158,44 @@ class AffineBodyBDF1Kinetic final : public AffineBodyKinetic
   public:
     using AffineBodyKinetic::AffineBodyKinetic;
 
+    std::vector<ABDJacobiDyadicMass> h_mass_cache;
+    std::vector<IndexT>              h_fixed_cache;
+    std::vector<Matrix12x12>         h_hessian_cache;
+    std::vector<Vector12>            h_q_cache;
+    std::vector<Vector12>            h_qtilde_cache;
+    std::vector<Vector12>            h_grad_cache;
+    muda::DeviceBuffer<Matrix12x12>  cached_kinetic_hessians;
+    int                              hessian_cache_size = 0;
+
+    void refresh_hessian_cache_if_needed(int n,
+                                         const ABDJacobiDyadicMass* masses,
+                                         const IndexT*              is_fixed)
+    {
+        if(hessian_cache_size == n)
+            return;
+
+        h_mass_cache.resize(n);
+        h_fixed_cache.resize(n);
+        h_hessian_cache.resize(n);
+        cudaMemcpy(h_mass_cache.data(),
+                   masses,
+                   n * sizeof(ABDJacobiDyadicMass),
+                   cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_fixed_cache.data(),
+                   is_fixed,
+                   n * sizeof(IndexT),
+                   cudaMemcpyDeviceToHost);
+        for(int i = 0; i < n; ++i)
+            h_hessian_cache[i] = h_mass_cache[i].to_mat();
+
+        cached_kinetic_hessians.resize(n);
+        cudaMemcpy(cached_kinetic_hessians.data(),
+                   h_hessian_cache.data(),
+                   n * sizeof(Matrix12x12),
+                   cudaMemcpyHostToDevice);
+        hessian_cache_size = n;
+    }
+
     virtual void do_build(BuildInfo& info) override
     {
         require<BDF1Flag>();
@@ -167,39 +207,6 @@ class AffineBodyBDF1Kinetic final : public AffineBodyKinetic
         int n = static_cast<int>(info.qs().size());
         if(n <= 0)
             return;
-
-        if(std::getenv("UIPC_COREX_ABD_BDF1_HOST_FALLBACK")
-           || std::getenv("UIPC_COREX_ABD_BDF1_ENERGY_HOST_FALLBACK")
-           || std::getenv("UIPC_COREX_ABD_BDF1_ENERGY_GPU") == nullptr)
-        {
-            std::vector<Vector12>           h_q(n), h_qt(n);
-            std::vector<ABDJacobiDyadicMass> h_m(n);
-            std::vector<IndexT>             h_fixed(n), h_ext(n);
-            std::vector<Float>              h_e(n);
-
-            cudaMemcpy(h_q.data(), info.qs().data(), n * sizeof(Vector12), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_qt.data(), info.q_tildes().data(), n * sizeof(Vector12), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_m.data(), info.masses().data(), n * sizeof(ABDJacobiDyadicMass), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_fixed.data(), info.is_fixed().data(), n * sizeof(IndexT), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_ext.data(), info.external_kinetic().data(), n * sizeof(IndexT), cudaMemcpyDeviceToHost);
-
-            for(int i = 0; i < n; ++i)
-            {
-                if(h_fixed[i] || h_ext[i])
-                {
-                    h_e[i] = 0.0;
-                }
-                else
-                {
-                    Vector12 dq   = h_q[i] - h_qt[i];
-                    Vector12 M_dq = h_m[i] * dq;
-                    h_e[i]        = 0.5 * dq.dot(M_dq);
-                }
-            }
-
-            cudaMemcpy((void*)info.energies().data(), h_e.data(), n * sizeof(Float), cudaMemcpyHostToDevice);
-            return;
-        }
 
         constexpr int block = 256;
         int           grid  = (n + block - 1) / block;
@@ -221,41 +228,7 @@ class AffineBodyBDF1Kinetic final : public AffineBodyKinetic
         if(n <= 0)
             return;
 
-        const bool use_gpu_path =
-            !(std::getenv("UIPC_COREX_ABD_BDF1_HOST_FALLBACK")
-              || std::getenv("UIPC_COREX_ABD_BDF1_GRADIENT_HESSIAN_HOST_FALLBACK")
-              || std::getenv("UIPC_COREX_ABD_BDF1_GRADIENT_HESSIAN_GPU") == nullptr);
-        corex_trace_bdf1_gh_call(n, info.gradient_only(), use_gpu_path);
-
-        if(!use_gpu_path)
-        {
-            std::vector<Vector12>           h_q(n), h_qt(n);
-            std::vector<ABDJacobiDyadicMass> h_m(n);
-            std::vector<IndexT>             h_fixed(n);
-            std::vector<Vector12>           h_grad(n);
-            std::vector<Matrix12x12>        h_hess(n);
-
-            cudaMemcpy(h_q.data(), info.qs().data(), n * sizeof(Vector12), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_qt.data(), info.q_tildes().data(), n * sizeof(Vector12), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_m.data(), info.masses().data(), n * sizeof(ABDJacobiDyadicMass), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_fixed.data(), info.is_fixed().data(), n * sizeof(IndexT), cudaMemcpyDeviceToHost);
-
-            bool grad_only = info.gradient_only();
-            for(int i = 0; i < n; ++i)
-            {
-                Vector12 dq = h_q[i] - h_qt[i];
-                h_grad[i]   = h_m[i] * dq;
-                if(h_fixed[i])
-                    h_grad[i] = Vector12::Zero();
-                if(!grad_only)
-                    h_hess[i] = h_m[i].to_mat();
-            }
-
-            cudaMemcpy((void*)info.gradients().data(), h_grad.data(), n * sizeof(Vector12), cudaMemcpyHostToDevice);
-            if(!grad_only)
-                cudaMemcpy((void*)info.hessians().data(), h_hess.data(), n * sizeof(Matrix12x12), cudaMemcpyHostToDevice);
-            return;
-        }
+        corex_trace_bdf1_gh_call(n, info.gradient_only(), true);
 
         constexpr int block = 256;
         int           grid  = (n + block - 1) / block;

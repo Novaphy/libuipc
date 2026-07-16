@@ -122,6 +122,8 @@ class GlobalDyTopoEffectManager final : public SimSystem
         void _assemble(ComputeDyTopoEffectInfo& info);
         void _convert_matrix();
         void _distribute(ComputeDyTopoEffectInfo& info);
+        bool _can_distribute_raw_full_gradient();
+        bool _can_distribute_raw_full_hessian();
 
         SimSystemSlot<GlobalVertexManager> global_vertex_manager;
 
@@ -159,6 +161,8 @@ class GlobalDyTopoEffectManager final : public SimSystem
 
         vector<muda::DeviceTripletMatrix<Float, 3>> classified_dytopo_effect_hessians;
         vector<muda::DeviceDoubletVector<Float, 3>> classified_dytopo_effect_gradients;
+        bool use_raw_full_gradient_distribution = false;
+        bool use_raw_full_hessian_distribution = false;
 
         void loose_resize_entries(muda::DeviceTripletMatrix<Float, 3>& m, SizeT size);
         void loose_resize_entries(muda::DeviceDoubletVector<Float, 3>& v, SizeT size);

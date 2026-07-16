@@ -28,4 +28,14 @@ void ABDDyTopoEffectReceiver::do_receive(GlobalDyTopoEffectManager::ClassifiedDy
 {
     m_impl.receive(info);
 }
+
+bool ABDDyTopoEffectReceiver::do_accept_raw_full_gradient() const
+{
+    return true;
+}
+
+bool ABDDyTopoEffectReceiver::do_accept_raw_full_hessian() const
+{
+    return true;
+}
 }  // namespace uipc::backend::cuda

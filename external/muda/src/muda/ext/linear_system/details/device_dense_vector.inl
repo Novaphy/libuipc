@@ -71,6 +71,19 @@ void DeviceDenseVector<T>::resize(size_t size)
         cusparseCreateDnVec(&m_descr, size, m_data.data(), cuda_data_type<T>()));
 }
 template <typename T>
+void DeviceDenseVector<T>::unsafe_resize_no_construct(size_t size)
+{
+    if(m_descr)
+    {
+        checkCudaErrors(cusparseDestroyDnVec(m_descr));
+    }
+
+    m_data.unsafe_resize_no_construct(size);
+
+    checkCudaErrors(
+        cusparseCreateDnVec(&m_descr, size, m_data.data(), cuda_data_type<T>()));
+}
+template <typename T>
 void DeviceDenseVector<T>::fill(T value)
 {
     m_data.fill(value);

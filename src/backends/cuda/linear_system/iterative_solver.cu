@@ -40,6 +40,16 @@ void IterativeSolver::apply_preconditioner(muda::DenseVectorView<Float>  z,
     m_system->m_impl.apply_preconditioner(z, r, converged);
 }
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+bool IterativeSolver::apply_preconditioner_dot(muda::DenseVectorView<Float>  z,
+                                               muda::CDenseVectorView<Float> r,
+                                               muda::CVarView<IndexT>        converged,
+                                               muda::VarView<Float>          dot)
+{
+    return m_system->m_impl.apply_preconditioner_dot(z, r, converged, dot);
+}
+#endif
+
 bool IterativeSolver::accuracy_statisfied(muda::DenseVectorView<Float> r)
 {
     return m_system->m_impl.accuracy_statisfied(r);

@@ -21,7 +21,6 @@ void SimEngine::advance()
     Float beta      = 1.0;
     Float ccd_alpha = 1.0;
     Float cfl_alpha = 1.0;
-
     /***************************************************************************************
     *                                  Function Shortcuts
     ***************************************************************************************/
@@ -129,6 +128,20 @@ void SimEngine::advance()
 
         // Compute New Energy => E
         return m_line_searcher->compute_energy(false);
+    };
+
+    auto commit_converged_step = [this](Float alpha)
+    {
+        // The Newton update is already below the convergence tolerance and the
+        // trial energy is not used after termination. Commit dx directly and
+        // avoid the final trajectory detect, contact re-filter, and energy pass.
+        m_global_vertex_manager->step_forward(alpha);
+        m_line_searcher->step_forward(alpha);
+
+        if(m_dump_surface->view()[0])
+        {
+            dump_global_surface();
+        }
     };
 
     auto step_animation = [this]()
@@ -295,8 +308,6 @@ void SimEngine::advance()
 
             // 0. Process External Changes
             m_global_vertex_manager->update_attributes();
-            [[maybe_unused]] AABB bbox =
-                m_global_vertex_manager->compute_vertex_bounding_box();
 
             // 1. Record Friction Candidates at the beginning of the frame
             m_global_vertex_manager->record_prev_positions();
@@ -369,10 +380,15 @@ void SimEngine::advance()
                         dump_global_surface_pre_ccd(newton_iter);
                     }
 
-                    detect_trajectory_candidates(alpha);
+                    bool converged  = convergence_check(newton_iter);
+                    bool terminated = converged && (newton_iter + 1 >= newton_min_iter);
+                    if(terminated)
+                    {
+                        commit_converged_step(alpha);
+                        break;
+                    }
 
-                    // Compute Current Energy => E_0
-                    Float E0 = m_line_searcher->compute_energy(true);  // initial energy
+                    detect_trajectory_candidates(alpha);
 
                     // CCD filter
                     alpha = filter_toi(alpha);
@@ -381,21 +397,30 @@ void SimEngine::advance()
                     alpha = cfl_condition(alpha);
 
                     // Line Search Iteration
-                    bool  converged        = convergence_check(newton_iter);
+                    Float E0 = 0;
+                    if(!converged)
+                    {
+                        // Compute Current Energy => E_0.  When the Newton step
+                        // has already converged, E0 is never used by the line
+                        // search accept/reject test.
+                        E0 = m_line_searcher->compute_energy(true);
+                    }
                     SizeT line_search_iter = 0;
                     for(; line_search_iter < m_line_searcher->max_iter(); ++line_search_iter)
                     {
                         Timer timer{"Line Search Iteration"};
                         m_line_search_iter = line_search_iter;
 
+                        if(converged)
+                        {
+                            commit_converged_step(alpha);
+                            break;
+                        }
+
                         // Compute Test Energy:
                         //  * Step Forward => x = x_0 + alpha * dx
                         //  * Compute New Energy => E
                         Float E = compute_energy(alpha);
-
-                        // To prevent numerical energy (fake-) increasing caused by tiny dx
-                        if(converged)
-                            break;
 
                         // Check Energy Decrease
                         // TODO: maybe better condition like Wolfe condition/Armijo condition in the future
@@ -416,7 +441,6 @@ void SimEngine::advance()
                     // Check Line Search Iteration: report warnings or throw exceptions if needed
                     check_line_search_iter(line_search_iter);
 
-                    bool terminated = converged && (newton_iter >= newton_min_iter);
                     if(terminated)
                         break;
                 }

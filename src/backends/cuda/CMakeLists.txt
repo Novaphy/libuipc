@@ -42,6 +42,30 @@ endif()
 
 target_compile_features(cuda PUBLIC cxx_std_${_uipc_cuda_standard})
 target_include_directories(cuda PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+
+# Select the complete backend implementation at compile time. CoreX builds use
+# the validated GIPC-native, matrix-free path; NVIDIA builds retain libuipc's
+# original explicit assembly path. These are platform policies rather than
+# user-selectable feature combinations.
+if(UIPC_MUDA_USE_COREX)
+    target_compile_definitions(cuda PUBLIC
+        UIPC_ENABLE_GIPC_FULL=1
+        UIPC_ENABLE_GIPC_NATIVE_CONTACT=1
+        UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE=1
+        UIPC_ENABLE_GIPC_FRICTION=1
+        UIPC_ENABLE_GIPC_MAS=1
+        UIPC_GIPC_RANK=1
+    )
+else()
+    target_compile_definitions(cuda PUBLIC
+        UIPC_ENABLE_GIPC_FULL=0
+        UIPC_ENABLE_GIPC_NATIVE_CONTACT=0
+        UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE=0
+        UIPC_ENABLE_GIPC_FRICTION=0
+        UIPC_ENABLE_GIPC_MAS=0
+        UIPC_GIPC_RANK=1
+    )
+endif()
 set_target_properties(cuda PROPERTIES
     # Default to non-RDC. Corex/clang-CUDA does not accept nvcc's -rdc=true,
     # and most of our kernels do not require separable compilation.
@@ -55,14 +79,9 @@ set_target_properties(cuda PROPERTIES
 if(UIPC_MUDA_USE_COREX)
     target_link_libraries(cuda PUBLIC dl)
     target_compile_definitions(cuda PUBLIC UIPC_COREX_CUDA10_COMPAT=1)
-    # Corex 4.4+ exposes cudaMallocAsync/cudaFreeAsync even though CUDART_VERSION
-    # still reports 10020. When enabled, propagate UIPC_COREX_ASYNC_MEMORY=1 so
-    # the muda headers and the cuda backend swap the sync compat path for the
-    # native async APIs (see external/muda/src/muda/launch/details/memory.inl
-    # and external/muda/src/muda/buffer/details/device_var.inl).
-    if(UIPC_COREX_USE_ASYNC_MEMORY)
-        target_compile_definitions(cuda PUBLIC UIPC_COREX_ASYNC_MEMORY=1)
-    endif()
+    # Corex 4.4 exposes cudaMallocAsync/cudaFreeAsync while reporting CUDA 10.2.
+    # This is the sole CoreX memory-management policy for production builds.
+    target_compile_definitions(cuda PUBLIC UIPC_COREX_ASYNC_MEMORY=1)
     # Clang/Corex may not define __CUDA_ARCH__ during device compilation; force
     # MUDA_GENERIC to __host__ __device__ so device kernels can call shared helpers.
     target_compile_definitions(cuda PRIVATE MUDA_FORCE_HD_GENERIC=1)
@@ -111,6 +130,7 @@ endif()
 
 # all files in this directory
 file(GLOB_RECURSE SOURCES "*.cu" "*.h" "*.hpp" "*.cpp" "*.inl")
+list(FILTER SOURCES EXCLUDE REGEX "/gipc/reference/")
 
 # ------------------------------------------------------------------------------
 # Source filter for two-environment build
@@ -128,6 +148,7 @@ file(GLOB_RECURSE SOURCES "*.cu" "*.h" "*.hpp" "*.cpp" "*.inl")
 list(FILTER SOURCES EXCLUDE REGEX "_corex\\.(cu|h|hpp|cpp|inl)$")
 
 if(NOT UIPC_MUDA_USE_COREX)
+    list(FILTER SOURCES EXCLUDE REGEX "/gipc/")
     list(FILTER SOURCES EXCLUDE REGEX "/algorithm/corex_matrix_converter_kernels\\.(cu|h)$")
     list(FILTER SOURCES EXCLUDE REGEX "/backends/cuda/details/")
 endif()

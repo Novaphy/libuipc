@@ -8,6 +8,7 @@
 #include <backends/common/i_sim_system.h>
 #include <backends/common/sim_engine.h>
 #include <cstdio>
+#include <cstdlib>
 
 namespace uipc::backend
 {
@@ -39,10 +40,13 @@ namespace detail
         {
             return [](SimEngine& engine) -> U<ISimSystem>
             {
-                std::fprintf(stderr,
-                             "[corex_demo] creator type: %s\n",
-                             typeid(SimSystemT).name());
-                std::fflush(stderr);
+                if(std::getenv("UIPC_COREX_TRACE_BUILD_SYSTEMS") != nullptr)
+                {
+                    std::fprintf(stderr,
+                                 "[corex_demo] creator type: %s\n",
+                                 typeid(SimSystemT).name());
+                    std::fflush(stderr);
+                }
                 return ::uipc::static_pointer_cast<ISimSystem>(
                     SimSystemCreator<SimSystemT>::create(engine));
             };
@@ -51,10 +55,13 @@ namespace detail
         {
             return [](SimEngine& engine) -> U<ISimSystem>
             {
-                std::fprintf(stderr,
-                             "[corex_demo] creator type: %s\n",
-                             typeid(SimSystemT).name());
-                std::fflush(stderr);
+                if(std::getenv("UIPC_COREX_TRACE_BUILD_SYSTEMS") != nullptr)
+                {
+                    std::fprintf(stderr,
+                                 "[corex_demo] creator type: %s\n",
+                                 typeid(SimSystemT).name());
+                    std::fflush(stderr);
+                }
                 SimEnginePointer e = dynamic_cast<SimEnginePointer>(&engine);
                 UIPC_ASSERT(e != nullptr,
                             "{} cannot be cast to {}",

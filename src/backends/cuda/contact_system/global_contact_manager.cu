@@ -235,10 +235,10 @@ void GlobalContactManager::Impl::compute_adaptive_kappa()
 
 Float GlobalContactManager::Impl::compute_cfl_condition()
 {
-    compute_d_hat();
-
     if(!cfl_enabled)  // if cfl is disabled, just return 1.0
         return 1.0;
+
+    compute_d_hat();
 
     cudaMemset(vert_is_active_contact.data(), 0,
                sizeof(IndexT) * vert_is_active_contact.size());

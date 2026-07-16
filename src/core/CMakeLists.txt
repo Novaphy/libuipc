@@ -27,7 +27,7 @@ endif()
 target_compile_definitions(uipc_core PUBLIC 
     $<$<CONFIG:Debug>:UIPC_RUNTIME_CHECK=1>
     $<$<CONFIG:RelWithDebInfo>:UIPC_RUNTIME_CHECK=1>
-    $<$<CONFIG:Release>:UIPC_RUNTIME_CHECK=1> # release build also enable runtime check now
+    $<$<CONFIG:Release>:UIPC_RUNTIME_CHECK=0>
 )
 target_compile_definitions(uipc_core PUBLIC "-DUIPC_PROJECT_DIR=R\"(${PROJECT_SOURCE_DIR})\"")
 target_compile_definitions(uipc_core PUBLIC "-DUIPC_VERSION_MAJOR=${UIPC_VERSION_MAJOR}")
@@ -123,8 +123,6 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/.." FILES ${SOURCE_GROUP_FILES})
 # Install targets
 # ------------------------------------------------------------------------------
 uipc_install_target(uipc_core)
-
-
 
 
 

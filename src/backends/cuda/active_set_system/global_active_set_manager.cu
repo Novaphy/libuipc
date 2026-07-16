@@ -675,21 +675,7 @@ void GlobalActiveSetManager::Impl::record_non_penetrate_positions()
     if(non_penetrate_positions.size() != x_hat.size())
         non_penetrate_positions.resize(x_hat.size());
     muda::BufferLaunch().copy<Vector3>(non_penetrate_positions.view(), std::as_const(x_hat));
-    {
-        static int rec_call = 0;
-        if(rec_call < 3)
-        {
-            int N = (int)non_penetrate_positions.size();
-            std::vector<Vector3> h_src(N), h_dst(N);
-            cudaMemcpy(h_src.data(), x_hat.data(), N * sizeof(Vector3), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_dst.data(), non_penetrate_positions.data(), N * sizeof(Vector3), cudaMemcpyDeviceToHost);
-            for(int i = 0; i < N; ++i)
-                spdlog::info("[record_np] call={} v{} src=({},{},{}) dst=({},{},{})",
-                    rec_call, i, h_src[i][0], h_src[i][1], h_src[i][2],
-                    h_dst[i][0], h_dst[i][1], h_dst[i][2]);
-        }
-        rec_call++;
-    }
+    checkCudaErrors(cudaGetLastError());
     for(auto&& [i, R] : enumerate(active_set_reporters.view()))
     {
         R->record_non_penetrate_state();
@@ -705,13 +691,7 @@ void GlobalActiveSetManager::Impl::recover_non_penetrate_positions()
         NonPenetratePositionInfo info(this, offset, count);
         R->recover_non_penetrate(info);
     }
-    {
-        int N = (int)non_penetrate_positions.size();
-        std::vector<Vector3> h_np(N);
-        cudaMemcpy(h_np.data(), non_penetrate_positions.data(), N * sizeof(Vector3), cudaMemcpyDeviceToHost);
-        for(int i = 0; i < N; ++i)
-            spdlog::info("[recover_np] v{} np_pos=({},{},{})", i, h_np[i][0], h_np[i][1], h_np[i][2]);
-    }
+    checkCudaErrors(cudaGetLastError());
     global_vertex_manager->overwrite_positions(non_penetrate_positions.view());
 }
 
@@ -735,7 +715,7 @@ void GlobalActiveSetManager::Impl::advance_non_penetrate_positions(Float alpha)
         int grid  = (N + block - 1) / block;
         kernel_advance_non_penetrate_pos<<<grid, block>>>(
             N, non_penetrate_positions.data(), x_hat.data(), alpha);
-        cudaDeviceSynchronize();
+        checkCudaErrors(cudaGetLastError());
     }
     for(auto&& [i, R] : enumerate(active_set_reporters.view()))
     {

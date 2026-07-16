@@ -44,6 +44,7 @@ class MatrixConverter
 
     muda::DeviceBuffer<uint64_t> ij_hash_input;
     muda::DeviceBuffer<uint64_t> ij_hash;
+    muda::DeviceBuffer<uint64_t> unique_ij_hashes;
 
     muda::DeviceBuffer<BlockMatrix> blocks_sorted;
     muda::DeviceBuffer<BlockMatrix> diag_blocks;
@@ -72,6 +73,10 @@ class MatrixConverter
 
     void _make_unique_indices(const muda::DeviceTripletMatrix<T, N>& from,
                               muda::DeviceBCOOMatrix<T, N>&          to);
+
+    void _make_unique_indices_and_blocks_reduce_by_key(
+        const muda::DeviceTripletMatrix<T, N>& from,
+        muda::DeviceBCOOMatrix<T, N>&          to);
 
     void _make_unique_block_warp_reduction(const muda::DeviceTripletMatrix<T, N>& from,
                                            muda::DeviceBCOOMatrix<T, N>& to);
@@ -104,6 +109,14 @@ class MatrixConverter
         if(buf.capacity() < new_size)
             buf.reserve(new_size * m_reserve_ratio);
         buf.resize(new_size);
+    }
+
+    template <typename U>
+    void loose_resize_no_construct(muda::DeviceBuffer<U>& buf, size_t new_size)
+    {
+        if(buf.capacity() < new_size)
+            buf.reserve(new_size * m_reserve_ratio);
+        buf.unsafe_resize_no_construct(new_size);
     }
 
     void ge2sym(muda::DeviceBCOOMatrix<T, N>& to);

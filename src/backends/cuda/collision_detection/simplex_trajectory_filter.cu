@@ -1,7 +1,21 @@
 #include <collision_detection/simplex_trajectory_filter.h>
 #include <muda/atomic.h>
+#include <cstdlib>
 namespace uipc::backend::cuda
 {
+namespace
+{
+bool simplex_filter_count_log_enabled()
+{
+    static const bool enabled = []
+    {
+        const char* env = std::getenv("UIPC_SIMPLEX_FILTER_COUNT_LOG");
+        return env && env[0] != '\0' && env[0] != '0';
+    }();
+    return enabled;
+}
+}  // namespace
+
 void SimplexTrajectoryFilter::do_build()
 {
     m_impl.global_vertex_manager = require<GlobalVertexManager>();
@@ -94,11 +108,14 @@ void SimplexTrajectoryFilter::do_filter_active(GlobalTrajectoryFilter::FilterAct
     FilterActiveInfo this_info{&m_impl};
     do_filter_active(this_info);
 
-    logger::info("SimplexTrajectoryFilter PTs: {}, EEs: {}, PEs: {}, PPs: {}",
-                 m_impl.PTs.size(),
-                 m_impl.EEs.size(),
-                 m_impl.PEs.size(),
-                 m_impl.PPs.size());
+    if(simplex_filter_count_log_enabled())
+    {
+        logger::info("SimplexTrajectoryFilter PTs: {}, EEs: {}, PEs: {}, PPs: {}",
+                     m_impl.PTs.size(),
+                     m_impl.EEs.size(),
+                     m_impl.PEs.size(),
+                     m_impl.PPs.size());
+    }
 }
 
 void SimplexTrajectoryFilter::do_filter_toi(GlobalTrajectoryFilter::FilterTOIInfo& info)

@@ -5,7 +5,6 @@
 
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT && \
     !(defined(UIPC_FLOAT_SCALAR) && UIPC_FLOAT_SCALAR)
-#include <limits>
 namespace corex_barrier_detail {
 
 // Manual log(x) using the identity:
@@ -46,14 +45,21 @@ __host__ __device__ T safe_log_ratio(T a, T b)
 }
 
 template <typename T>
-__host__ __device__ T finite_diff_step(T center, T rel_scale)
+__host__ __device__ void barrier_terms(const T& D_in,
+                                       const T& dHat,
+                                       const T& xi,
+                                       T&       s,
+                                       T&       V,
+                                       T&       diff,
+                                       T&       log_ratio)
 {
-    // Keep finite difference steps away from float underflow while still
-    // scaling with the local magnitude.
-    T mag      = center >= T(0) ? center : -center;
-    T rel_step = (mag + T(1)) * rel_scale;
-    T abs_step = T(64) * std::numeric_limits<T>::epsilon();
-    return rel_step > abs_step ? rel_step : abs_step;
+    const T xi2 = xi * xi;
+    s           = D_in - xi2;
+    V           = dHat * dHat + T(2) * dHat * xi;
+    if(s < V * T(1e-3)) s = V * T(1e-3);
+    if(s > V * T(0.999)) s = V * T(0.999);
+    diff      = s - V;
+    log_ratio = safe_log_ratio(s, V);
 }
 
 }  // namespace corex_barrier_detail
@@ -67,13 +73,8 @@ __host__ __device__ void KappaBarrier(T& R, const T& kappa, const T& D_in, const
     // Original: B(D) = -kappa * (D - xi^2 - V)^2 * log((D - xi^2) / V)
     // where V = dHat^2 + 2*dHat*xi = (dHat+xi)^2 - xi^2.
     // Use safe_log_ratio to avoid forming the small-number quotient directly.
-    T xi2 = xi * xi;
-    T s = D_in - xi2;                          // shifted distance
-    T V = dHat * dHat + T(2) * dHat * xi;      // = (dHat+xi)^2 - xi^2
-    if(s < V * T(1e-3)) s = V * T(1e-3);
-    if(s > V * T(0.999)) s = V * T(0.999);
-    T diff = s - V;                             // = D - xi^2 - V
-    T log_ratio = corex_barrier_detail::safe_log_ratio(s, V);
+    T s, V, diff, log_ratio;
+    corex_barrier_detail::barrier_terms(D_in, dHat, xi, s, V, diff, log_ratio);
     R = -kappa * diff * diff * log_ratio;
 #else
 auto D = D_in;
@@ -89,22 +90,11 @@ __host__ __device__ void dKappaBarrierdD(T& R, const T& kappa, const T& D_in, co
 {
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT && \
     !(defined(UIPC_FLOAT_SCALAR) && UIPC_FLOAT_SCALAR)
-    // Numerical first derivative via central difference of KappaBarrier.
-    // eps must be a small fraction of the barrier domain width V so that
-    // both D_in +/- eps stay inside the active range and avoid the clamps
-    // inside KappaBarrier.  The old formula (|D|+1)*1e-3 produced eps ~1e-3
-    // which exceeded the entire domain V = d_hat^2 = 0.0009 for typical
-    // d_hat values, yielding completely wrong gradients.
-    T xi2 = xi * xi;
-    T V   = dHat * dHat + T(2) * dHat * xi;
-    T s   = D_in - xi2;
-    T eps = s * T(1e-3);
-    T eps_min = V * T(1e-6);
-    if(eps < eps_min) eps = eps_min;
-    T Bp, Bm;
-    KappaBarrier(Bp, kappa, D_in + eps, dHat, xi);
-    KappaBarrier(Bm, kappa, D_in - eps, dHat, xi);
-    R = (Bp - Bm) / (T(2) * eps);
+    // GPU_IPC-style analytic barrier derivative. This removes the nested
+    // central difference from the CoreX compatibility path.
+    T s, V, diff, log_ratio;
+    corex_barrier_detail::barrier_terms(D_in, dHat, xi, s, V, diff, log_ratio);
+    R = -kappa * T(2) * diff * log_ratio - kappa * diff * diff / s;
 #else
 auto D = D_in;
 /* Sub Exprs */
@@ -122,19 +112,11 @@ __host__ __device__ void ddKappaBarrierddD(T& R, const T& kappa, const T& D_in, 
 {
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT && \
     !(defined(UIPC_FLOAT_SCALAR) && UIPC_FLOAT_SCALAR)
-    // Numerical second derivative via central difference of dKappaBarrierdD.
-    // Use a wider fraction of s than the first derivative (1e-2 vs 1e-3)
-    // to keep the outer FD stable, but still well inside the barrier domain.
-    T xi2 = xi * xi;
-    T V   = dHat * dHat + T(2) * dHat * xi;
-    T s   = D_in - xi2;
-    T eps = s * T(1e-2);
-    T eps_min = V * T(1e-5);
-    if(eps < eps_min) eps = eps_min;
-    T gp, gm;
-    dKappaBarrierdD(gp, kappa, D_in + eps, dHat, xi);
-    dKappaBarrierdD(gm, kappa, D_in - eps, dHat, xi);
-    R = (gp - gm) / (T(2) * eps);
+    // Analytic second derivative of the same clamped shifted barrier domain.
+    T s, V, diff, log_ratio;
+    corex_barrier_detail::barrier_terms(D_in, dHat, xi, s, V, diff, log_ratio);
+    R = kappa * diff * diff / (s * s) - T(2) * kappa * log_ratio
+        - T(4) * kappa * diff / s;
 #else
 auto D = D_in;
 /* Sub Exprs */

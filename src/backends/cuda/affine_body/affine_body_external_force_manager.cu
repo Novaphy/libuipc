@@ -38,9 +38,9 @@ void AffineBodyExternalForceManager::Impl::clear()
 
     if(external_forces.size() > 0)
     {
-        checkCudaErrors(cudaMemset(external_forces.data(),
-                                   0,
-                                   external_forces.size() * sizeof(Vector12)));
+        checkCudaErrors(cudaMemsetAsync(external_forces.data(),
+                                        0,
+                                        external_forces.size() * sizeof(Vector12)));
     }
 }
 

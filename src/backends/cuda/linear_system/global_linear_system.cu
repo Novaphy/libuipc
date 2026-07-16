@@ -18,6 +18,10 @@
 #include <cmath>
 #include <typeinfo>
 
+#if !defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) || !UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
+#error "CoreX GIPC linear path requires UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE"
+#endif
+
 namespace uipc::backend::cuda
 {
 REGISTER_SIM_SYSTEM(GlobalLinearSystem);
@@ -26,26 +30,66 @@ namespace
 {
 bool corex_matrix_quality_diag_enabled()
 {
-    const char* env = std::getenv("UIPC_COREX_MATRIX_QUALITY_DIAG");
-    return env && env[0] != '\0' && env[0] != '0';
+    static const bool enabled = [] {
+        const char* env = std::getenv("UIPC_COREX_MATRIX_QUALITY_DIAG");
+        return env && env[0] != '\0' && env[0] != '0';
+    }();
+    return enabled;
 }
 
 bool corex_matrix_row_hotspot_diag_enabled()
 {
-    const char* env = std::getenv("UIPC_COREX_MATRIX_ROW_HOTSPOT_DIAG");
-    return env && env[0] != '\0' && env[0] != '0';
+    static const bool enabled = [] {
+        const char* env = std::getenv("UIPC_COREX_MATRIX_ROW_HOTSPOT_DIAG");
+        return env && env[0] != '\0' && env[0] != '0';
+    }();
+    return enabled;
 }
 
-bool corex_env_enabled(const char* name)
+bool corex_linear_trace_enabled()
 {
-    const char* env = std::getenv(name);
-    return env && env[0] != '\0' && env[0] != '0';
+    static const bool enabled =
+        std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+    return enabled;
 }
 
-bool corex_linear_sync_enabled(const char* skip_env)
+cudaEvent_t corex_preconditioner_ready_event()
 {
-    return !corex_env_enabled("UIPC_COREX_LINEAR_SKIP_SYNC")
-           && !corex_env_enabled(skip_env);
+    static cudaEvent_t event = [] {
+        cudaEvent_t e = nullptr;
+        checkCudaErrors(cudaEventCreateWithFlags(&e, cudaEventDisableTiming));
+        return e;
+    }();
+    return event;
+}
+
+__global__ void kernel_corex_clear_linear_assembly(Matrix3x3* values,
+                                                   int*       rows,
+                                                   int*       cols,
+                                                   Float*     rhs,
+                                                   int        triplet_count,
+                                                   int        rhs_count)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int n_values = triplet_count * 9;
+    int n = max(max(n_values, triplet_count), rhs_count);
+
+    for(int i = tid; i < n; i += blockDim.x * gridDim.x)
+    {
+        if(i < n_values)
+        {
+            reinterpret_cast<Float*>(values)[i] = Float{0};
+        }
+        if(i < triplet_count)
+        {
+            rows[i] = -1;
+            cols[i] = -1;
+        }
+        if(i < rhs_count)
+        {
+            rhs[i] = Float{0};
+        }
+    }
 }
 }  // namespace
 
@@ -117,7 +161,7 @@ void GlobalLinearSystem::solve()
     if(m_impl.need_debug_dump) [[unlikely]]
         _dump_A_b();
 
-    const bool corex_linear_trace = std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+    const bool corex_linear_trace = corex_linear_trace_enabled();
     if(corex_linear_trace)
         logger::info("[corex_trace] solve_linear_system enter");
     m_impl.solve_linear_system();
@@ -259,7 +303,7 @@ void GlobalLinearSystem::Impl::init()
 void GlobalLinearSystem::Impl::build_linear_system()
 {
     Timer timer{"Build Linear System"};
-    const bool corex_trace = (std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr);
+    const bool corex_trace = corex_linear_trace_enabled();
     auto trace = [&](const char* msg)
     {
         if(corex_trace)
@@ -294,118 +338,26 @@ void GlobalLinearSystem::Impl::build_linear_system()
                              corex_profile::now_ms() - profile_t0);
     trace("assemble_linear_system: end");
 
-    // Default CoreX path now prefers device conversion to avoid host fallback.
-    // Set UIPC_COREX_FORCE_HOST_GE2SYM=1 to force the legacy host path.
-    const bool force_host_ge2sym = (std::getenv("UIPC_COREX_FORCE_HOST_GE2SYM") != nullptr);
-    if(!force_host_ge2sym)
-    {
-        trace("converter.ge2sym: begin");
-        profile_t0 = corex_profile::now_ms();
-        converter.ge2sym(triplet_A);
-        corex_profile::log_phase("linear",
-                                 "converter_ge2sym",
-                                 -1,
-                                 -1,
-                                 -1,
-                                 corex_profile::now_ms() - profile_t0);
-        trace("converter.ge2sym: end");
-        trace("converter.convert: begin");
-        profile_t0 = corex_profile::now_ms();
-        converter.convert(triplet_A, bcoo_A);
-        corex_profile::log_phase("linear",
-                                 "converter_convert",
-                                 -1,
-                                 -1,
-                                 -1,
-                                 corex_profile::now_ms() - profile_t0);
-        trace("converter.convert: end");
-    }
-    else
-    {
-        trace("host ge2sym+convert: begin");
-        int tc    = static_cast<int>(triplet_A.triplet_count());
-        int nrows = triplet_A.rows();
-        int ncols = triplet_A.cols();
-
-        std::vector<int>       h_rows(tc), h_cols(tc);
-        std::vector<Matrix3x3> h_vals(tc);
-
-        checkCudaErrors(cudaMemcpy(h_rows.data(),
-                                   triplet_A.row_indices().data(),
-                                   sizeof(int) * tc,
-                                   cudaMemcpyDeviceToHost));
-        checkCudaErrors(cudaMemcpy(h_cols.data(),
-                                   triplet_A.col_indices().data(),
-                                   sizeof(int) * tc,
-                                   cudaMemcpyDeviceToHost));
-        checkCudaErrors(cudaMemcpy(h_vals.data(),
-                                   triplet_A.values().data(),
-                                   sizeof(Matrix3x3) * tc,
-                                   cudaMemcpyDeviceToHost));
-
-        std::vector<int>       sym_rows, sym_cols;
-        std::vector<Matrix3x3> sym_vals;
-        sym_rows.reserve(tc);
-        sym_cols.reserve(tc);
-        sym_vals.reserve(tc);
-        for(int i = 0; i < tc; ++i)
-        {
-            if(h_rows[i] <= h_cols[i])
-            {
-                sym_rows.push_back(h_rows[i]);
-                sym_cols.push_back(h_cols[i]);
-                sym_vals.push_back(h_vals[i]);
-            }
-        }
-
-        int sym_count = static_cast<int>(sym_rows.size());
-        std::vector<int> order(sym_count);
-        std::iota(order.begin(), order.end(), 0);
-        std::sort(order.begin(), order.end(), [&](int a, int b)
-        {
-            if(sym_rows[a] != sym_rows[b]) return sym_rows[a] < sym_rows[b];
-            return sym_cols[a] < sym_cols[b];
-        });
-
-        std::vector<int>       out_rows, out_cols;
-        std::vector<Matrix3x3> out_vals;
-        out_rows.reserve(sym_count);
-        out_cols.reserve(sym_count);
-        out_vals.reserve(sym_count);
-
-        for(int k = 0; k < sym_count; ++k)
-        {
-            int idx = order[k];
-            if(!out_rows.empty() && out_rows.back() == sym_rows[idx]
-               && out_cols.back() == sym_cols[idx])
-            {
-                out_vals.back() += sym_vals[idx];
-            }
-            else
-            {
-                out_rows.push_back(sym_rows[idx]);
-                out_cols.push_back(sym_cols[idx]);
-                out_vals.push_back(sym_vals[idx]);
-            }
-        }
-
-        int nnz = static_cast<int>(out_rows.size());
-        bcoo_A.resize(nrows, ncols, nnz);
-
-        checkCudaErrors(cudaMemcpy(bcoo_A.row_indices().data(),
-                                   out_rows.data(),
-                                   sizeof(int) * nnz,
-                                   cudaMemcpyHostToDevice));
-        checkCudaErrors(cudaMemcpy(bcoo_A.col_indices().data(),
-                                   out_cols.data(),
-                                   sizeof(int) * nnz,
-                                   cudaMemcpyHostToDevice));
-        checkCudaErrors(cudaMemcpy(bcoo_A.values().data(),
-                                   out_vals.data(),
-                                   sizeof(Matrix3x3) * nnz,
-                                   cudaMemcpyHostToDevice));
-        trace("host ge2sym+convert: end");
-    }
+    trace("converter.ge2sym: begin");
+    profile_t0 = corex_profile::now_ms();
+    converter.ge2sym(triplet_A);
+    corex_profile::log_phase("linear",
+                             "converter_ge2sym",
+                             -1,
+                             -1,
+                             -1,
+                             corex_profile::now_ms() - profile_t0);
+    trace("converter.ge2sym: end");
+    trace("converter.convert: begin");
+    profile_t0 = corex_profile::now_ms();
+    converter.convert(triplet_A, bcoo_A);
+    corex_profile::log_phase("linear",
+                             "converter_convert",
+                             -1,
+                             -1,
+                             -1,
+                             corex_profile::now_ms() - profile_t0);
+    trace("converter.convert: end");
 
     if(corex_matrix_quality_diag_enabled())
     {
@@ -557,8 +509,10 @@ void GlobalLinearSystem::Impl::build_linear_system()
         logger::info("[corex_trace][precond_asm] pre-precond sync begin");
     trace("pre-precond sync: begin");
     profile_t0 = corex_profile::now_ms();
-    if(corex_linear_sync_enabled("UIPC_COREX_SKIP_PRE_PRECOND_SYNC"))
-        checkCudaErrors(cudaDeviceSynchronize());
+    auto preconditioner_ready = corex_preconditioner_ready_event();
+    checkCudaErrors(cudaEventRecord(preconditioner_ready, nullptr));
+    checkCudaErrors(cudaStreamWaitEvent(ctx.stream(), preconditioner_ready, 0));
+    checkCudaErrors(cudaGetLastError());
     corex_profile::log_phase("linear",
                              "pre_preconditioner_sync",
                              -1,
@@ -585,8 +539,7 @@ void GlobalLinearSystem::Impl::build_linear_system()
     if(corex_trace)
         logger::info("[corex_trace][precond_asm] post-precond sync begin");
     profile_t0 = corex_profile::now_ms();
-    if(corex_linear_sync_enabled("UIPC_COREX_SKIP_POST_PRECOND_SYNC"))
-        checkCudaErrors(cudaDeviceSynchronize());
+    checkCudaErrors(cudaGetLastError());
     corex_profile::log_phase("linear",
                              "post_preconditioner_sync",
                              -1,
@@ -663,8 +616,8 @@ bool GlobalLinearSystem::Impl::_update_subsystem_extent()
     }
     auto blocked_dof = total_dof / DoFBlockSize;
     triplet_A.reshape(blocked_dof, blocked_dof);
-    x.resize(total_dof);
-    b.resize(total_dof);
+    x.unsafe_resize_no_construct(total_dof);
+    b.unsafe_resize_no_construct(total_dof);
 
     if(triplet_count_changed) [[likely]]
     {
@@ -678,7 +631,7 @@ bool GlobalLinearSystem::Impl::_update_subsystem_extent()
         triplet_A.reserve_triplets(reserve_count);
         bcoo_A.reserve_triplets(reserve_count);
     }
-    triplet_A.resize_triplets(total_triplet);
+    triplet_A.unsafe_resize_triplets_no_construct(total_triplet);
 
     if(total_dof == 0 || total_triplet == 0) [[unlikely]]
     {
@@ -690,7 +643,7 @@ bool GlobalLinearSystem::Impl::_update_subsystem_extent()
 
 void GlobalLinearSystem::Impl::_assemble_linear_system()
 {
-    const bool corex_trace = (std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr);
+    const bool corex_trace = corex_linear_trace_enabled();
     auto trace = [&](const char* msg)
     {
         if(corex_trace)
@@ -704,17 +657,30 @@ void GlobalLinearSystem::Impl::_assemble_linear_system()
     // Clear and invalidate previous values
     // BufferView::fill() uses ParallelFor device lambda which silently fails on CoreX
     auto profile_t0 = corex_profile::now_ms();
-    checkCudaErrors(cudaMemset(triplet_A.values().data(),
-                               0,
-                               sizeof(Matrix3x3) * triplet_A.triplet_count()));
-    checkCudaErrors(cudaMemset(triplet_A.row_indices().data(),
-                               0xFF,
-                               sizeof(int) * triplet_A.triplet_count()));
-    checkCudaErrors(cudaMemset(triplet_A.col_indices().data(),
-                               0xFF,
-                               sizeof(int) * triplet_A.triplet_count()));
     auto B = b.view();
-    checkCudaErrors(cudaMemset(B.buffer_view().data(), 0, sizeof(Float) * b.size()));
+    {
+        const int triplet_count = static_cast<int>(triplet_A.triplet_count());
+        const int rhs_count = static_cast<int>(b.size());
+        const int n_values = triplet_count * 9;
+        const int n = std::max({n_values, triplet_count, rhs_count});
+        if(n > 0)
+        {
+#if !defined(__ILUVATAR__)
+            // Do not attribute an error left by an earlier NVIDIA launch to this clear.
+            (void)cudaGetLastError();
+#endif
+            constexpr int block = 256;
+            const int grid = std::min(1024, (n + block - 1) / block);
+            kernel_corex_clear_linear_assembly<<<grid, block>>>(
+                triplet_A.values().data(),
+                triplet_A.row_indices().data(),
+                triplet_A.col_indices().data(),
+                B.buffer_view().data(),
+                triplet_count,
+                rhs_count);
+            checkCudaErrors(cudaGetLastError());
+        }
+    }
     profile_clear_ms += corex_profile::now_ms() - profile_t0;
 
     auto diag_subsystem_view     = diag_subsystems.view();
@@ -818,7 +784,7 @@ void GlobalLinearSystem::Impl::_assemble_linear_system()
 
 void GlobalLinearSystem::Impl::_assemble_preconditioner()
 {
-    const bool corex_trace = std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+    const bool corex_trace = corex_linear_trace_enabled();
     if(global_preconditioner)
     {
         if(corex_trace)
@@ -845,18 +811,9 @@ void GlobalLinearSystem::Impl::_assemble_preconditioner()
 void GlobalLinearSystem::Impl::solve_linear_system()
 {
     Timer timer{"Solve Linear System"};
-    const bool corex_trace = std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM") != nullptr;
+    const bool corex_trace = corex_linear_trace_enabled();
     if(corex_trace)
         logger::info("[corex_trace] solve_linear_system: pre-sync");
-    auto profile_t0 = corex_profile::now_ms();
-    if(corex_linear_sync_enabled("UIPC_COREX_SKIP_PRE_PCG_SYNC"))
-        checkCudaErrors(cudaDeviceSynchronize());
-    corex_profile::log_phase("linear",
-                             "pre_pcg_sync",
-                             -1,
-                             -1,
-                             -1,
-                             corex_profile::now_ms() - profile_t0);
     if(corex_trace)
         logger::info("[corex_trace] solve_linear_system: post-sync, calling PCG");
     if(iterative_solver)
@@ -875,7 +832,7 @@ void GlobalLinearSystem::Impl::distribute_solution()
     auto diag_dof_counts     = diag_dof_offsets_counts.counts();
     auto diag_dof_offsets    = diag_dof_offsets_counts.offsets();
 
-    if(std::getenv("UIPC_COREX_TRACE_LINEAR_SYSTEM"))
+    if(corex_linear_trace_enabled())
     {
         int n = static_cast<int>(x.size());
         std::vector<Float> hx(n);
@@ -942,19 +899,83 @@ void GlobalLinearSystem::Impl::apply_preconditioner(muda::DenseVectorView<Float>
     }
 }
 
+#if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
+bool GlobalLinearSystem::Impl::apply_preconditioner_dot(
+    muda::DenseVectorView<Float>  z,
+    muda::CDenseVectorView<Float> r,
+    muda::CVarView<IndexT>        converged,
+    muda::VarView<Float>          dot)
+{
+    // A global preconditioner may cover arbitrary rows, and unpreconditioned
+    // local ranges still use BufferLaunch copies. Until those implementations
+    // expose fused reductions, use the generic dot path for such systems.
+    if(global_preconditioner || !no_precond_diag_subsystem_indices.empty()
+       || local_preconditioners.view().size() == 0)
+    {
+        apply_preconditioner(z, r, converged);
+        return false;
+    }
+
+    for(auto& preconditioner : local_preconditioners.view())
+    {
+        if(!preconditioner->supports_apply_dot())
+        {
+            apply_preconditioner(z, r, converged);
+            return false;
+        }
+    }
+
+    checkCudaErrors(cudaMemsetAsync(dot.data(), 0, sizeof(Float)));
+
+    auto diag_dof_counts  = diag_dof_offsets_counts.counts();
+    auto diag_dof_offsets = diag_dof_offsets_counts.offsets();
+    for(auto& preconditioner : local_preconditioners.view())
+    {
+        ApplyPreconditionerInfo info{this};
+        auto                    index  = preconditioner->m_subsystem->m_index;
+        auto                    offset = diag_dof_offsets[index];
+        auto                    count  = diag_dof_counts[index];
+        info.m_z                       = z.subview(offset, count);
+        info.m_r                       = r.subview(offset, count);
+        info.m_converged               = converged;
+        info.m_dot                     = dot;
+        info.m_compute_dot             = true;
+        preconditioner->apply(info);
+    }
+    return true;
+}
+#endif
+
 void GlobalLinearSystem::Impl::spmv(Float                         a,
                                     muda::CDenseVectorView<Float> x,
                                     Float                         b,
                                     muda::DenseVectorView<Float>  y)
 {
     spmver.rbk_sym_spmv(a, bcoo_A.cview(), x, b, y);
+
+    auto diag_dof_counts  = diag_dof_offsets_counts.counts();
+    auto diag_dof_offsets = diag_dof_offsets_counts.offsets();
+
+    for(auto&& [i, diag_subsystem] : enumerate(diag_subsystems.view()))
+    {
+        MatrixFreeSpMVInfo info;
+        auto               offset = diag_dof_offsets[i];
+        auto               count  = diag_dof_counts[i];
+        info.m_a                  = a;
+        info.m_x                  = x.subview(offset, count);
+        info.m_y                  = y.subview(offset, count);
+        info.m_dof_offset         = offset;
+        info.m_dof_count          = count;
+        diag_subsystem->matrix_free_spmv(info);
+    }
 }
 
 void GlobalLinearSystem::Impl::spmv_dot(muda::CDenseVectorView<Float> x,
                                         muda::DenseVectorView<Float>  y,
                                         muda::VarView<Float>          d_dot)
 {
-    spmver.rbk_sym_spmv_dot(1.0, bcoo_A.cview(), x, 0.0, y, d_dot);
+    spmv(1.0, x, 0.0, y);
+    ctx.dot(x, y.as_const(), d_dot);
 }
 
 bool GlobalLinearSystem::Impl::accuracy_statisfied(muda::DenseVectorView<Float> r)
@@ -1614,6 +1635,24 @@ void GlobalLinearSystem::Impl::spmv(Float                         a,
 {
     spmver.rbk_sym_spmv(a, bcoo_A.cview(), x, b, y);
 
+#if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
+    auto diag_dof_counts  = diag_dof_offsets_counts.counts();
+    auto diag_dof_offsets = diag_dof_offsets_counts.offsets();
+
+    for(auto&& [i, diag_subsystem] : enumerate(diag_subsystems.view()))
+    {
+        MatrixFreeSpMVInfo info;
+        auto               offset = diag_dof_offsets[i];
+        auto               count  = diag_dof_counts[i];
+        info.m_a                  = a;
+        info.m_x                  = x.subview(offset, count);
+        info.m_y                  = y.subview(offset, count);
+        info.m_dof_offset         = offset;
+        info.m_dof_count          = count;
+        diag_subsystem->matrix_free_spmv(info);
+    }
+#endif
+
     // Just some debug options
     //  * spmver.sym_spmv(a, bcoo_A.cview(), x, b, y);      // Slightly slower
     //  * spmver.cpu_sym_spmv(a, bcoo_A.cview(), x, b, y);  // Much slower
@@ -1623,7 +1662,12 @@ void GlobalLinearSystem::Impl::spmv_dot(muda::CDenseVectorView<Float> x,
                                         muda::DenseVectorView<Float>  y,
                                         muda::VarView<Float>          d_dot)
 {
+#if defined(UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE) && UIPC_ENABLE_GIPC_CONTACT_MATRIX_FREE
+    spmv(1.0, x, 0.0, y);
+    ctx.dot(x, y.as_const(), d_dot);
+#else
     spmver.rbk_sym_spmv_dot(1.0, bcoo_A.cview(), x, 0.0, y, d_dot);
+#endif
 }
 
 bool GlobalLinearSystem::Impl::accuracy_statisfied(muda::DenseVectorView<Float> r)

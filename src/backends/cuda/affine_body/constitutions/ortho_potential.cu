@@ -7,6 +7,62 @@
 
 namespace uipc::backend::cuda
 {
+namespace
+{
+__global__ void kernel_ortho_potential_energy(int n,
+                                              const Vector12* qs,
+                                              const Float*    volumes,
+                                              const Float*    kappas,
+                                              Float           dt,
+                                              Float*          energies)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= n)
+        return;
+
+    namespace AOP = sym::abd_ortho_potential;
+    Float E = 0.0;
+    AOP::E(E, kappas[i], qs[i]);
+    energies[i] = E * volumes[i] * dt * dt;
+}
+
+__global__ void kernel_ortho_potential_gradient_hessian(int n,
+                                                        const Vector12* qs,
+                                                        const Float*    volumes,
+                                                        const Float*    kappas,
+                                                        Float           dt,
+                                                        bool            gradient_only,
+                                                        Vector12*       gradients,
+                                                        Matrix12x12*    hessians)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= n)
+        return;
+
+    namespace AOP = sym::abd_ortho_potential;
+
+    Matrix12x12 H = Matrix12x12::Zero();
+    Vector12    G = Vector12::Zero();
+
+    const Float Vdt2 = volumes[i] * dt * dt;
+
+    Vector9 G9;
+    AOP::dEdq(G9, kappas[i], qs[i]);
+    G.segment<9>(3) = G9 * Vdt2;
+    gradients[i]    = G;
+
+    if(gradient_only)
+        return;
+
+    Matrix9x9 H9x9;
+    AOP::ddEddq(H9x9, kappas[i], qs[i]);
+    make_spd(H9x9);
+
+    H.block<9, 9>(3, 3) = H9x9 * Vdt2;
+    hessians[i]         = H;
+}
+}  // namespace
+
 class OrthoPotential final : public AffineBodyConstitution
 {
   public:
@@ -51,76 +107,41 @@ class OrthoPotential final : public AffineBodyConstitution
 
     virtual void do_compute_energy(ComputeEnergyInfo& info) override
     {
-        auto N = static_cast<size_t>(info.qs().size());
+        auto N = static_cast<int>(info.qs().size());
         if(N == 0)
             return;
 
-        std::vector<Vector12> h_qs(N);
-        std::vector<Float>    h_volumes(N);
-        std::vector<Float>    h_kappas(N);
-        std::vector<Float>    h_energies(N);
-
-        info.qs().copy_to(h_qs.data());
-        info.volumes().copy_to(h_volumes.data());
-        kappas.view().copy_to(h_kappas.data());
-
-        namespace AOP = sym::abd_ortho_potential;
-        const Float dt = info.dt();
-
-        for(size_t i = 0; i < N; ++i)
-        {
-            Float E = 0.0;
-            AOP::E(E, h_kappas[i], h_qs[i]);
-            h_energies[i] = E * h_volumes[i] * dt * dt;
-        }
-
-        info.energies().copy_from(h_energies.data());
+        constexpr int block = 128;
+        int           grid  = (N + block - 1) / block;
+        kernel_ortho_potential_energy<<<grid, block>>>(N,
+                                                       info.qs().data(),
+                                                       info.volumes().data(),
+                                                       kappas.data(),
+                                                       info.dt(),
+                                                       info.energies().data());
+        checkCudaErrors(cudaGetLastError());
         return;
     }
 
     virtual void do_compute_gradient_hessian(ComputeGradientHessianInfo& info) override
     {
-        auto N = static_cast<size_t>(info.qs().size());
+        auto N = static_cast<int>(info.qs().size());
         if(N == 0)
             return;
 
-        std::vector<Vector12>    h_qs(N);
-        std::vector<Float>       h_volumes(N);
-        std::vector<Float>       h_kappas(N);
-        std::vector<Vector12>    h_gradients(N, Vector12::Zero());
-        std::vector<Matrix12x12> h_hessians;
-
-        info.qs().copy_to(h_qs.data());
-        info.volumes().copy_to(h_volumes.data());
-        kappas.view().copy_to(h_kappas.data());
-
-        if(!info.gradient_only())
-            h_hessians.assign(N, Matrix12x12::Zero());
-
-        namespace AOP = sym::abd_ortho_potential;
-        const Float dt = info.dt();
-
-        for(size_t i = 0; i < N; ++i)
-        {
-            const Float Vdt2 = h_volumes[i] * dt * dt;
-
-            Vector9 G9;
-            AOP::dEdq(G9, h_kappas[i], h_qs[i]);
-            h_gradients[i].segment<9>(3) = G9 * Vdt2;
-
-            if(info.gradient_only())
-                continue;
-
-            Matrix9x9 H9x9;
-            AOP::ddEddq(H9x9, h_kappas[i], h_qs[i]);
-            make_spd(H9x9);
-
-            h_hessians[i].block<9, 9>(3, 3) = H9x9 * Vdt2;
-        }
-
-        info.gradients().copy_from(h_gradients.data());
-        if(!info.gradient_only())
-            info.hessians().copy_from(h_hessians.data());
+        const bool gradient_only = info.gradient_only();
+        constexpr int block = 128;
+        int           grid  = (N + block - 1) / block;
+        kernel_ortho_potential_gradient_hessian<<<grid, block>>>(N,
+                                                                 info.qs().data(),
+                                                                 info.volumes().data(),
+                                                                 kappas.data(),
+                                                                 info.dt(),
+                                                                 gradient_only,
+                                                                 info.gradients().data(),
+                                                                 gradient_only ? nullptr
+                                                                               : info.hessians().data());
+        checkCudaErrors(cudaGetLastError());
         return;
     }
 };

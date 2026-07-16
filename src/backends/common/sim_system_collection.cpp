@@ -91,17 +91,23 @@ void SimSystemCollection::build_systems()
         try
         {
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-            std::fprintf(stderr,
-                         "[corex_demo] build_systems: building %s\n",
-                         std::string{s->name()}.c_str());
-            std::fflush(stderr);
+            if(std::getenv("UIPC_COREX_TRACE_BUILD_SYSTEMS") != nullptr)
+            {
+                std::fprintf(stderr,
+                             "[corex_demo] build_systems: building %s\n",
+                             std::string{s->name()}.c_str());
+                std::fflush(stderr);
+            }
 #endif
             s->build();
 #if defined(UIPC_COREX_CUDA10_COMPAT) && UIPC_COREX_CUDA10_COMPAT
-            std::fprintf(stderr,
-                         "[corex_demo] build_systems: built %s\n",
-                         std::string{s->name()}.c_str());
-            std::fflush(stderr);
+            if(std::getenv("UIPC_COREX_TRACE_BUILD_SYSTEMS") != nullptr)
+            {
+                std::fprintf(stderr,
+                             "[corex_demo] build_systems: built %s\n",
+                             std::string{s->name()}.c_str());
+                std::fflush(stderr);
+            }
 #endif
         }
         catch(SimSystemException& e)
