@@ -50,6 +50,14 @@ bool corex_abd_precond_diag_stats_enabled()
     return enabled;
 }
 
+__device__ inline bool corex_isfinite(Float v)
+{
+    // Avoid relying on a particular CUDA math-header overload in the CoreX
+    // CUDA-10 compatibility compiler. NaN fails v==v; infinities exceed the
+    // largest finite value.
+    return v == v && (v < Float{0} ? -v : v) <= std::numeric_limits<Float>::max();
+}
+
 // In-place LDLT factorization for an SPD matrix stored column-major in `A`.
 // On exit, A holds the LDLT factors:
 //   - the lower triangle of A (i > j) holds L[i][j] (unit diagonal of L is implicit)
@@ -69,7 +77,9 @@ __device__ bool corex_ldlt_factorize_inplace(Float* A)
     Float max_diag_abs = static_cast<Float>(0);
     for(int k = 0; k < N; ++k)
     {
-        Float d  = A[k * N + k];
+        Float d = A[k * N + k];
+        if(!corex_isfinite(d))
+            return false;
         Float ad = d < static_cast<Float>(0) ? -d : d;
         if(ad > max_diag_abs)
             max_diag_abs = ad;
@@ -88,7 +98,9 @@ __device__ bool corex_ldlt_factorize_inplace(Float* A)
             Float Dj  = A[j * N + j];
             Dk -= Lkj * Lkj * Dj;
         }
-        if(Dk < eps)
+        // `Dk < eps` alone is unsafe: every ordered comparison with NaN is
+        // false, so a NaN pivot used to be accepted as an SPD pivot.
+        if(!corex_isfinite(Dk) || !(Dk >= eps))
             return false;
         A[k * N + k] = Dk;
 
@@ -102,7 +114,10 @@ __device__ bool corex_ldlt_factorize_inplace(Float* A)
                 Float Dj  = A[j * N + j];
                 Lik -= Lij * Lkj * Dj;
             }
-            A[k * N + i] = Lik / Dk;
+            Lik /= Dk;
+            if(!corex_isfinite(Lik))
+                return false;
+            A[k * N + i] = Lik;
         }
     }
     return true;
@@ -139,8 +154,8 @@ __device__ void corex_ldlt_solve(const Float* A, const Float* b, Float* x)
 // factors of A. Each column of the inverse is recovered by solving against
 // a unit basis vector; this avoids constructing L^{-1} explicitly and
 // keeps the solve numerically stable.
-template<int N>
-__device__ void corex_ldlt_explicit_inverse(const Float* A, Float* invA)
+template <int N>
+__device__ bool corex_ldlt_explicit_inverse(const Float* A, Float* invA)
 {
     for(int j = 0; j < N; ++j)
     {
@@ -150,8 +165,13 @@ __device__ void corex_ldlt_explicit_inverse(const Float* A, Float* invA)
             ej[i] = (i == j) ? static_cast<Float>(1) : static_cast<Float>(0);
         corex_ldlt_solve<N>(A, ej, xj);
         for(int i = 0; i < N; ++i)
+        {
+            if(!corex_isfinite(xj[i]))
+                return false;
             invA[j * N + i] = xj[i];
+        }
     }
+    return true;
 }
 
 // Build a 12x12 SPD block inverse for each ABD body using LDLT factorization.
@@ -175,7 +195,8 @@ __global__ void kernel_abd_precond_extract_block_inverse(
         return;
 
     constexpr int N = 12;
-    Float A[N * N];
+    Float         A[N * N];
+    bool          input_finite = true;
 
     for(int c = 0; c < N; ++c)
     {
@@ -183,6 +204,7 @@ __global__ void kernel_abd_precond_extract_block_inverse(
         {
             Float h_rc = diag_hessian[i * 144 + c * N + r];
             Float h_cr = diag_hessian[i * 144 + r * N + c];
+            input_finite = input_finite && corex_isfinite(h_rc) && corex_isfinite(h_cr);
             A[c * N + r] = static_cast<Float>(0.5) * (h_rc + h_cr);
         }
     }
@@ -190,23 +212,27 @@ __global__ void kernel_abd_precond_extract_block_inverse(
     for(int k = 0; k < N; ++k)
     {
         Float d     = A[k * N + k];
-        diag_recip[i * N + k] = (d != static_cast<Float>(0)) ?
+        diag_recip[i * N + k] = (corex_isfinite(d) && d != static_cast<Float>(0)) ?
                                     (static_cast<Float>(1) / d) :
                                     static_cast<Float>(0);
     }
 
-    bool ok = corex_ldlt_factorize_inplace<N>(A);
+    bool ok = input_finite && corex_ldlt_factorize_inplace<N>(A);
 
     if(ok)
     {
         Float invA[N * N];
-        corex_ldlt_explicit_inverse<N>(A, invA);
-        for(int idx = 0; idx < N * N; ++idx)
-            diag_inv[i * 144 + idx] = invA[idx];
-        if(block_status)
-            block_status[i] = 1;
+        ok = corex_ldlt_explicit_inverse<N>(A, invA);
+        if(ok)
+        {
+            for(int idx = 0; idx < N * N; ++idx)
+                diag_inv[i * 144 + idx] = invA[idx];
+            if(block_status)
+                block_status[i] = 1;
+        }
     }
-    else
+
+    if(!ok)
     {
         for(int idx = 0; idx < N * N; ++idx)
             diag_inv[i * 144 + idx] = static_cast<Float>(0);

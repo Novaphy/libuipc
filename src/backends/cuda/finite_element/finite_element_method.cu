@@ -394,10 +394,11 @@ void FiniteElementMethod::Impl::_build_geo_infos(WorldVisitor& world)
 
     for(auto&& [i, dim_info] : enumerate(dim_infos))
     {
-        auto it = std::find_if(geo_infos.begin(),
-                               geo_infos.end(),
-                               [i](const GeoInfo& info)
-                               { return info.dim_uid.dim == i; });
+        const auto dim = i;
+        auto       it  = std::find_if(geo_infos.begin(),
+                                      geo_infos.end(),
+                                      [dim](const GeoInfo& info)
+                                      { return info.dim_uid.dim == dim; });
 
         if(it == geo_infos.end())
             continue;
@@ -550,7 +551,8 @@ void FiniteElementMethod::Impl::_build_on_host(WorldVisitor& world)
 
         for(auto&& [i, info] : enumerate(geo_infos))
         {
-            auto& geo_slot      = geo_slots[info.geo_slot_index];
+            const IndexT vertex_offset = info.vertex_offset;
+            auto&        geo_slot      = geo_slots[info.geo_slot_index];
             auto& rest_geo_slot = rest_geo_slots[info.geo_slot_index];
             auto& geo           = geo_slot->geometry();
             auto& rest_geo      = rest_geo_slot->geometry();
@@ -587,8 +589,8 @@ void FiniteElementMethod::Impl::_build_on_host(WorldVisitor& world)
                     std::transform(edge_view.begin(),
                                    edge_view.end(),
                                    dst_codim_1d_span.begin(),
-                                   [&](const Vector2i& edge) -> Vector2i
-                                   { return edge.array() + info.vertex_offset; });
+                                   [vertex_offset](const Vector2i& edge) -> Vector2i
+                                   { return edge.array() + vertex_offset; });
                 }
                 break;
                 case 2: {
@@ -602,8 +604,8 @@ void FiniteElementMethod::Impl::_build_on_host(WorldVisitor& world)
                     std::transform(tri_view.begin(),
                                    tri_view.end(),
                                    dst_codim_2d_span.begin(),
-                                   [&](const Vector3i& tri) -> Vector3i
-                                   { return tri.array() + info.vertex_offset; });
+                                   [vertex_offset](const Vector3i& tri) -> Vector3i
+                                   { return tri.array() + vertex_offset; });
                 }
                 break;
                 case 3: {
@@ -617,8 +619,8 @@ void FiniteElementMethod::Impl::_build_on_host(WorldVisitor& world)
                     std::transform(tet_view.begin(),
                                    tet_view.end(),
                                    dst_tet_span.begin(),
-                                   [&](const Vector4i& tet) -> Vector4i
-                                   { return tet.array() + info.vertex_offset; });
+                                   [vertex_offset](const Vector4i& tet) -> Vector4i
+                                   { return tet.array() + vertex_offset; });
                 }
                 break;
                 default:

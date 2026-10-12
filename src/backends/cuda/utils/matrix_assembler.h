@@ -101,9 +101,10 @@ class DoubletVectorAssembler
     }
 
     template <int N>
-        requires(N >= 1)
     class ProxyRange
     {
+        static_assert(N >= 1);
+
       public:
         using SegmentVector = Eigen::Vector<T, N * SegmentDim>;
 
@@ -208,9 +209,10 @@ class TripletMatrixAssembler
     }
 
     template <int N>
-        requires(N >= 1)
     class ProxyRange
     {
+        static_assert(N >= 1);
+
       public:
         using BlockMatrix = Eigen::Matrix<T, N * BlockDim, N * BlockDim>;
 
@@ -311,9 +313,10 @@ class TripletMatrixAssembler
     };
 
     template <int N>
-        requires(N >= 1)
     class ProxyRangeHalf
     {
+        static_assert(N >= 1);
+
       public:
         struct UpperLR
         {
@@ -588,9 +591,10 @@ class DoubletVectorAssembler
     }
 
     template <int N>
-        requires(N >= 1)
     class ProxyRange
     {
+        static_assert(N >= 1);
+
       public:
         using SegmentVector = Eigen::Vector<T, N * SegmentDim>;
 
@@ -695,9 +699,10 @@ class TripletMatrixAssembler
     }
 
     template <int N>
-        requires(N >= 1)
     class ProxyRange
     {
+        static_assert(N >= 1);
+
       public:
         using BlockMatrix = Eigen::Matrix<T, N * BlockDim, N * BlockDim>;
 
@@ -798,9 +803,10 @@ class TripletMatrixAssembler
     };
 
     template <int N>
-        requires(N >= 1)
     class ProxyRangeHalf
     {
+        static_assert(N >= 1);
+
       public:
         struct UpperLR
         {

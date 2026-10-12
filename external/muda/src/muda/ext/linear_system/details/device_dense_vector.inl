@@ -11,15 +11,19 @@ DeviceDenseVector<T>::DeviceDenseVector(size_t size)
 template <typename T>
 DeviceDenseVector<T>::~DeviceDenseVector()
 {
+#ifndef UIPC_DLAN_COMPAT
     if(m_descr)
         checkCudaErrors(cusparseDestroyDnVec(m_descr));
+#endif
 }
 template <typename T>
 DeviceDenseVector<T>::DeviceDenseVector(const DeviceDenseVector<T>& other)
     : m_data{other.m_data}
 {
+#ifndef UIPC_DLAN_COMPAT
     checkCudaErrors(cusparseCreateDnVec(
         &m_descr, m_data.size(), m_data.data(), cuda_data_type<T>()));
+#endif
 }
 template <typename T>
 DeviceDenseVector<T>::DeviceDenseVector(DeviceDenseVector<T>&& other)
@@ -34,10 +38,14 @@ DeviceDenseVector<T>& DeviceDenseVector<T>::operator=(const DeviceDenseVector<T>
     if(this != &other)
     {
         m_data = other.m_data;
+#ifndef UIPC_DLAN_COMPAT
         if(m_descr)
             checkCudaErrors(cusparseDestroyDnVec(m_descr));
         checkCudaErrors(cusparseCreateDnVec(
             &m_descr, m_data.size(), m_data.data(), cuda_data_type<T>()));
+#else
+        m_descr = nullptr;
+#endif
     }
     return *this;
 }
@@ -60,6 +68,7 @@ void DeviceDenseVector<T>::reserve(size_t size)
 template <typename T>
 void DeviceDenseVector<T>::resize(size_t size)
 {
+#ifndef UIPC_DLAN_COMPAT
     if(m_descr)
     {
         checkCudaErrors(cusparseDestroyDnVec(m_descr));
@@ -69,19 +78,29 @@ void DeviceDenseVector<T>::resize(size_t size)
 
     checkCudaErrors(
         cusparseCreateDnVec(&m_descr, size, m_data.data(), cuda_data_type<T>()));
+#else
+    m_data.resize(size);
+    m_descr = nullptr;
+#endif
 }
 template <typename T>
 void DeviceDenseVector<T>::unsafe_resize_no_construct(size_t size)
 {
+#ifndef UIPC_DLAN_COMPAT
     if(m_descr)
     {
         checkCudaErrors(cusparseDestroyDnVec(m_descr));
     }
 
+#endif
     m_data.unsafe_resize_no_construct(size);
+#ifndef UIPC_DLAN_COMPAT
 
     checkCudaErrors(
         cusparseCreateDnVec(&m_descr, size, m_data.data(), cuda_data_type<T>()));
+#else
+    m_descr = nullptr;
+#endif
 }
 template <typename T>
 void DeviceDenseVector<T>::fill(T value)

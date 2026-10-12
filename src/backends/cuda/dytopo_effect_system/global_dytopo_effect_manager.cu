@@ -545,6 +545,15 @@ inline bool corex_matconv_trace()
     return enabled;
 }
 
+inline bool corex_matconv_deterministic_reduce()
+{
+#if defined(UIPC_DLAN_COMPAT) && UIPC_DLAN_COMPAT
+    return true;
+#else
+    return false;
+#endif
+}
+
 inline void corex_matconv_sync_if_needed(const char* name)
 {
     if(!corex_matconv_trace())
@@ -1002,6 +1011,39 @@ static __global__ void kernel_segmental_reduce_3x3_blocked(int N,
     }
 }
 
+static __global__ void kernel_segmental_reduce_3x3_serial(int N,
+                                                          const int* unique_counts,
+                                                          const int* offsets,
+                                                          const BlockT3* in_blocks,
+                                                          BlockT3* out_blocks,
+                                                          int      out_count)
+{
+    int seg = blockIdx.x * blockDim.x + threadIdx.x;
+    if(seg >= out_count)
+        return;
+
+    int begin = offsets[seg];
+    int count = unique_counts[seg];
+    int end   = begin + count;
+
+    Float sum[9] = {};
+    if(begin >= 0 && count > 0 && begin < N)
+    {
+        if(end > N)
+            end = N;
+        for(int i = begin; i < end; ++i)
+        {
+            const Float* src = reinterpret_cast<const Float*>(in_blocks + i);
+            for(int k = 0; k < 9; ++k)
+                sum[k] += src[k];
+        }
+    }
+
+    Float* dst = reinterpret_cast<Float*>(out_blocks + seg);
+    for(int k = 0; k < 9; ++k)
+        dst[k] = sum[k];
+}
+
 static __global__ void kernel_segmental_reduce_3x3_hybrid_small(int N,
                                                                 const int* segment_ids,
                                                                 const int* unique_counts,
@@ -1128,6 +1170,19 @@ void launch_segmental_reduce_3x3_blocked(int N, const int* segment_ids,
                                          BlockT3* out_blocks,
                                          int out_count)
 {
+    if(corex_matconv_deterministic_reduce())
+    {
+        if(out_count > 0)
+        {
+            MatconvPhase phase("segmental_reduce_3x3_serial");
+            kernel_segmental_reduce_3x3_serial<<<grid_for(out_count), kBlock>>>(
+                N, unique_counts, offsets, in_blocks, out_blocks, out_count);
+            checkCudaErrors(cudaGetLastError());
+            corex_matconv_sync_if_needed("segmental_reduce_3x3_serial");
+        }
+        return;
+    }
+
     (void)unique_counts;
     (void)offsets;
     launch_segmental_reduce_3x3(N, segment_ids, in_blocks, out_blocks, out_count);
@@ -1197,6 +1252,39 @@ static __global__ void kernel_segmental_reduce_3x1_blocked(int N,
         for(int k = 0; k < 3; ++k)
             dst[k] = partial[k];
     }
+}
+
+static __global__ void kernel_segmental_reduce_3x1_serial(int N,
+                                                          const int* unique_counts,
+                                                          const int*   offsets,
+                                                          const VecT3* in_vecs,
+                                                          VecT3*       out_vecs,
+                                                          int out_count)
+{
+    int seg = blockIdx.x * blockDim.x + threadIdx.x;
+    if(seg >= out_count)
+        return;
+
+    int begin = offsets[seg];
+    int count = unique_counts[seg];
+    int end   = begin + count;
+
+    Float sum[3] = {};
+    if(begin >= 0 && count > 0 && begin < N)
+    {
+        if(end > N)
+            end = N;
+        for(int i = begin; i < end; ++i)
+        {
+            const Float* src = reinterpret_cast<const Float*>(in_vecs + i);
+            for(int k = 0; k < 3; ++k)
+                sum[k] += src[k];
+        }
+    }
+
+    Float* dst = reinterpret_cast<Float*>(out_vecs + seg);
+    for(int k = 0; k < 3; ++k)
+        dst[k] = sum[k];
 }
 
 static __global__ void kernel_segmental_reduce_3x1_hybrid_small(int N,
@@ -1323,6 +1411,19 @@ void launch_segmental_reduce_3x1_blocked(int N, const int* segment_ids,
                                          VecT3* out_vecs,
                                          int out_count)
 {
+    if(corex_matconv_deterministic_reduce())
+    {
+        if(out_count > 0)
+        {
+            MatconvPhase phase("segmental_reduce_3x1_serial");
+            kernel_segmental_reduce_3x1_serial<<<grid_for(out_count), kBlock>>>(
+                N, unique_counts, offsets, in_vecs, out_vecs, out_count);
+            checkCudaErrors(cudaGetLastError());
+            corex_matconv_sync_if_needed("segmental_reduce_3x1_serial");
+        }
+        return;
+    }
+
     (void)unique_counts;
     (void)offsets;
     launch_segmental_reduce_3x1(N, segment_ids, in_vecs, out_vecs, out_count);

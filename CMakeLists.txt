@@ -26,6 +26,7 @@ option(UIPC_BUILD_BENCHMARKS "Build benchmarks" ON)
 option(UIPC_DEV_MODE "Enable developer mode" OFF)
 option(UIPC_WITH_USD_SUPPORT "Build with Universal Scene Description (USD) support" OFF)
 option(UIPC_WITH_VDB_SUPPORT "Build with Volumetric DataBase (VDB) support" OFF)
+option(UIPC_WITH_URDF_SUPPORT "Build URDF import support" ON)
 # Use float as uipc::Float everywhere (Eigen, CUDA, IPC). Recommended on Iluvatar/CoreX
 # where device double arithmetic is unreliable; default remains double for NVIDIA parity.
 option(UIPC_USE_FLOAT "Build libuipc with Float=float (single precision)" OFF)
@@ -46,9 +47,50 @@ endif()
 set(UIPC_CUDA_ARCHITECTURES "native" CACHE STRING "Setup CUDA architectures (e.g. \"75,89\" or \"native\")")
 set(UIPC_MUDA_SOURCE_DIR "" CACHE PATH "Path to an external muda source tree")
 option(UIPC_MUDA_USE_COREX "Enable Corex-specific CUDA build compatibility mode" OFF)
+option(UIPC_MUDA_USE_DLAN "Use the Corex-compatible source path with the Denglin CUDA toolchain" OFF)
 set(UIPC_COREX_CUDA_STANDARD "20" CACHE STRING "CUDA C++ standard used when UIPC_MUDA_USE_COREX=ON (20 required for std::span/ranges in headers)")
 set(UIPC_COREX_CUDA_ARCHITECTURES "ivcore11" CACHE STRING "CUDA architectures used when UIPC_MUDA_USE_COREX=ON")
 set(UIPC_COREX_CUDA_COMPILER "" CACHE FILEPATH "Path to Corex CUDA compiler (optional)")
+if(UIPC_MUDA_USE_DLAN)
+    set(UIPC_USE_FLOAT ON CACHE BOOL "Use single precision on DLAN" FORCE)
+    set(UIPC_MUDA_USE_COREX ON CACHE BOOL "Enable Corex-compatible CUDA sources" FORCE)
+    add_compile_definitions(UIPC_DLAN_COMPAT=1)
+
+    set(UIPC_DLAN_SDK_ROOT "$ENV{DLAN_SDK_ROOT}" CACHE PATH "Denglin DLAN SDK root")
+    if(NOT UIPC_DLAN_SDK_ROOT)
+        set(UIPC_DLAN_SDK_ROOT "/usr/local/dlgpu/sdk" CACHE PATH "Denglin DLAN SDK root" FORCE)
+    endif()
+
+    find_path(UIPC_DLAN_INCLUDE_DIR
+        NAMES cuda_runtime.h
+        HINTS "${UIPC_DLAN_SDK_ROOT}/include"
+        NO_DEFAULT_PATH
+        REQUIRED
+    )
+
+    foreach(_uipc_dlan_library IN ITEMS curt cublas cusparse cusolver)
+        string(TOUPPER "${_uipc_dlan_library}" _uipc_dlan_library_upper)
+        find_library(UIPC_DLAN_${_uipc_dlan_library_upper}_LIBRARY
+            NAMES "${_uipc_dlan_library}" "lib${_uipc_dlan_library}.so"
+            HINTS "${UIPC_DLAN_SDK_ROOT}/lib" "${UIPC_DLAN_SDK_ROOT}/lib64"
+            NO_DEFAULT_PATH
+            REQUIRED
+        )
+        if(_uipc_dlan_library STREQUAL "curt")
+            set(_uipc_cuda_target CUDA::cudart)
+        else()
+            set(_uipc_cuda_target "CUDA::${_uipc_dlan_library}")
+        endif()
+        if(NOT TARGET "${_uipc_cuda_target}")
+            add_library("${_uipc_cuda_target}" UNKNOWN IMPORTED GLOBAL)
+            set_target_properties("${_uipc_cuda_target}" PROPERTIES
+                IMPORTED_LOCATION "${UIPC_DLAN_${_uipc_dlan_library_upper}_LIBRARY}"
+                INTERFACE_INCLUDE_DIRECTORIES "${UIPC_DLAN_INCLUDE_DIR}"
+            )
+        endif()
+    endforeach()
+endif()
+
 if(UIPC_MUDA_USE_COREX)
     if(UIPC_COREX_CUDA_ARCHITECTURES)
         set(CMAKE_CUDA_ARCHITECTURES "${UIPC_COREX_CUDA_ARCHITECTURES}" CACHE STRING "CUDA architectures" FORCE)

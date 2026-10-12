@@ -13,6 +13,17 @@
 
 namespace uipc::core::internal
 {
+using DylibModule = ::dylib::library;
+namespace fs      = std::filesystem;
+
+static S<DylibModule> load_dylib_by_dir_and_name(const std::string& module_dir,
+                                                 const std::string& module_name)
+{
+    const fs::path module_path = fs::path(module_dir) / module_name;
+    return uipc::make_shared<DylibModule>(module_path.string(),
+                                          ::dylib::decorations::os_default());
+}
+
 static string to_lower(std::string_view s)
 {
     string result{s};
@@ -24,8 +35,8 @@ class Engine::Impl
 {
     using Deleter = void (*)(IEngine*);
 
-    string   m_backend_name;
-    S<dylib> m_module;
+    string         m_backend_name;
+    S<DylibModule> m_module;
 
     IEngine*   m_engine    = nullptr;
     S<IEngine> m_overrider = nullptr;
@@ -34,10 +45,10 @@ class Engine::Impl
     mutable bool m_sync_flag = false;
     string       m_workspace;
 
-    static unordered_map<string, S<dylib>> m_cache;
-    static std::mutex                      m_cache_mutex;
+    static unordered_map<string, S<DylibModule>> m_cache;
+    static std::mutex                            m_cache_mutex;
 
-    static S<dylib> load_module(std::string_view backend_name)
+    static S<DylibModule> load_module(std::string_view backend_name)
     {
         std::lock_guard lock{m_cache_mutex};
 
@@ -49,18 +60,23 @@ class Engine::Impl
         // if not found, load it
         auto& uipc_config = uipc::config();
         auto  backend =
-            uipc::make_shared<dylib>(uipc_config["module_dir"].get<std::string>(),
-                                     fmt::format("uipc_backend_{}", backend_name));
+            load_dylib_by_dir_and_name(uipc_config["module_dir"].get<std::string>(),
+                                       fmt::format("uipc_backend_{}", backend_name));
 
         auto info             = make_unique<UIPCModuleInitInfo>();
         info->module_name     = backend_name;
         info->memory_resource = std::pmr::get_default_resource();
 
-        auto init = backend->get_function<void(UIPCModuleInitInfo*)>("uipc_init_module");
-        if(!init)
+        try
+        {
+            auto init = backend->get_function<void(UIPCModuleInitInfo*)>("uipc_init_module");
+            init(info.get());
+        }
+        catch(const ::dylib::symbol_error&)
+        {
             throw Exception{fmt::format("Can't find backend [{}]'s module initializer.",
                                         backend_name)};
-        init(info.get());
+        }
 
         return m_cache[std::string{backend_name}] = backend;
     }
@@ -69,8 +85,6 @@ class Engine::Impl
     Impl(std::string_view backend_name, std::string_view workspace, const Json& config)
         : m_backend_name(to_lower(backend_name))
     {
-        namespace fs = std::filesystem;
-
         auto& uipc_config = uipc::config();
 
         m_module = load_module(m_backend_name);
@@ -85,24 +99,25 @@ class Engine::Impl
             throw EngineException{fmt::format("Workspace [{}] is not a directory.", workspace)};
         }
 
-        auto creator = m_module->get_function<IEngine*(EngineCreateInfo*)>("uipc_create_engine");
-        if(!creator)
-            throw EngineException{fmt::format("Can't find backend [{}]'s engine creator.",
-                                              backend_name)};
-
         EngineCreateInfo info;
         info.workspace = m_workspace;
         info.config    = config;
+        try
         {
-            // guard the creation
-            LogPatternGuard guard{backend_name};
-            m_engine = creator(&info);
-        }
+            auto creator = m_module->get_function<IEngine*(EngineCreateInfo*)>("uipc_create_engine");
+            {
+                // guard the creation
+                LogPatternGuard guard{backend_name};
+                m_engine = creator(&info);
+            }
 
-        m_deleter = m_module->get_function<void(IEngine*)>("uipc_destroy_engine");
-        if(!m_deleter)
-            throw EngineException{fmt::format("Can't find backend [{}]'s engine deleter.",
+            m_deleter = m_module->get_function<void(IEngine*)>("uipc_destroy_engine");
+        }
+        catch(const ::dylib::symbol_error&)
+        {
+            throw EngineException{fmt::format("Backend [{}] is missing an engine entry point.",
                                               backend_name)};
+        }
     }
 
     Impl(std::string_view backend_name, S<IEngine> overrider, std::string_view workspace, const Json& config)
@@ -198,8 +213,8 @@ class Engine::Impl
     }
 };
 
-unordered_map<string, S<dylib>> Engine::Impl::m_cache;
-std::mutex                      Engine::Impl::m_cache_mutex;
+unordered_map<string, S<DylibModule>> Engine::Impl::m_cache;
+std::mutex                            Engine::Impl::m_cache_mutex;
 
 
 Engine::Engine(std::string_view backend_name, std::string_view workspace, const Json& config)

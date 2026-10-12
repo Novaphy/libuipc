@@ -411,6 +411,33 @@ MUDA_INLINE MUDA_HOST Memory& Memory::free(cudaPitchedPtr pitched_ptr, bool asyn
 
 MUDA_INLINE MUDA_HOST Memory& Memory::copy(const cudaMemcpy3DParms& parms)
 {
+#ifdef UIPC_DLAN_COMPAT
+    // DLAN rejects cudaMemcpy3DAsync for pitched host/device transfers whose
+    // depth is one.  These are ordinary 2-D copies (the path used by IPC's
+    // contact/subscene tables), so submit the equivalent 2-D operation while
+    // preserving byte offsets and pitches exactly.
+    if(!parms.srcArray && !parms.dstArray && parms.extent.depth == 1)
+    {
+        if(parms.extent.width == 0 || parms.extent.height == 0)
+            return *this;
+
+        const auto* src = static_cast<const char*>(parms.srcPtr.ptr)
+                          + parms.srcPos.z * parms.srcPtr.pitch * parms.srcPtr.ysize
+                          + parms.srcPos.y * parms.srcPtr.pitch + parms.srcPos.x;
+        auto* dst = static_cast<char*>(parms.dstPtr.ptr)
+                    + parms.dstPos.z * parms.dstPtr.pitch * parms.dstPtr.ysize
+                    + parms.dstPos.y * parms.dstPtr.pitch + parms.dstPos.x;
+        checkCudaErrors(cudaMemcpy2DAsync(dst,
+                                          parms.dstPtr.pitch,
+                                          src,
+                                          parms.srcPtr.pitch,
+                                          parms.extent.width,
+                                          parms.extent.height,
+                                          parms.kind,
+                                          stream()));
+        return *this;
+    }
+#endif
     if constexpr(COMPUTE_GRAPH_ON)
     {
         ComputeGraphBuilder::invoke_phase_actions(

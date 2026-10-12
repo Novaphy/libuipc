@@ -4,20 +4,13 @@
 #include <uipc/common/timer.h>
 #include <cub/block/block_reduce.cuh>
 #include <cub/warp/warp_reduce.cuh>
-#include <algorithm>
 #include <cmath>
-#include <limits>
 namespace uipc::backend::cuda
 {
 REGISTER_SIM_SYSTEM(LinearFusedPCG);
 
 namespace
 {
-constexpr Float fused_pcg_zero_tol()
-{
-    return Float(64) * std::numeric_limits<Float>::epsilon();
-}
-
 constexpr Float fused_pcg_tol_floor()
 {
 #if defined(UIPC_FLOAT_SCALAR) && UIPC_FLOAT_SCALAR
@@ -529,10 +522,12 @@ SizeT LinearFusedPCG::fused_pcg(muda::DenseVectorView<Float>  x,
     Float abs_rz0 = std::abs(rz_host);
     Float init_norm_r = norm_r_host;
 
-    if(norm_b <= fused_pcg_zero_tol())
+    // Keep stopping relative to the nonzero RHS: an absolute epsilon floor
+    // can incorrectly discard small but physically meaningful Newton steps.
+    if(norm_b == Float{0})
         return 0;
 
-    Float r_tol = std::max(global_tol_rate * norm_b, fused_pcg_zero_tol());
+    Float r_tol = global_tol_rate * norm_b;
     if(norm_r_host <= r_tol)
         return 0;
 

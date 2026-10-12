@@ -24,8 +24,8 @@ constexpr bool operator==(const MatrixConverterIntPair& l, const MatrixConverter
 template <typename T, int N>
 class MatrixConverter
 {
-    using BlockMatrix   = muda::DeviceTripletMatrix<T, N>::ValueT;
-    using SegmentVector = muda::DeviceDoubletVector<T, N>::ValueT;
+    using BlockMatrix   = typename muda::DeviceTripletMatrix<T, N>::ValueT;
+    using SegmentVector = typename muda::DeviceDoubletVector<T, N>::ValueT;
 
     Float m_reserve_ratio = 1.5;
 

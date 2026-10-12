@@ -15,9 +15,10 @@ class TripletMatrixUnpacker
     }
 
     template <int M, int N>
-        requires(M >= 1 && N >= 1)
     class ProxyRange
     {
+        static_assert(M >= 1 && N >= 1);
+
       public:
         MUDA_HOST MUDA_DEVICE ProxyRange(const TripletMatrixUnpacker& unpacker, IndexT I)
             : m_unpacker(unpacker)
@@ -88,9 +89,10 @@ class TripletMatrixUnpacker
     };
 
     template <int N>
-        requires(N >= 1)
     class ProxyRangeHalf
     {
+        static_assert(N >= 1);
+
       public:
         struct UpperIJ
         {
@@ -230,9 +232,10 @@ class TripletMatrixUnpacker
     }
 
     template <int M, int N>
-        requires(M >= 1 && N >= 1)
     class ProxyRange
     {
+        static_assert(M >= 1 && N >= 1);
+
       public:
         MUDA_GENERIC ProxyRange(const TripletMatrixUnpacker& unpacker, IndexT I)
             : m_unpacker(unpacker)
@@ -303,9 +306,10 @@ class TripletMatrixUnpacker
     };
 
     template <int N>
-        requires(N >= 1)
     class ProxyRangeHalf
     {
+        static_assert(N >= 1);
+
       public:
         struct UpperIJ
         {

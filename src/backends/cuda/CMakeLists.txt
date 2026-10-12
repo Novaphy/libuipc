@@ -18,7 +18,9 @@ endif()
 set(CMAKE_CUDA_ARCHITECTURES ${_uipc_cuda_architectures})
 uipc_info("CMAKE_CUDA_ARCHITECTURES: ${CMAKE_CUDA_ARCHITECTURES}.")
 enable_language(CUDA)
-find_package(CUDAToolkit REQUIRED)
+if(NOT UIPC_MUDA_USE_DLAN)
+    find_package(CUDAToolkit REQUIRED)
+endif()
 
 # ------------------------------------------------------------------------------
 # CUDA Backend
@@ -81,7 +83,9 @@ if(UIPC_MUDA_USE_COREX)
     target_compile_definitions(cuda PUBLIC UIPC_COREX_CUDA10_COMPAT=1)
     # Corex 4.4 exposes cudaMallocAsync/cudaFreeAsync while reporting CUDA 10.2.
     # This is the sole CoreX memory-management policy for production builds.
-    target_compile_definitions(cuda PUBLIC UIPC_COREX_ASYNC_MEMORY=1)
+    if(NOT UIPC_MUDA_USE_DLAN)
+        target_compile_definitions(cuda PUBLIC UIPC_COREX_ASYNC_MEMORY=1)
+    endif()
     # Clang/Corex may not define __CUDA_ARCH__ during device compilation; force
     # MUDA_GENERIC to __host__ __device__ so device kernels can call shared helpers.
     target_compile_definitions(cuda PRIVATE MUDA_FORCE_HD_GENERIC=1)
@@ -116,10 +120,25 @@ if(CMAKE_CUDA_COMPILER_ID STREQUAL "Clang" OR CMAKE_CUDA_COMPILER_ID STREQUAL "I
         CUDA_RESOLVE_DEVICE_SYMBOLS OFF
     )
     target_compile_options(cuda PRIVATE
-        $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-x ivcore>
         $<$<COMPILE_LANGUAGE:CUDA>:-std=c++${_uipc_cuda_standard}>
-        $<$<COMPILE_LANGUAGE:CUDA>:--diag_suppress=20012,1388,27,174,1394,997,1866,69,177,554,20014,2361,20011,940,55,221,1028>
     )
+    if(NOT UIPC_MUDA_USE_DLAN)
+        target_compile_options(cuda PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-x ivcore>
+            $<$<COMPILE_LANGUAGE:CUDA>:--diag_suppress=20012,1388,27,174,1394,997,1866,69,177,554,20014,2361,20011,940,55,221,1028>
+        )
+    else()
+        # DLAN's Clang reports the CUDA-10 compatibility fallbacks in every
+        # translation unit.  They are known, non-fatal SDK/header warnings and
+        # otherwise obscure actionable porting errors in build logs.
+        target_compile_options(cuda PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/dlan_cuda_compat.h>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Wno-switch>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Wno-deprecated-declarations>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Wno-redeclared-class-member>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Wno-format-security>
+        )
+    endif()
 else()
     target_compile_options(cuda PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:-std=c++${_uipc_cuda_standard}>

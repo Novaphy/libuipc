@@ -4,6 +4,7 @@
 #include <muda/buffer/buffer_view.h>
 #include <Eigen/Core>
 #include <cub/util_type.cuh>
+#include <cuda/std/functional>
 #include <thrust/functional.h>
 namespace muda
 {

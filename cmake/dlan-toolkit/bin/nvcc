@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DLAN_SDK="${DLAN_SDK_ROOT:-/usr/local/dlgpu/sdk}"
+# CMake discovery only: DLAN ships device libraries with clang, not nvvm.
+if [[ " $* " == *" __cmake_determine_cuda "* ]]; then
+    printf '#$ TOP=%s\n' "${DLAN_SDK}" >&2
+    printf '#$ NVVMIR_LIBRARY_DIR=%s/nvvm/libdevice\n' "${DLAN_SDK}" >&2
+    exit 0
+fi
+exec "${DLAN_SDK}/bin/nvcc" "$@"

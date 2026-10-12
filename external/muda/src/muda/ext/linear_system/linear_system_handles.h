@@ -52,6 +52,13 @@ class LinearSystemHandles
 
     void ensure_cusolver_sp() const
     {
+#ifdef UIPC_DLAN_COMPAT
+        // The DLAN SDK does not provide the optional cuSolverSP API.  libuipc's
+        // IPC backend uses the iterative PCG path, so no sparse-direct handle
+        // is required there.  Keep the handle null instead of leaving strong
+        // references to unavailable cusolverSp symbols in the backend DSO.
+        m_cusolver_sp = nullptr;
+#else
         if(!m_cusolver_sp)
         {
             auto cusolver_sp_status = cusolverSpCreate(&m_cusolver_sp);
@@ -63,6 +70,7 @@ class LinearSystemHandles
                 checkCudaErrors(cusolverSpSetStream(m_cusolver_sp, m_stream));
             }
         }
+#endif
     }
 
   public:
@@ -78,8 +86,10 @@ class LinearSystemHandles
             checkCudaErrors(cublasDestroy(m_cublas));
         if(m_cusolver_dn)
             checkCudaErrors(cusolverDnDestroy(m_cusolver_dn));
+#ifndef UIPC_DLAN_COMPAT
         if(m_cusolver_sp)
             checkCudaErrors(cusolverSpDestroy(m_cusolver_sp));
+#endif
     }
 
     void stream(cudaStream_t s)
@@ -91,17 +101,21 @@ class LinearSystemHandles
             checkCudaErrors(cublasSetStream(m_cublas, m_stream));
         if(m_cusolver_dn)
             checkCudaErrors(cusolverDnSetStream(m_cusolver_dn, m_stream));
+#ifndef UIPC_DLAN_COMPAT
         if(m_cusolver_sp)
             checkCudaErrors(cusolverSpSetStream(m_cusolver_sp, m_stream));
+#endif
     }
 
     MUDA_INLINE void set_pointer_mode_device()
     {
         if(m_pointer_mode_device)
             return;
+#ifndef UIPC_DLAN_COMPAT
         ensure_cusparse();
-        ensure_cublas();
         checkCudaErrors(cusparseSetPointerMode(m_cusparse, CUSPARSE_POINTER_MODE_DEVICE));
+#endif
+        ensure_cublas();
         checkCudaErrors(cublasSetPointerMode(m_cublas, CUBLAS_POINTER_MODE_DEVICE));
         m_pointer_mode_device = true;
     }
@@ -110,9 +124,11 @@ class LinearSystemHandles
     {
         if(!m_pointer_mode_device)
             return;
+#ifndef UIPC_DLAN_COMPAT
         ensure_cusparse();
-        ensure_cublas();
         checkCudaErrors(cusparseSetPointerMode(m_cusparse, CUSPARSE_POINTER_MODE_HOST));
+#endif
+        ensure_cublas();
         checkCudaErrors(cublasSetPointerMode(m_cublas, CUBLAS_POINTER_MODE_HOST));
         m_pointer_mode_device = false;
     }

@@ -1,8 +1,7 @@
 name: CoreX PR
 
 on:
-  pull_request:
-    branches: ["**"]
+  # Keep Iluvatar/CoreX validation available explicitly; PRs use DLAN PR.
   workflow_dispatch:
 
 concurrency:

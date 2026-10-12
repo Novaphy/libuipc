@@ -71,6 +71,12 @@ class DeviceBCOOVector<T, 1> : public DeviceDoubletVector<T, 1>
 
     auto descr() const
     {
+#ifdef UIPC_DLAN_COMPAT
+        // DLAN's cuSPARSE compatibility library has no SpVec descriptor API.
+        // SolverIPC does not use this optional scalar BCOO-vector descriptor;
+        // returning null also prevents accidental use from looking valid.
+        return static_cast<cusparseSpVecDescr_t>(nullptr);
+#else
         if(!m_descr)
         {
             checkCudaErrors(cusparseCreateSpVec(
@@ -84,16 +90,21 @@ class DeviceBCOOVector<T, 1> : public DeviceDoubletVector<T, 1>
                 cuda_data_type<T>()));
         }
         return m_descr;
+#endif
     }
 
   private:
     void destroy_descr() const
     {
+#ifdef UIPC_DLAN_COMPAT
+        m_descr = nullptr;
+#else
         if(m_descr)
         {
             checkCudaErrors(cusparseDestroySpVec(m_descr));
             m_descr = nullptr;
         }
+#endif
     }
 };
 

@@ -17,7 +17,9 @@ endif()
 # ----------------------------------------------------------------------------
 # muda
 # ----------------------------------------------------------------------------
-find_package(CUDAToolkit REQUIRED)
+if(NOT UIPC_MUDA_USE_DLAN)
+    find_package(CUDAToolkit REQUIRED)
+endif()
 enable_language(CUDA)
 
 add_library(muda INTERFACE)

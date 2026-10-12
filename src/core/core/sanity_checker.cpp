@@ -10,14 +10,18 @@
 #include <uipc/core/internal/scene.h>
 #include <uipc/core/world.h>
 #include <uipc/core/engine.h>
+#include <filesystem>
 
 namespace uipc::core
 {
-static S<dylib> load_sanity_check_module(std::string_view module_name)
+using DylibModule = ::dylib::library;
+namespace fs      = std::filesystem;
+
+static S<DylibModule> load_sanity_check_module(std::string_view module_name)
 {
     // Cache per module name
-    static std::mutex                            cache_mutex;
-    static unordered_map<std::string, S<dylib>>  cache;
+    static std::mutex                                 cache_mutex;
+    static unordered_map<std::string, S<DylibModule>> cache;
 
     std::lock_guard lock{cache_mutex};
 
@@ -27,20 +31,26 @@ static S<dylib> load_sanity_check_module(std::string_view module_name)
         return it->second;
 
     // load the module
-    auto& uipc_config = uipc::config();
-    auto  this_module =
-        uipc::make_shared<dylib>(uipc_config["module_dir"].get<std::string>(),
-                                 key);
+    auto&          uipc_config = uipc::config();
+    const fs::path module_path =
+        fs::path(uipc_config["module_dir"].get<std::string>()) / key;
+    auto this_module =
+        uipc::make_shared<DylibModule>(module_path.string(),
+                                       ::dylib::decorations::os_default());
 
     UIPCModuleInitInfo info;
     info.module_name     = key;
     info.memory_resource = std::pmr::get_default_resource();
 
-    auto init = this_module->get_function<void(UIPCModuleInitInfo*)>("uipc_init_module");
-    if(!init)
+    try
+    {
+        auto init = this_module->get_function<void(UIPCModuleInitInfo*)>("uipc_init_module");
+        init(&info);
+    }
+    catch(const ::dylib::symbol_error&)
+    {
         throw Exception{fmt::format("Can't find [{}]'s module initializer.", module_name)};
-
-    init(&info);
+    }
 
     cache[key] = this_module;
     return this_module;
@@ -61,23 +71,18 @@ SanityCheckResult SanityChecker::check()
     constexpr std::string_view cpu_module_name = "uipc_sanity_check";
 
     auto sanity_check_module = load_sanity_check_module(cpu_module_name);
-    auto creator =
-        sanity_check_module->get_function<ISanityCheckerCollection*(SanityCheckerCollectionCreateInfo*)>(
+    ISanityCheckerCollection* (*creator)(SanityCheckerCollectionCreateInfo*) = nullptr;
+    void (*destroyer)(ISanityCheckerCollection*) = nullptr;
+    try
+    {
+        creator = sanity_check_module->get_function<ISanityCheckerCollection*(SanityCheckerCollectionCreateInfo*)>(
             "uipc_create_sanity_checker_collection");
-
-    if(!creator)
-    {
-        logger::error("Can't find [{}]'s sanity checker creator, so we skip sanity check.",
-                      cpu_module_name);
-        return SanityCheckResult::Error;
+        destroyer = sanity_check_module->get_function<void(ISanityCheckerCollection*)>(
+            "uipc_destroy_sanity_checker_collection");
     }
-
-    auto destroyer = sanity_check_module->get_function<void(ISanityCheckerCollection*)>(
-        "uipc_destroy_sanity_checker_collection");
-
-    if(!destroyer)
+    catch(const ::dylib::symbol_error&)
     {
-        logger::error("Can't find [{}]'s sanity checker destroyer, so we skip sanity check.",
+        logger::error("Can't find [{}]'s sanity checker creator/destroyer, so we skip sanity check.",
                       cpu_module_name);
         return SanityCheckResult::Error;
     }

@@ -56,6 +56,7 @@ function(uipc_show_options)
     message(STATUS "    * UIPC_USD_INSTALL_DIR: ${UIPC_USD_INSTALL_DIR}")
 
     message(STATUS "    * UIPC_WITH_VDB_SUPPORT: ${UIPC_WITH_VDB_SUPPORT}")
+    message(STATUS "    * UIPC_WITH_URDF_SUPPORT: ${UIPC_WITH_URDF_SUPPORT}")
     message(STATUS "    * UIPC_PYTHON_EXECUTABLE_PATH: ${UIPC_PYTHON_EXECUTABLE_PATH}")
     message(STATUS "    * UIPC_USE_FLOAT: ${UIPC_USE_FLOAT}")
 
@@ -107,6 +108,12 @@ endfunction()
 # checking. Only check and install the packages first time.
 # -----------------------------------------------------------------------------------------
 function(uipc_config_vcpkg_install)
+    # A parent project owns its manifest, install tree and dependency policy.
+    # Re-running vcpkg here would overwrite its explicitly selected paths.
+    if(NOT CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+        return()
+    endif()
+
     set(VCPKG_MANIFEST_DIR "${CMAKE_CURRENT_BINARY_DIR}")
     set(VCPKG_MANIFEST_FILE "${VCPKG_MANIFEST_DIR}/vcpkg.json")
     if ("${CMAKE_TOOLCHAIN_FILE}" STREQUAL "")
@@ -125,6 +132,7 @@ function(uipc_config_vcpkg_install)
         "--dev_mode=${UIPC_DEV_MODE}" # pass the UIPC_DEV_MODE as argument
         "--with_usd_support=${UIPC_WITH_USD_SUPPORT}" # pass the UIPC_WITH_USD_SUPPORT as argument
         "--with_vdb_support=${UIPC_WITH_VDB_SUPPORT}" # pass the UIPC_WITH_VDB_SUPPORT as argument
+        "--with_urdf_support=${UIPC_WITH_URDF_SUPPORT}" # pass the UIPC_WITH_URDF_SUPPORT argument
         "--with_cuda_backend=${UIPC_WITH_CUDA_BACKEND}" # pass the UIPC_WITH_CUDA_BACKEND as argument
         OUTPUT_VARIABLE VCPKG_JSON_GENERATE_OUTPUT
         RESULT_VARIABLE VCPKG_JSON_GENERATE_RESULT
@@ -149,8 +157,9 @@ function(uipc_config_vcpkg_install)
     if(UIPC_USING_LOCAL_VCPKG)
         set(VCPKG_INSTALLED_DIR "${CMAKE_BINARY_DIR}/vcpkg_installed")
     else()
-        if (DEFINED $ENV{VCPKG_ROOT})
-            set(VCPKG_INSTALLED_DIR "$ENV{VCPKG_ROOT}/installed")
+        if(DEFINED ENV{VCPKG_ROOT} AND NOT "$ENV{VCPKG_ROOT}" STREQUAL "")
+            file(TO_CMAKE_PATH "$ENV{VCPKG_ROOT}" _uipc_vcpkg_root)
+            set(VCPKG_INSTALLED_DIR "${_uipc_vcpkg_root}/installed")
         else()
             uipc_error("When using system vcpkg (UIPC_USING_LOCAL_VCPKG=${UIPC_USING_LOCAL_VCPKG}), please set the VCPKG_ROOT environment variable to the vcpkg root directory.")
         endif()

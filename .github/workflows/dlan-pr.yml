@@ -1,0 +1,62 @@
+name: DLAN PR
+
+on:
+  # Run the scripts directly without registering a GitHub Actions runner.
+  # Dispatch this workflow only when a Denglin runner is available.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dlan-pr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-physics:
+    runs-on: [self-hosted, linux, x64, dlan]
+    timeout-minutes: 90
+    env:
+      DLAN_SDK_ROOT: ${{ vars.DLAN_SDK_ROOT || '/usr/local/dlgpu/sdk' }}
+      VCPKG_ROOT: ${{ vars.LIBUIPC_VCPKG_ROOT || '/opt/vcpkg' }}
+      UIPC_DLAN_ARCH: ${{ vars.UIPC_DLAN_ARCH || 'dlgput64' }}
+      CMAKE_BUILD_PARALLEL_LEVEL: '4'
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Prepare DLAN SDK and build tools
+        run: |
+          mkdir -p artifacts/dlan
+          test -x "$DLAN_SDK_ROOT/bin/clang++"
+          test -f "$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+          DLAN_VENV="$RUNNER_TEMP/libuipc-dlan-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          python3 -m venv "$DLAN_VENV"
+          echo "PYTHON=$DLAN_VENV/bin/python" >> "$GITHUB_ENV"
+          echo "$DLAN_VENV/bin" >> "$GITHUB_PATH"
+          echo "$DLAN_SDK_ROOT/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=$DLAN_SDK_ROOT/lib:$DLAN_SDK_ROOT/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          "$DLAN_VENV/bin/python" -m pip install cmake ninja
+          git rev-parse HEAD > artifacts/dlan/revision.txt
+          "$DLAN_SDK_ROOT/bin/clang++" --version > artifacts/dlan/compiler.txt
+          if command -v dlsmi >/dev/null; then
+            dlsmi > artifacts/dlan/devices.txt
+          fi
+
+      - name: Build this libuipc revision with DLAN and FP32
+        run: scripts/build_dlan.sh
+
+      - name: Verify GPU physics (no fallback or skipped tests)
+        run: scripts/test_dlan.sh
+
+      - name: Upload build and physics evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: libuipc-dlan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/dlan/
+          if-no-files-found: warn
